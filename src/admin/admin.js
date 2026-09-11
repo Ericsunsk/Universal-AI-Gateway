@@ -71,7 +71,7 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
     const bal = await fleet.getBalance();
 
     return new Response(JSON.stringify({
-      service: "workbuddy-gateway",
+      service: "worker-ai-gateway",
       version: "2.1.0",
       time: new Date().toISOString(),
       balance: bal.balance,
