@@ -364,10 +364,16 @@ export async function dispatchExchange({
           upstreamRes = await provider.callMessages({ ...body, model: candidate.model });
         } else {
           const openaiPayload = transformAnthropicToOpenAI(body, candidate.model);
+          if (provider.type === "workbuddy") {
+            openaiPayload.stream = true;
+          }
           upstreamRes = await provider.callChat(openaiPayload);
         }
       } else {
         const openaiPayload = { ...body, model: candidate.model };
+        if (provider.type === "workbuddy") {
+          openaiPayload.stream = true;
+        }
         if (openaiPayload.messages) {
           openaiPayload.messages = sanitizeMessages(openaiPayload.messages);
         }
