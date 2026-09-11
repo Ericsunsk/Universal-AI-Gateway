@@ -1,4 +1,3 @@
-import { DASHBOARD_HTML } from "./dashboard.html.js";
 import { getConfig, saveConfig, VERSION } from "../config.js";
 import { corsHeaders } from "../engine/exchange.js";
 
@@ -6,11 +5,56 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // 网页管理面板入口（直接返回 HTML，由前端携带 Master Key 访问 API）
+  // Agent-Native 自解释规范与索引（供 AI 智能体直接读取与调用）
   if (path === "/admin" || path === "/admin/") {
-    return new Response(DASHBOARD_HTML, {
+    return new Response(JSON.stringify({
+      service: "worker-ai-gateway",
+      version: VERSION,
+      mode: "agent-native",
+      description: "Cloudflare Worker AI Gateway Management API for Autonomous Agents",
+      auth: {
+        type: "Bearer Token or x-api-key",
+        required_key: "MASTER_KEY",
+        header: "Authorization: Bearer <MASTER_KEY>"
+      },
+      endpoints: [
+        {
+          path: "/admin/api/config",
+          methods: ["GET", "POST"],
+          description: "Read or update gateway routing, providers, and virtual keys JSON in KV",
+          requires_auth: true
+        },
+        {
+          path: "/admin/api/status",
+          methods: ["GET"],
+          description: "Check real-time aggregated balance, accounts status, and last checkin logs",
+          requires_auth: true
+        },
+        {
+          path: "/admin/api/checkin",
+          methods: ["POST"],
+          description: "Trigger manual daily checkin across all active multi-account pools",
+          requires_auth: true
+        },
+        {
+          path: "/admin/api/refresh",
+          methods: ["POST"],
+          description: "Force refresh all cached and stored access tokens",
+          requires_auth: true
+        }
+      ],
+      public_endpoints: [
+        { path: "/healthz", method: "GET", description: "Worker liveness heartbeat" },
+        { path: "/status", method: "GET", description: "Public health and balance summary" },
+        { path: "/v1/usage", method: "GET", description: "CC-Switch compatible credit inquiry (requires API Key)" },
+        { path: "/v1/models", method: "GET", description: "OpenAI-compatible models catalog (requires API Key)" },
+        { path: "/v1/messages", method: "POST", description: "Anthropic Messages protocol exchange (Claude Code)" },
+        { path: "/v1/chat/completions", method: "POST", description: "OpenAI Chat Completions protocol exchange" }
+      ],
+      authenticated: !!authResult?.ok && !!authResult?.principal?.isMaster
+    }, null, 2), {
       status: 200,
-      headers: { "Content-Type": "text/html; charset=utf-8" }
+      headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
     });
   }
 

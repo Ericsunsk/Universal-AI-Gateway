@@ -35,7 +35,7 @@
 | **每日领积分** | 容易忘记签到导致积分耗尽 | **自动签到**：Cloudflare Cron 每日两次自动执行签到，结果入库 KV |
 | **CC-Switch 余额显示** | 无法显示 WorkBuddy 积分 | **专属端点**：提供 `/v1/usage`，配合脚本无缝在 CC-Switch 显示剩余积分 |
 | **11128 关键字拦截** | Claude Code 无法调用 WorkBuddy | **快速短路脱敏**：独家指纹脱敏，O(1) 短路探测，彻底规避风控拦截 |
-| **配置热更新** | 必须重新部署代码 | **内置 Web 控制台**：访问 `/admin` 随时热编辑模型映射与密钥，改动秒级生效 |
+| **配置热更新** | 必须重新部署代码 | **Agent-Native 控制台**：访问 `/admin` 自解释规范，AI 智能体直接读取与热更新配置，改动秒级生效 |
 | **响应延迟** | 每次查 KV 额外浪费 30~80ms | **L1 内存热缓存**：内存级 0.001ms 直出，节省 98% KV 读配额 |
 
 ---
@@ -61,7 +61,7 @@ flowchart TD
     subgraph Storage ["动态存储与运维后台"]
         KV[("Cloudflare KV<br/>(GATEWAY_CONFIG / 运行状态)")] <--> Gate
         KV <--> Fleet
-        Admin["🖥️ Web 管理控制台 (/admin)"] --> KV
+        Admin["🤖 Agent-Native 控制台 (/admin)"] --> KV
         Cron["⏰ Cloudflare Cron Triggers<br/>(每日自动签到 & 保活)"] --> Fleet
     end
 ```
@@ -204,15 +204,14 @@ claude
 
 ---
 
-## 🖥️ Web 管理控制台 (`/admin`)
+## 🤖 Agent-Native 智能体控制台 (`/admin`)
 
-访问 `https://你的worker域名.workers.dev/admin`，输入配置的 `MASTER_KEY`：
+网关专为 **AI 智能体与自动化运维** 设计，彻底移除了冗余的人类 Web 前端，获取极致的轻量化与边缘冷启动性能：
 
-* 📊 **系统监控**：当前可用积分余额、总额度、最后一次自动签到时间与返回结果。
-* 🔌 **渠道管理**：一键启用/停用上游 Provider（WorkBuddy、OpenRouter、DeepSeek 等）。
-* 🔀 **路由与 Fallback**：可视化调整模型对应的上游优先级链路，实时拖拽排序。
-* 🔑 **虚拟 API Key**：分发给 Cursor、Claude Code、CC-Switch 等不同工具的独立子 Key，支持单独配置模型白名单。
-* ⚡ **运维工具**：网页端一键手动触发签到、强制刷新 Token。
+* 🧭 **自解释规范 (`GET /admin`)**：公开返回网关完整的 API 规范、鉴权指引与端点索引，Agent 可自主理解并操作。
+* 📝 **配置热读写 (`GET/POST /admin/api/config`)**：携带 `MASTER_KEY` 直接读写全量 JSON 配置，包含上游提供商、模型路由链路与虚拟客户端密钥，KV 秒级热更新生效。
+* 📊 **状态监控 (`GET /admin/api/status`)**：获取聚合积分余额、账号池健康度、最后签到记录及当前可用模型数。
+* ⚡ **运维控制 (`POST /admin/api/checkin` & `POST /admin/api/refresh`)**：一键对多账号池执行每日签到或强制刷新 AccessToken。
 
 ---
 
@@ -224,7 +223,7 @@ claude
 | `/v1/chat/completions` | `POST` | Virtual Key / Master Key | 标准 OpenAI 对话接口（适配 Cursor / NextChat） |
 | `/v1/models` | `GET` | Virtual Key / Master Key | 返回当前网关已配置的所有可用模型列表 |
 | `/v1/usage` | `GET` | Virtual Key / Master Key | CC-Switch 专用的实时积分/额度查询接口 |
-| `/admin` | `GET` | 公开（网页内输入 Master Key） | 内置单页可视化 Web 控制台 |
+| `/admin` | `GET` | 公开 | Agent-Native 自解释规范与端点导航索引 |
 | `/admin/api/*` | `*` | Master Key Required | 管理后台后端 REST API（配置热存、状态查询、运维动作） |
 | `/status` | `GET` | 公开 | Worker 运行状态与最近签到日志健康检查 |
 | `/checkin` | `POST/GET` | Virtual Key / Master Key | 手动触发所有激活渠道执行签到 |
