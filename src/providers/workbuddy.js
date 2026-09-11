@@ -168,6 +168,20 @@ export class WorkBuddyProvider {
           }
         }
 
+        // 遇到 502 / 503 / 504 服务端瞬时抖动，毫秒级原地快速重试一次（避开上游偶发拥塞）
+        if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+          console.warn(`[WorkBuddy] Account "${account.name || account.id}" hit ${resp.status}, retrying in 600ms...`);
+          await new Promise(r => setTimeout(r, 600));
+          if (options.signal?.aborted) {
+            throw new DOMException("The operation was aborted", "AbortError");
+          }
+          const retryResp = await makeRequest(token);
+          if (retryResp.ok) {
+            return retryResp;
+          }
+          resp = retryResp;
+        }
+
         // 成功响应直接返回
         if (resp.ok) {
           return resp;
@@ -197,7 +211,17 @@ export class WorkBuddyProvider {
         if (err.name === "AbortError") {
           throw err; // 客户端主动中断取消，直接抛出终止
         }
-        console.warn(`[WorkBuddy] Account "${account.name || account.id}" network error: ${err.message}, switching next...`);
+        console.warn(`[WorkBuddy] Account "${account.name || account.id}" network error: ${err.message}, retrying in 600ms...`);
+        try {
+          await new Promise(r => setTimeout(r, 600));
+          if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+          const retryResp = await makeRequest(token);
+          if (retryResp.ok) return retryResp;
+          lastResponse = retryResp;
+        } catch (retryErr) {
+          if (retryErr.name === "AbortError") throw retryErr;
+          console.warn(`[WorkBuddy] Account "${account.name || account.id}" retry failed: ${retryErr.message}, switching next...`);
+        }
       }
     }
 
