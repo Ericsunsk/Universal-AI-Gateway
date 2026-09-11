@@ -23,8 +23,8 @@ export class WorkBuddyProvider {
       return memoryCachedToken;
     }
 
-    if (this.env.WORKBUDDY_KV) {
-      const cached = await this.env.WORKBUDDY_KV.get(`WB_ACCESS_TOKEN_${this.id}`) || await this.env.WORKBUDDY_KV.get("ACCESS_TOKEN");
+    if ((this.env.GATEWAY_KV || this.env.WORKBUDDY_KV)) {
+      const cached = await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).get(`WB_ACCESS_TOKEN_${this.id}`) || await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).get("ACCESS_TOKEN");
       if (cached) {
         memoryCachedToken = cached;
         memoryCachedTokenTimestamp = now;
@@ -42,8 +42,8 @@ export class WorkBuddyProvider {
 
   async refreshAccessToken() {
     let refreshToken = this.config.refreshToken || this.env.REFRESH_TOKEN;
-    if (this.env.WORKBUDDY_KV) {
-      const cachedRefresh = await this.env.WORKBUDDY_KV.get(`WB_REFRESH_TOKEN_${this.id}`) || await this.env.WORKBUDDY_KV.get("REFRESH_TOKEN");
+    if ((this.env.GATEWAY_KV || this.env.WORKBUDDY_KV)) {
+      const cachedRefresh = await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).get(`WB_REFRESH_TOKEN_${this.id}`) || await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).get("REFRESH_TOKEN");
       if (cachedRefresh) refreshToken = cachedRefresh;
     }
     if (!refreshToken) return null;
@@ -70,14 +70,14 @@ export class WorkBuddyProvider {
         memoryCachedToken = newAccess;
         memoryCachedTokenTimestamp = Date.now();
 
-        if (this.env.WORKBUDDY_KV) {
-          await this.env.WORKBUDDY_KV.put(`WB_ACCESS_TOKEN_${this.id}`, newAccess);
-          await this.env.WORKBUDDY_KV.put("ACCESS_TOKEN", newAccess);
+        if ((this.env.GATEWAY_KV || this.env.WORKBUDDY_KV)) {
+          await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).put(`WB_ACCESS_TOKEN_${this.id}`, newAccess);
+          await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).put("ACCESS_TOKEN", newAccess);
           if (newRefresh) {
-            await this.env.WORKBUDDY_KV.put(`WB_REFRESH_TOKEN_${this.id}`, newRefresh);
-            await this.env.WORKBUDDY_KV.put("REFRESH_TOKEN", newRefresh);
+            await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).put(`WB_REFRESH_TOKEN_${this.id}`, newRefresh);
+            await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).put("REFRESH_TOKEN", newRefresh);
           }
-          await this.env.WORKBUDDY_KV.put("LAST_REFRESH", new Date().toISOString());
+          await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).put("LAST_REFRESH", new Date().toISOString());
         }
         return newAccess;
       }
@@ -201,8 +201,8 @@ export class WorkBuddyProvider {
         body: "{}"
       });
       const data = await resp.json();
-      if (this.env.WORKBUDDY_KV) {
-        await this.env.WORKBUDDY_KV.put("LAST_CHECKIN", JSON.stringify({
+      if ((this.env.GATEWAY_KV || this.env.WORKBUDDY_KV)) {
+        await (this.env.GATEWAY_KV || this.env.WORKBUDDY_KV).put("LAST_CHECKIN", JSON.stringify({
           time: new Date().toISOString(),
           provider: this.id,
           result: data

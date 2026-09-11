@@ -55,18 +55,18 @@ export default {
     if (path === "/status") {
       let lastCheckin = null;
       let lastRefresh = null;
-      if (env.WORKBUDDY_KV) {
+      if ((env.GATEWAY_KV || env.WORKBUDDY_KV)) {
         try {
-          const raw = await env.WORKBUDDY_KV.get("LAST_CHECKIN");
+          const raw = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_CHECKIN");
           if (raw) lastCheckin = JSON.parse(raw);
-          lastRefresh = await env.WORKBUDDY_KV.get("LAST_REFRESH");
+          lastRefresh = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_REFRESH");
         } catch (e) {}
       }
       const bal = await fleet.getBalance();
       return new Response(JSON.stringify({
         service: "worker-ai-gateway",
         version: "2.2.0",
-        kvEnabled: !!env.WORKBUDDY_KV,
+        kvEnabled: !!(env.GATEWAY_KV || env.WORKBUDDY_KV),
         balance: bal.balance,
         lastRefresh: lastRefresh,
         lastCheckin: lastCheckin

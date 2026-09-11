@@ -4,7 +4,7 @@
   "compatibility_date": "2024-09-23",
   "kv_namespaces": [
     {
-      "binding": "WORKBUDDY_KV",
+      "binding": "GATEWAY_KV",
       "id": "your-cloudflare-kv-namespace-id"
     }
   ],

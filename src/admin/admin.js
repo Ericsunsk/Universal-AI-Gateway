@@ -60,11 +60,11 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
     let lastCheckin = null;
     let lastRefresh = null;
 
-    if (env.WORKBUDDY_KV) {
+    if ((env.GATEWAY_KV || env.WORKBUDDY_KV)) {
       try {
-        const rawCheckin = await env.WORKBUDDY_KV.get("LAST_CHECKIN");
+        const rawCheckin = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_CHECKIN");
         if (rawCheckin) lastCheckin = JSON.parse(rawCheckin);
-        lastRefresh = await env.WORKBUDDY_KV.get("LAST_REFRESH");
+        lastRefresh = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_REFRESH");
       } catch (e) {}
     }
 

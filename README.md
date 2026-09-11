@@ -77,7 +77,7 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
 1. **Fork 或使用本项目**：确保仓库已存在于你的 GitHub 账号下（如 `你的用户名/Worker-AI-Gateway`）。
 2. **创建 KV 数据库**：
    - 打开 [Cloudflare 控制台](https://dash.cloudflare.com/) ➔ 进入 **Storage & Databases** ➔ **KV**。
-   - 点击 **Create Namespace**，名称填写 `WORKBUDDY_KV`。
+   - 点击 **Create Namespace**，名称填写 `GATEWAY_KV`。
    - 记录下生成的 **Namespace ID**。
 3. **连接 GitHub 仓库**：
    - 进入 Cloudflare 控制台 ➔ **Workers & Pages** ➔ 点击 **Create** ➔ **Workers** ➔ 选择 **Import from Git**（或在已有 Worker 的 **Settings** ➔ **Builds** 中点击 **Connect Git repository**）。
@@ -87,8 +87,8 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
    - **部署命令**：`npx wrangler deploy`。
 4. **配置环境变量与 KV 绑定**：
    - 在 Worker 的 **Settings** ➔ **Bindings** 中，添加 KV 绑定：
-     - Variable name: `WORKBUDDY_KV`
-     - KV namespace: 选择第 2 步创建的 `WORKBUDDY_KV`
+     - Variable name: `GATEWAY_KV`
+     - KV namespace: 选择第 2 步创建的 `GATEWAY_KV`
    - 在 **Settings** ➔ **Variables and Secrets** 中，配置基础凭据：
      - `API_KEY`: 客户端调用的默认 Key（如 `sk-workbuddy-gateway`）
      - `MASTER_KEY`: 管理后台的主密钥（如 `your-admin-password`）
@@ -111,7 +111,7 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
 2. **登录 Cloudflare 并创建 KV**：
    ```bash
    npx wrangler login
-   npx wrangler kv namespace create WORKBUDDY_KV
+   npx wrangler kv namespace create GATEWAY_KV
    ```
    记录终端返回的 KV `id`。
 

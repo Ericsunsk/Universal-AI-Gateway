@@ -83,9 +83,10 @@ export async function getConfig(env, forceRefresh = false) {
     return cachedConfig;
   }
 
-  if (env.WORKBUDDY_KV) {
+  const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+  if (kv) {
     try {
-      const raw = await env.WORKBUDDY_KV.get("GATEWAY_CONFIG");
+      const raw = await kv.get("GATEWAY_CONFIG");
       if (raw) {
         const parsed = JSON.parse(raw);
         cachedConfig = parsed;
@@ -99,9 +100,9 @@ export async function getConfig(env, forceRefresh = false) {
 
   // 初始配置：从默认模板生成并初次写入 KV
   const initialConfig = getDefaultConfig(env);
-  if (env.WORKBUDDY_KV) {
+  if (kv) {
     try {
-      await env.WORKBUDDY_KV.put("GATEWAY_CONFIG", JSON.stringify(initialConfig, null, 2));
+      await kv.put("GATEWAY_CONFIG", JSON.stringify(initialConfig, null, 2));
     } catch (e) {}
   }
 
@@ -111,10 +112,11 @@ export async function getConfig(env, forceRefresh = false) {
 }
 
 export async function saveConfig(env, newConfig) {
-  if (!env.WORKBUDDY_KV) {
-    throw new Error("KV Namespace WORKBUDDY_KV is not bound");
+  const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+  if (!kv) {
+    throw new Error("KV Namespace GATEWAY_KV is not bound");
   }
-  await env.WORKBUDDY_KV.put("GATEWAY_CONFIG", JSON.stringify(newConfig, null, 2));
+  await kv.put("GATEWAY_CONFIG", JSON.stringify(newConfig, null, 2));
   // 立即热同步当前 Isolate 内存缓存
   cachedConfig = newConfig;
   cachedConfigTimestamp = Date.now();
