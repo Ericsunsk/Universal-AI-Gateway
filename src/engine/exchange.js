@@ -192,13 +192,12 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
         if (done) break;
 
         buffer += streamDecoder.decode(value, { stream: true });
-        const lines = buffer.split(/\r?\n/);
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data:")) continue;
-          const jsonStr = trimmed.replace(/^data:\s*/, "");
+        let lineEnd;
+        while ((lineEnd = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, lineEnd).trim();
+          buffer = buffer.slice(lineEnd + 1);
+          if (!line || !line.startsWith("data:")) continue;
+          const jsonStr = line.slice(5).trim();
           if (jsonStr === "[DONE]") continue;
 
           try {
@@ -219,11 +218,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
                   content_block: { type: "thinking", thinking: "" }
                 })}\n\n`));
               }
-              await writer.write(textEncoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
-                type: "content_block_delta",
-                index: currentBlockIndex,
-                delta: { type: "thinking_delta", thinking: reasoningChunk }
-              })}\n\n`));
+              await writer.write(textEncoder.encode(
+                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"thinking_delta","thinking":${JSON.stringify(reasoningChunk)}}}\n\n`
+              ));
             }
 
             // 正文内容
@@ -239,11 +236,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
                   content_block: { type: "text", text: "" }
                 })}\n\n`));
               }
-              await writer.write(textEncoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
-                type: "content_block_delta",
-                index: currentBlockIndex,
-                delta: { type: "text_delta", text: textChunk }
-              })}\n\n`));
+              await writer.write(textEncoder.encode(
+                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(textChunk)}}}\n\n`
+              ));
             }
 
             // 工具调用
@@ -268,14 +263,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
                   })}\n\n`));
                 }
                 if (tc.function?.arguments) {
-                  await writer.write(textEncoder.encode(`event: content_block_delta\ndata: ${JSON.stringify({
-                    type: "content_block_delta",
-                    index: currentBlockIndex,
-                    delta: {
-                      type: "input_json_delta",
-                      partial_json: tc.function.arguments
-                    }
-                  })}\n\n`));
+                  await writer.write(textEncoder.encode(
+                    `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(tc.function.arguments)}}}\n\n`
+                  ));
                 }
               }
             }

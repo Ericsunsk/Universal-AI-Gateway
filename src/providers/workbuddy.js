@@ -130,6 +130,7 @@ export class WorkBuddyProvider {
       payload.messages = sanitizeMessages(payload.messages);
     }
 
+    const serializedPayload = JSON.stringify(payload);
     let lastResponse = null;
 
     for (const account of accounts) {
@@ -152,7 +153,7 @@ export class WorkBuddyProvider {
         return await fetch("https://copilot.tencent.com/v2/chat/completions", {
           method: "POST",
           headers: headers,
-          body: JSON.stringify(payload),
+          body: serializedPayload,
           signal: options.signal
         });
       };

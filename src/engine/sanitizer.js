@@ -13,31 +13,44 @@ export function sanitizeText(text) {
     return text;
   }
 
-  text = text.replaceAll(
-    "You are Claude Code, Anthropic's official CLI for Claude.",
-    "You are Claude Code, Anthropic's official CLI tool for Claude."
-  );
-  text = text.replaceAll(
-    "Main branch (you will usually use this for PRs)",
-    "Default branch (you will usually use this for PRs)"
-  );
-  text = text.replaceAll(
-    "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-    "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
-  );
+  // 精准匹配替换：避免无目标项时触发无谓的 string 遍历与正则表达式开销
+  if (text.includes("You are Claude Code, Anthropic's official CLI for Claude.")) {
+    text = text.replaceAll(
+      "You are Claude Code, Anthropic's official CLI for Claude.",
+      "You are Claude Code, Anthropic's official CLI tool for Claude."
+    );
+  }
+  if (text.includes("Main branch (you will usually use this for PRs)")) {
+    text = text.replaceAll(
+      "Main branch (you will usually use this for PRs)",
+      "Default branch (you will usually use this for PRs)"
+    );
+  }
+  if (text.includes("You are a coding agent running in the Codex CLI")) {
+    text = text.replaceAll(
+      "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
+      "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
+    );
+  }
+  if (text.includes("billing-header")) {
+    text = text.replace(/x-anthropic-billing-header:[^;\n]*;?\s*/gi, "");
+  }
+  if (text.includes("cc_")) {
+    text = text.replace(/\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi, "");
+  }
 
-  text = text.replace(/x-anthropic-billing-header:[^;\n]*;?\s*/gi, "");
-  text = text.replace(/\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi, "");
-
-  return text.trim();
+  return text;
 }
 
 export function sanitizeMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
   return messages.map(msg => {
     if (!msg || typeof msg !== "object") return msg;
-    // 快速跳过工具返回值（命令行输出、构建日志、文件全文，通常达数十KB至数MB），绝不会包含系统提示词或计费头
-    if (msg.role === "tool") return msg;
+    // 快速跳过 tool 与 assistant 消息：
+    // - tool：存放终端与构建日志输出（通常达数十KB至数MB），绝不会包含系统提示词或计费头
+    // - assistant：由大模型自身生成的内容，也绝不会包含客户端注入的系统提示词或计费头
+    if (msg.role === "tool" || msg.role === "assistant") return msg;
+
     if (typeof msg.content === "string") {
       const sanitized = sanitizeText(msg.content);
       return sanitized === msg.content ? msg : { ...msg, content: sanitized };
