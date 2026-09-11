@@ -22,6 +22,60 @@ function transformToolsToOpenAI(tools) {
   }));
 }
 
+// 核心状态机规范化：重构并对齐 OpenAI tool_calls 与 tool_results 顺序（根除 11148 tool_call_sequence_broken）
+function normalizeOpenAIMessages(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  const toolResultsMap = new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === "tool" && m.tool_call_id) {
+      toolResultsMap.set(m.tool_call_id, m);
+    }
+  }
+
+  const result = [];
+  const seenToolResultIds = new Set();
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === "tool") {
+      // 若该 tool 结果已被挂载在其对应的 assistant tool_calls 之后，则跳过
+      if (seenToolResultIds.has(m.tool_call_id)) continue;
+      // 孤儿 tool 结果（前置无对应 assistant tool_calls），降级为 user 消息避免上游 11148 序列破坏
+      result.push({
+        role: "user",
+        content: `[Tool Result: ${m.content}]`
+      });
+      continue;
+    }
+
+    if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+      result.push(m);
+      // 强制将所有匹配的 tool_result 紧跟在当前的 assistant tool_calls 之后
+      for (let j = 0; j < m.tool_calls.length; j++) {
+        const tc = m.tool_calls[j];
+        if (toolResultsMap.has(tc.id)) {
+          result.push(toolResultsMap.get(tc.id));
+          seenToolResultIds.add(tc.id);
+        } else {
+          // 缺失结果的孤儿 tool_call（如用户取消、中断或超时），补充合成结果闭环状态机
+          result.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: "[Result omitted or operation cancelled]"
+          });
+        }
+      }
+      continue;
+    }
+
+    result.push(m);
+  }
+
+  return result;
+}
+
 // 内部协议工具：Anthropic 请求体 -> OpenAI 请求体
 function transformAnthropicToOpenAI(body, targetModel) {
   const model = targetModel || body.model || "deepseek-v4.1-flash";
@@ -115,7 +169,7 @@ function transformAnthropicToOpenAI(body, targetModel) {
   const upstreamTools = transformToolsToOpenAI(body.tools);
   const payload = {
     model: model,
-    messages: openaiMessages,
+    messages: normalizeOpenAIMessages(openaiMessages),
     stream: body.stream !== false
   };
 
@@ -386,18 +440,26 @@ export async function dispatchExchange({
 }) {
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
-  let candidates = routes[model];
+  // 自动剥离类似 [1M]、[200k] 等 Claude Code / 客户端附带的上下文窗口后缀
+  const cleanModel = (model || "deepseek-v4.1-flash").replace(/\[.*?\]$/, "").trim();
+  let candidates = routes[model] || routes[cleanModel];
 
   // 路由模糊回退
   if (!candidates || candidates.length === 0) {
-    if (model.includes("haiku")) {
+    if (cleanModel.includes("haiku")) {
       candidates = routes["deepseek-v4-flash"] || [{ provider: "workbuddy", model: "deepseek-v4-flash" }];
-    } else if (model.includes("opus")) {
+    } else if (cleanModel.includes("opus")) {
       candidates = routes["deepseek-v4-pro"] || [{ provider: "workbuddy", model: "deepseek-v4-pro" }];
-    } else if (model.includes("sonnet") || model.includes("claude")) {
+    } else if (cleanModel.includes("sonnet") || cleanModel.includes("claude") || cleanModel === "default") {
       candidates = routes["deepseek-v4.1-flash"] || [{ provider: "workbuddy", model: "deepseek-v4.1-flash" }];
+    } else if (cleanModel.startsWith("deepseek-v4-flash")) {
+      candidates = routes["deepseek-v4-flash"] || [{ provider: "workbuddy", model: "deepseek-v4-flash" }];
+    } else if (cleanModel.startsWith("deepseek-v4.1-flash")) {
+      candidates = routes["deepseek-v4.1-flash"] || [{ provider: "workbuddy", model: "deepseek-v4.1-flash" }];
+    } else if (cleanModel.startsWith("deepseek-v4-pro")) {
+      candidates = routes["deepseek-v4-pro"] || [{ provider: "workbuddy", model: "deepseek-v4-pro" }];
     } else {
-      candidates = [{ provider: "workbuddy", model: model }];
+      candidates = [{ provider: "workbuddy", model: cleanModel }];
     }
   }
 
