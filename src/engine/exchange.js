@@ -81,6 +81,23 @@ function transformAnthropicToOpenAI(body, targetModel) {
   const model = targetModel || body.model || "deepseek-v4.1-flash";
   const openaiMessages = [];
 
+  const totalMessages = Array.isArray(body.messages) ? body.messages.length : 0;
+  const lastMsg = totalMessages > 0 ? body.messages[totalMessages - 1] : null;
+  const lastText = lastMsg && typeof lastMsg.content === "string" ? lastMsg.content : (
+    Array.isArray(lastMsg?.content) ? lastMsg.content.map(c => c.text || "").join(" ") : ""
+  );
+
+  // 检测是否为会话压缩 / 总结请求（如 Claude Code /compact）
+  const isCompact = (typeof body.system === "string" && (
+    body.system.includes("Respond with TEXT ONLY") ||
+    body.system.includes("<analysis>") ||
+    body.system.includes("<summary>")
+  )) || (
+    lastText.includes("Respond with TEXT ONLY") ||
+    lastText.includes("Do NOT use Read, Bash, Grep") ||
+    lastText.includes("<analysis>")
+  );
+
   if (body.system) {
     const sysText = typeof body.system === "string"
       ? body.system
@@ -94,6 +111,8 @@ function transformAnthropicToOpenAI(body, targetModel) {
     for (let mIdx = 0; mIdx < body.messages.length; mIdx++) {
       const msg = body.messages[mIdx];
       if (!msg) continue;
+      const isOlder = (totalMessages - mIdx) > 15;
+
       if (typeof msg.content === "string") {
         openaiMessages.push({
           role: msg.role === "assistant" ? "assistant" : "user",
@@ -144,6 +163,12 @@ function transformAnthropicToOpenAI(body, targetModel) {
             } else {
               resContent = JSON.stringify(rb.content || "");
             }
+
+            // 智能剪枝：对总结请求或早于最近15轮的超长工具结果进行两端保留式截断，彻底消除巨型输出造成的内存与CPU超时
+            if ((isCompact || (isOlder && resContent.length > 400)) && resContent.length > 300) {
+              resContent = resContent.slice(0, 200) + "\n...[output truncated for summary / context limit]...\n" + resContent.slice(-80);
+            }
+
             openaiMessages.push({
               role: "tool",
               tool_call_id: rb.tool_use_id,
@@ -166,7 +191,8 @@ function transformAnthropicToOpenAI(body, targetModel) {
     }
   }
 
-  const upstreamTools = transformToolsToOpenAI(body.tools);
+  // 若为总结压缩请求，剥离 tools 定义避免上游大模型生成 tool_calls 反射
+  const upstreamTools = isCompact ? undefined : transformToolsToOpenAI(body.tools);
   const payload = {
     model: model,
     messages: normalizeOpenAIMessages(openaiMessages),
