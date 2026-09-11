@@ -1,0 +1,14 @@
+{
+  "name": "workbuddy-api",
+  "main": "src/index.js",
+  "compatibility_date": "2024-09-23",
+  "kv_namespaces": [
+    {
+      "binding": "WORKBUDDY_KV",
+      "id": "f38a6f58d85c4689bbab062d0ed4c842"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 1 * * *", "0 13 * * *"]
+  }
+}

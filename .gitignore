@@ -3,8 +3,7 @@
 dist/
 *.log
 
-# Sensitive local credentials (Keep your real keys safe!)
-wrangler.jsonc
+# Sensitive local credentials (gitignored, kept private)
 .dev.vars
 .env
 
