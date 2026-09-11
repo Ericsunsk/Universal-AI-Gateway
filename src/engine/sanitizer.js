@@ -36,19 +36,25 @@ export function sanitizeMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
   return messages.map(msg => {
     if (!msg || typeof msg !== "object") return msg;
+    // 快速跳过工具返回值（命令行输出、构建日志、文件全文，通常达数十KB至数MB），绝不会包含系统提示词或计费头
+    if (msg.role === "tool") return msg;
     if (typeof msg.content === "string") {
-      return { ...msg, content: sanitizeText(msg.content) };
+      const sanitized = sanitizeText(msg.content);
+      return sanitized === msg.content ? msg : { ...msg, content: sanitized };
     }
     if (Array.isArray(msg.content)) {
-      return {
-        ...msg,
-        content: msg.content.map(part => {
-          if (part && typeof part === "object" && typeof part.text === "string") {
-            return { ...part, text: sanitizeText(part.text) };
+      let changed = false;
+      const newContent = msg.content.map(part => {
+        if (part && typeof part === "object" && typeof part.text === "string") {
+          const sanitized = sanitizeText(part.text);
+          if (sanitized !== part.text) {
+            changed = true;
+            return { ...part, text: sanitized };
           }
-          return part;
-        })
-      };
+        }
+        return part;
+      });
+      return changed ? { ...msg, content: newContent } : msg;
     }
     return msg;
   });

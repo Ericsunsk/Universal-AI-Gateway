@@ -37,19 +37,35 @@ function transformAnthropicToOpenAI(body, targetModel) {
   }
 
   if (Array.isArray(body.messages)) {
-    for (const msg of body.messages) {
+    for (let mIdx = 0; mIdx < body.messages.length; mIdx++) {
+      const msg = body.messages[mIdx];
+      if (!msg) continue;
       if (typeof msg.content === "string") {
         openaiMessages.push({
           role: msg.role === "assistant" ? "assistant" : "user",
           content: msg.content
         });
       } else if (Array.isArray(msg.content)) {
-        const toolUseBlocks = msg.content.filter(b => b.type === "tool_use");
-        const toolResultBlocks = msg.content.filter(b => b.type === "tool_result");
-        const textBlocks = msg.content.filter(b => b.type === "text" || !b.type);
+        const toolUseBlocks = [];
+        const toolResultBlocks = [];
+        const textBlocks = [];
+
+        for (let i = 0; i < msg.content.length; i++) {
+          const b = msg.content[i];
+          if (!b) continue;
+          if (b.type === "tool_use") toolUseBlocks.push(b);
+          else if (b.type === "tool_result") toolResultBlocks.push(b);
+          else textBlocks.push(b);
+        }
 
         if (msg.role === "assistant" && toolUseBlocks.length > 0) {
-          const textContent = textBlocks.map(b => b.text || "").join("\n");
+          let textContent = null;
+          if (textBlocks.length === 1) {
+            textContent = textBlocks[0].text || null;
+          } else if (textBlocks.length > 1) {
+            textContent = textBlocks.map(b => b.text || "").join("\n");
+          }
+
           const toolCalls = toolUseBlocks.map(tb => ({
             id: tb.id,
             type: "function",
@@ -60,12 +76,20 @@ function transformAnthropicToOpenAI(body, targetModel) {
           }));
           openaiMessages.push({
             role: "assistant",
-            content: textContent || null,
+            content: textContent,
             tool_calls: toolCalls
           });
         } else if (toolResultBlocks.length > 0) {
-          for (const rb of toolResultBlocks) {
-            const resContent = typeof rb.content === "string" ? rb.content : JSON.stringify(rb.content || "");
+          for (let i = 0; i < toolResultBlocks.length; i++) {
+            const rb = toolResultBlocks[i];
+            let resContent = "";
+            if (typeof rb.content === "string") {
+              resContent = rb.content;
+            } else if (Array.isArray(rb.content)) {
+              resContent = rb.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n");
+            } else {
+              resContent = JSON.stringify(rb.content || "");
+            }
             openaiMessages.push({
               role: "tool",
               tool_call_id: rb.tool_use_id,
@@ -73,7 +97,12 @@ function transformAnthropicToOpenAI(body, targetModel) {
             });
           }
         } else {
-          const combined = textBlocks.map(b => b.text || "").join("\n");
+          let combined = "";
+          if (textBlocks.length === 1) {
+            combined = textBlocks[0].text || "";
+          } else if (textBlocks.length > 1) {
+            combined = textBlocks.map(b => b.text || "").join("\n");
+          }
           openaiMessages.push({
             role: msg.role === "assistant" ? "assistant" : "user",
             content: combined
@@ -286,44 +315,70 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
   });
 }
 
-// 内部非流式转译：OpenAI -> Anthropic JSON
+// 内部非流式转译：OpenAI -> Anthropic JSON (优化：增量流式读取，零全量内存拷贝)
 async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel) {
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
-  const rawText = await upstreamResponse.text();
-
+  const reader = upstreamResponse.body.getReader();
+  const decoder = new TextDecoder();
   let accumulated = "";
-  if (rawText.includes("data:")) {
-    const lines = rawText.split(/\r?\n/);
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith("data:")) continue;
-      const jsonStr = trimmed.replace(/^data:\s*/, "");
-      if (jsonStr === "[DONE]") continue;
+  let buffer = "";
+  let inputTokens = 20;
+  let outputTokens = 1;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let lineEnd;
+      while ((lineEnd = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, lineEnd).trim();
+        buffer = buffer.slice(lineEnd + 1);
+        if (!line || !line.startsWith("data:")) continue;
+        const jsonStr = line.slice(5).trim();
+        if (jsonStr === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(jsonStr);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) accumulated += delta;
+          if (parsed.usage) {
+            if (parsed.usage.prompt_tokens) inputTokens = parsed.usage.prompt_tokens;
+            if (parsed.usage.completion_tokens) outputTokens = parsed.usage.completion_tokens;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (!accumulated && buffer.trim()) {
       try {
-        const parsed = JSON.parse(jsonStr);
-        accumulated += parsed.choices?.[0]?.delta?.content || "";
-      } catch (e) {}
+        const parsed = JSON.parse(buffer.trim());
+        accumulated = parsed.choices?.[0]?.message?.content || buffer.trim();
+        if (parsed.usage) {
+          if (parsed.usage.prompt_tokens) inputTokens = parsed.usage.prompt_tokens;
+          if (parsed.usage.completion_tokens) outputTokens = parsed.usage.completion_tokens;
+        }
+      } catch (e) {
+        accumulated = buffer.trim();
+      }
     }
-  } else {
-    try {
-      const parsed = JSON.parse(rawText);
-      accumulated = parsed.choices?.[0]?.message?.content || "";
-    } catch (e) {
-      accumulated = rawText;
-    }
+  } finally {
+    reader.releaseLock();
   }
+
+  outputTokens = Math.max(outputTokens, Math.ceil(accumulated.length / 4));
 
   return new Response(JSON.stringify({
     id: msgId,
     type: "message",
     role: "assistant",
     content: [{ type: "text", text: accumulated }],
-    model: requestedModel || "claude-3-5-sonnet-20241022",
+    model: requestedModel || "claude-3-5-haiku-20241022",
     stop_reason: "end_turn",
-    usage: { input_tokens: 15, output_tokens: 60 }
+    stop_sequence: null,
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens }
   }), {
     status: 200,
-    headers: { "Content-Type": "application/json", ...corsHeaders }
+    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
   });
 }
 

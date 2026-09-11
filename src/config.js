@@ -51,15 +51,22 @@ export function getDefaultConfig(env) {
         { provider: "openrouter", model: "deepseek/deepseek-r1" }
       ],
       "claude-3-7-sonnet-20250219": [
-        { provider: "workbuddy", model: "claude-3-7-sonnet-20250219" },
+        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "openrouter", model: "anthropic/claude-3.7-sonnet" }
       ],
       "claude-3-5-sonnet-20241022": [
-        { provider: "workbuddy", model: "claude-3-5-sonnet-20241022" },
+        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "openrouter", model: "anthropic/claude-3.5-sonnet" }
       ],
       "claude-3-5-haiku-20241022": [
-        { provider: "workbuddy", model: "claude-3-5-haiku-20241022" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
+      ],
+      "claude-3-haiku-20240307": [
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
+      ],
+      "claude-3-opus-20240229": [
+        { provider: "workbuddy", model: "deepseek-v4-pro" },
+        { provider: "openrouter", model: "anthropic/claude-3-opus" }
       ],
       "glm-5.2": [
         { provider: "workbuddy", model: "glm-5.2" }
