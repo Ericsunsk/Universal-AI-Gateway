@@ -1,7 +1,6 @@
-import { getConfig } from "./config.js";
+import { getConfig, VERSION } from "./config.js";
 import { authenticateAccess } from "./auth.js";
-import { corsHeaders } from "./engine/exchange.js";
-import { dispatchExchange } from "./engine/exchange.js";
+import { corsHeaders, dispatchExchange } from "./engine/exchange.js";
 import { getProviderFleet } from "./providers/fleet.js";
 import { handleAdminRequest } from "./admin/admin.js";
 
@@ -41,7 +40,7 @@ export default {
       return new Response(JSON.stringify({
         status: "ok",
         service: "worker-ai-gateway",
-        version: "2.2.0",
+        version: VERSION,
         providers_active: fleet.activeCount,
         models_available: Object.keys(config.routes || {}).length,
         time: new Date().toISOString()
@@ -55,18 +54,19 @@ export default {
     if (path === "/status") {
       let lastCheckin = null;
       let lastRefresh = null;
-      if ((env.GATEWAY_KV || env.WORKBUDDY_KV)) {
+      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+      if (kv) {
         try {
-          const raw = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_CHECKIN");
+          const raw = await kv.get("LAST_CHECKIN");
           if (raw) lastCheckin = JSON.parse(raw);
-          lastRefresh = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_REFRESH");
+          lastRefresh = await kv.get("LAST_REFRESH");
         } catch (e) {}
       }
       const bal = await fleet.getBalance();
       return new Response(JSON.stringify({
         service: "worker-ai-gateway",
-        version: "2.2.0",
-        kvEnabled: !!(env.GATEWAY_KV || env.WORKBUDDY_KV),
+        version: VERSION,
+        kvEnabled: !!kv,
         balance: bal.balance,
         lastRefresh: lastRefresh,
         lastCheckin: lastCheckin

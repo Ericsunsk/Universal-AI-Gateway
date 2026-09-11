@@ -39,6 +39,17 @@ export function sanitizeMessages(messages) {
     if (typeof msg.content === "string") {
       return { ...msg, content: sanitizeText(msg.content) };
     }
+    if (Array.isArray(msg.content)) {
+      return {
+        ...msg,
+        content: msg.content.map(part => {
+          if (part && typeof part === "object" && typeof part.text === "string") {
+            return { ...part, text: sanitizeText(part.text) };
+          }
+          return part;
+        })
+      };
+    }
     return msg;
   });
 }

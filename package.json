@@ -1,6 +1,6 @@
 {
   "name": "worker-ai-gateway",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "High-performance, configurable AI Gateway on Cloudflare Workers with protocol translation, multi-provider fallback, WorkBuddy auto-checkin, and Web Admin console.",
   "main": "src/index.js",
   "type": "module",

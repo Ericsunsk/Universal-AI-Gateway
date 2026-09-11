@@ -17,7 +17,7 @@ export class AnthropicStandardProvider {
   }
 
   // Anthropic 原生 messages
-  async callMessages(payload) {
+  async callMessages(payload, options = {}) {
     const url = `${this.baseUrl}/v1/messages`;
     const headers = {
       "Content-Type": "application/json",
@@ -29,7 +29,8 @@ export class AnthropicStandardProvider {
     return await fetch(url, {
       method: "POST",
       headers: headers,
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: options.signal
     });
   }
 

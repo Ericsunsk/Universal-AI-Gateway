@@ -16,7 +16,7 @@ export class OpenAIStandardProvider {
     return this.config.apiKey || "";
   }
 
-  async callChat(payload) {
+  async callChat(payload, options = {}) {
     const url = `${this.baseUrl}/chat/completions`;
     const headers = {
       "Content-Type": "application/json",
@@ -27,7 +27,8 @@ export class OpenAIStandardProvider {
     return await fetch(url, {
       method: "POST",
       headers: headers,
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: options.signal
     });
   }
 

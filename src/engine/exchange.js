@@ -1,5 +1,3 @@
-import { sanitizeText, sanitizeMessages } from "./sanitizer.js";
-
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -35,7 +33,7 @@ function transformAnthropicToOpenAI(body, targetModel) {
       : Array.isArray(body.system)
         ? body.system.map(s => s.text || "").join("\n")
         : String(body.system);
-    openaiMessages.push({ role: "system", content: sanitizeText(sysText) });
+    openaiMessages.push({ role: "system", content: sysText });
   }
 
   if (Array.isArray(body.messages)) {
@@ -43,7 +41,7 @@ function transformAnthropicToOpenAI(body, targetModel) {
       if (typeof msg.content === "string") {
         openaiMessages.push({
           role: msg.role === "assistant" ? "assistant" : "user",
-          content: sanitizeText(msg.content)
+          content: msg.content
         });
       } else if (Array.isArray(msg.content)) {
         const toolUseBlocks = msg.content.filter(b => b.type === "tool_use");
@@ -62,7 +60,7 @@ function transformAnthropicToOpenAI(body, targetModel) {
           }));
           openaiMessages.push({
             role: "assistant",
-            content: sanitizeText(textContent) || null,
+            content: textContent || null,
             tool_calls: toolCalls
           });
         } else if (toolResultBlocks.length > 0) {
@@ -71,14 +69,14 @@ function transformAnthropicToOpenAI(body, targetModel) {
             openaiMessages.push({
               role: "tool",
               tool_call_id: rb.tool_use_id,
-              content: sanitizeText(resContent)
+              content: resContent
             });
           }
         } else {
           const combined = textBlocks.map(b => b.text || "").join("\n");
           openaiMessages.push({
             role: msg.role === "assistant" ? "assistant" : "user",
-            content: sanitizeText(combined)
+            content: combined
           });
         }
       }
@@ -382,9 +380,6 @@ export async function dispatchExchange({
         const openaiPayload = { ...body, model: candidate.model };
         if (provider.type === "workbuddy") {
           openaiPayload.stream = true;
-        }
-        if (openaiPayload.messages) {
-          openaiPayload.messages = sanitizeMessages(openaiPayload.messages);
         }
         upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal });
       }

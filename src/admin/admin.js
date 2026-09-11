@@ -1,5 +1,5 @@
 import { DASHBOARD_HTML } from "./dashboard.html.js";
-import { getConfig, saveConfig } from "../config.js";
+import { getConfig, saveConfig, VERSION } from "../config.js";
 import { corsHeaders } from "../engine/exchange.js";
 
 export async function handleAdminRequest(request, env, authResult, fleet) {
@@ -59,12 +59,13 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
     const config = await getConfig(env);
     let lastCheckin = null;
     let lastRefresh = null;
+    const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
 
-    if ((env.GATEWAY_KV || env.WORKBUDDY_KV)) {
+    if (kv) {
       try {
-        const rawCheckin = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_CHECKIN");
+        const rawCheckin = await kv.get("LAST_CHECKIN");
         if (rawCheckin) lastCheckin = JSON.parse(rawCheckin);
-        lastRefresh = await (env.GATEWAY_KV || env.WORKBUDDY_KV).get("LAST_REFRESH");
+        lastRefresh = await kv.get("LAST_REFRESH");
       } catch (e) {}
     }
 
@@ -72,7 +73,7 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
 
     return new Response(JSON.stringify({
       service: "worker-ai-gateway",
-      version: "2.3.0",
+      version: VERSION,
       time: new Date().toISOString(),
       balance: bal.balance,
       total_balance: bal.total,

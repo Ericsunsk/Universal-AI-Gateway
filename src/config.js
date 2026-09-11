@@ -1,3 +1,5 @@
+export const VERSION = "2.3.0";
+
 let cachedConfig = null;
 let cachedConfigTimestamp = 0;
 const CONFIG_CACHE_TTL_MS = 60 * 1000; // 60 秒内存热缓存，彻底消除每请求访问 KV 的网络往返开销
