@@ -105,7 +105,7 @@ function transformAnthropicToOpenAI(body, targetModel) {
 }
 
 // 内部流式转译：OpenAI SSE -> Anthropic SSE（优化：零内存拷贝保活与事件复用）
-function streamOpenAIToAnthropic(upstreamResponse, requestedModel) {
+function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null) {
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -116,6 +116,14 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel) {
         await writer.write(KEEP_ALIVE_BYTES);
       } catch (e) {}
     }, 4000);
+
+    // 监听客户端主动中断取消（Ctrl+C / 停止生成），级联终止上游读取与保活定时器
+    if (clientSignal) {
+      clientSignal.addEventListener("abort", () => {
+        clearInterval(pingInterval);
+        try { writer.abort(new Error("Client aborted")); } catch (e) {}
+      });
+    }
 
     await writer.write(textEncoder.encode(`event: message_start\ndata: ${JSON.stringify({
       type: "message_start",
@@ -330,7 +338,8 @@ export async function dispatchExchange({
   model,
   body,
   fleet,
-  config
+  config,
+  request
 }) {
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
@@ -361,13 +370,13 @@ export async function dispatchExchange({
 
       if (isAnthropic) {
         if (provider.type === "anthropic") {
-          upstreamRes = await provider.callMessages({ ...body, model: candidate.model });
+          upstreamRes = await provider.callMessages({ ...body, model: candidate.model }, { signal: request?.signal });
         } else {
           const openaiPayload = transformAnthropicToOpenAI(body, candidate.model);
           if (provider.type === "workbuddy") {
             openaiPayload.stream = true;
           }
-          upstreamRes = await provider.callChat(openaiPayload);
+          upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal });
         }
       } else {
         const openaiPayload = { ...body, model: candidate.model };
@@ -377,13 +386,13 @@ export async function dispatchExchange({
         if (openaiPayload.messages) {
           openaiPayload.messages = sanitizeMessages(openaiPayload.messages);
         }
-        upstreamRes = await provider.callChat(openaiPayload);
+        upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal });
       }
 
       if (upstreamRes && upstreamRes.ok) {
         if (isAnthropic && provider.type !== "anthropic") {
           if (body.stream !== false) {
-            return streamOpenAIToAnthropic(upstreamRes, model);
+            return streamOpenAIToAnthropic(upstreamRes, model, request?.signal);
           } else {
             return await formatOpenAIToAnthropicJson(upstreamRes, model);
           }

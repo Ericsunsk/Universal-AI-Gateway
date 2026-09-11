@@ -144,7 +144,8 @@ export default {
           model: requestModel,
           body: body,
           fleet: fleet,
-          config: config
+          config: config,
+          request: request
         });
       } catch (err) {
         return new Response(JSON.stringify({ error: { message: err.message } }), {
@@ -171,7 +172,8 @@ export default {
           model: requestModel,
           body: body,
           fleet: fleet,
-          config: config
+          config: config,
+          request: request
         });
       } catch (err) {
         return new Response(JSON.stringify({ error: { message: err.message } }), {

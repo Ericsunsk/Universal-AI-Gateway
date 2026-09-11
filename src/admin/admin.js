@@ -72,10 +72,12 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
 
     return new Response(JSON.stringify({
       service: "worker-ai-gateway",
-      version: "2.1.0",
+      version: "2.3.0",
       time: new Date().toISOString(),
       balance: bal.balance,
       total_balance: bal.total,
+      accounts_count: bal.accounts_count || 1,
+      accounts: bal.accounts || [],
       last_checkin: lastCheckin,
       last_refresh: lastRefresh,
       providers_count: fleet.activeCount,
