@@ -1,0 +1,16 @@
+model_list:
+  - model_name: claude-3-5-sonnet-20241022
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://your-worker.workers.dev/v1
+      api_key: sk-your-gateway-api-key
+  - model_name: claude-3-7-sonnet-20250219
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://your-worker.workers.dev/v1
+      api_key: sk-your-gateway-api-key
+  - model_name: deepseek-v4.1-flash
+    litellm_params:
+      model: openai/deepseek-v4.1-flash
+      api_base: https://your-worker.workers.dev/v1
+      api_key: sk-your-gateway-api-key

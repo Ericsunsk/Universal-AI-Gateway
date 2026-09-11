@@ -1,0 +1,13 @@
+# Cloudflare Worker artifacts & build
+.wrangler/
+dist/
+*.log
+
+# Sensitive local credentials (Keep your real keys safe!)
+wrangler.jsonc
+.dev.vars
+.env
+
+# Dependencies & OS
+node_modules/
+.DS_Store
