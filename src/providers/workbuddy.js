@@ -142,6 +142,7 @@ export class WorkBuddyProvider {
         const headers = {
           "Content-Type": "application/json",
           "Accept": "application/json, text/plain, */*",
+          "Connection": "keep-alive",
           "X-Requested-With": "XMLHttpRequest",
           "Origin": "https://www.codebuddy.cn",
           "Referer": "https://www.codebuddy.cn/",
@@ -154,7 +155,8 @@ export class WorkBuddyProvider {
           method: "POST",
           headers: headers,
           body: serializedPayload,
-          signal: options.signal
+          signal: options.signal,
+          keepalive: true
         });
       };
 

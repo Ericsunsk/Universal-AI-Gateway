@@ -21,6 +21,7 @@ export class OpenAIStandardProvider {
     const headers = {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${this.apiKey}`,
+      "Connection": "keep-alive",
       ...(this.config.defaultHeaders || {})
     };
 
@@ -28,7 +29,8 @@ export class OpenAIStandardProvider {
       method: "POST",
       headers: headers,
       body: JSON.stringify(payload),
-      signal: options.signal
+      signal: options.signal,
+      keepalive: true
     });
   }
 

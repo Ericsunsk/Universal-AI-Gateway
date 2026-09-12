@@ -72,3 +72,19 @@ export function sanitizeMessages(messages) {
     return msg;
   });
 }
+
+// 高性能微秒级 ANSI 终端转义码与控制字符清洗（过滤终端颜色代码与覆盖刷新符，提升 Token 密度与纯度）
+const ANSI_REGEX = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d\/#&.:=?%_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d\/#&.:=?%_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
+
+export function stripAnsi(text) {
+  if (!text || typeof text !== "string") return text;
+  // O(1) 快速跳过：不含控制符直接返回，避免无效正则匹配
+  if (!text.includes("\u001b") && !text.includes("\u009b") && !text.includes("\r")) {
+    return text;
+  }
+  let cleaned = text.replace(ANSI_REGEX, "");
+  if (cleaned.includes("\r")) {
+    cleaned = cleaned.replace(/\r\n/g, "\n").replace(/\r[^\n]/g, "\n");
+  }
+  return cleaned;
+}

@@ -1,3 +1,5 @@
+import { stripAnsi } from "./sanitizer.js";
+
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -82,7 +84,7 @@ function normalizeOpenAIMessages(messages) {
  * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
  * 3. 对历史工具执行结果（tool_result）的大块冗余终端输出进行两端保留式剪枝。
  */
-function pruneMessageContents(messages, isCompact, recentSafeTurns = 12) {
+function pruneMessageContents(messages, isCompact, recentSafeTurns = 15) {
   const total = messages.length;
   return messages.map((msg, idx) => {
     if (!msg || !Array.isArray(msg.content)) return msg;
@@ -94,13 +96,25 @@ function pruneMessageContents(messages, isCompact, recentSafeTurns = 12) {
         let text = typeof part.content === "string" ? part.content : (
           Array.isArray(part.content) ? part.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n") : JSON.stringify(part.content || "")
         );
-        if (isCompact && text.length > 120) {
+        const cleaned = stripAnsi(text);
+        if (cleaned !== text) {
+          text = cleaned;
           modified = true;
-          return { ...part, content: text.slice(0, 80) + "...[output truncated for summary]..." };
         }
-        if (isOlder && text.length > 400) {
+        if (isCompact && text.length > 200) {
           modified = true;
-          return { ...part, content: text.slice(0, 200) + "\n...[output truncated by gateway]...\n" + text.slice(-80) };
+          return { ...part, content: text.slice(0, 100) + "\n...[output truncated for summary]...\n" + text.slice(-50) };
+        }
+        if (isOlder && text.length > 800) {
+          modified = true;
+          const omitted = text.length - 350;
+          return {
+            ...part,
+            content: text.slice(0, 250) + `\n...[Gateway Notice: ${omitted} chars of historical tool output collapsed to optimize context & latency]...\n` + text.slice(-100)
+          };
+        }
+        if (modified) {
+          return { ...part, content: text };
         }
       }
       return part;
@@ -112,9 +126,9 @@ function pruneMessageContents(messages, isCompact, recentSafeTurns = 12) {
 function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
-  // 当 maxTurnsLimit <= 0 时，彻底禁用会话剪枝，100% 原始长上下文完整传输（适用于 Vercel / 高性能环境）
+  // 当 maxTurnsLimit <= 0 时，保留全部会话轮次，但仍执行工具结果清洗（移除 ANSI 干扰码及对超长远古工具输出智能两端折叠）
   if (maxTurnsLimit <= 0) {
-    return messages;
+    return pruneMessageContents(messages, isCompact, 15);
   }
 
   const total = messages.length;

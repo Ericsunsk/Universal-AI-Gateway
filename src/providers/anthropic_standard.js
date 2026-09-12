@@ -23,6 +23,7 @@ export class AnthropicStandardProvider {
       "Content-Type": "application/json",
       "x-api-key": this.apiKey,
       "anthropic-version": this.config.anthropicVersion || "2023-06-01",
+      "Connection": "keep-alive",
       ...(this.config.defaultHeaders || {})
     };
 
@@ -30,7 +31,8 @@ export class AnthropicStandardProvider {
       method: "POST",
       headers: headers,
       body: JSON.stringify(payload),
-      signal: options.signal
+      signal: options.signal,
+      keepalive: true
     });
   }
 
