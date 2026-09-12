@@ -43,6 +43,8 @@ export function getDefaultConfig(env) {
     routes: {
       "deepseek-v4.1-flash": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
+        { provider: "workbuddy", model: "deepseek-v4-pro" },
+        { provider: "workbuddy", model: "deepseek-v4-flash" },
         { provider: "openrouter", model: "deepseek/deepseek-chat" }
       ],
       "deepseek-v4-flash": [
@@ -50,14 +52,19 @@ export function getDefaultConfig(env) {
       ],
       "deepseek-v4-pro": [
         { provider: "workbuddy", model: "deepseek-v4-pro" },
+        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "openrouter", model: "deepseek/deepseek-r1" }
       ],
       "claude-3-7-sonnet-20250219": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
+        { provider: "workbuddy", model: "deepseek-v4-pro" },
+        { provider: "workbuddy", model: "deepseek-v4-flash" },
         { provider: "openrouter", model: "anthropic/claude-3.7-sonnet" }
       ],
       "claude-3-5-sonnet-20241022": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
+        { provider: "workbuddy", model: "deepseek-v4-pro" },
+        { provider: "workbuddy", model: "deepseek-v4-flash" },
         { provider: "openrouter", model: "anthropic/claude-3.5-sonnet" }
       ],
       "claude-3-5-haiku-20241022": [
