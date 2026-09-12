@@ -87,8 +87,9 @@ export class ProviderFleet {
     for (const provider of this.getAllActive()) {
       if (typeof provider.refreshAccessToken === "function") {
         try {
-          const token = await provider.refreshAccessToken();
-          results.push({ provider: provider.id, refreshed: !!token });
+          const res = await provider.refreshAccessToken();
+          const refreshed = Array.isArray(res) ? res.length > 0 : !!res;
+          results.push({ provider: provider.id, refreshed, count: Array.isArray(res) ? res.length : 1 });
         } catch (e) {
           results.push({ provider: provider.id, error: e.message });
         }

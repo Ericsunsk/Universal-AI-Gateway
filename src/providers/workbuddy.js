@@ -68,8 +68,13 @@ export class WorkBuddyProvider {
     return fallback;
   }
 
-  // 刷新特定账号的 AccessToken
-  async refreshAccessToken(account) {
+  // 刷新特定账号或全部账号的 AccessToken
+  async refreshAccessToken(account = null) {
+    if (!account) {
+      const accounts = this.getAccounts();
+      const results = await Promise.allSettled(accounts.map(acc => this.refreshAccessToken(acc)));
+      return results.map(r => r.status === "fulfilled" ? r.value : null).filter(Boolean);
+    }
     const cacheKey = `${this.id}_${account.id}`;
     let refreshToken = account.refreshToken || (account.id === "primary" ? this.env.REFRESH_TOKEN : "");
     if (this.kv) {
