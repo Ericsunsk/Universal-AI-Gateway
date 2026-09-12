@@ -1,10 +1,5 @@
 import { stripAnsi, optimizeToolOutput } from "./sanitizer.js";
-
-export const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "*"
-};
+import { corsHeaders, buildResponseHeaders } from "../http/headers.js";
 
 // 模块级单例 Encoder / Decoder 与预编码静态 Buffer（零 GC 内存分配）
 const textEncoder = new TextEncoder();
@@ -12,7 +7,7 @@ const KEEP_ALIVE_BYTES = textEncoder.encode("event: ping\ndata: {\"type\":\"ping
 const EVENT_MSG_STOP_BYTES = textEncoder.encode("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
 
 // 内部协议工具：Tools 转换
-function transformToolsToOpenAI(tools) {
+export function transformToolsToOpenAI(tools) {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => ({
     type: "function",
@@ -25,7 +20,7 @@ function transformToolsToOpenAI(tools) {
 }
 
 // 核心状态机规范化：重构并对齐 OpenAI tool_calls 与 tool_results 顺序（根除 11148 tool_call_sequence_broken）
-function normalizeOpenAIMessages(messages) {
+export function normalizeOpenAIMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
   const toolResultsMap = new Map();
@@ -140,7 +135,7 @@ function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
 }
 
 // 内部协议工具：Anthropic 请求体 -> OpenAI 请求体
-function transformAnthropicToOpenAI(body, targetModel, config = {}) {
+export function transformAnthropicToOpenAI(body, targetModel, config = {}) {
   const model = targetModel || body.model || "deepseek-v4.1-flash";
   const openaiMessages = [];
 
@@ -277,7 +272,80 @@ function transformAnthropicToOpenAI(body, targetModel, config = {}) {
 }
 
 // 内部流式转译：OpenAI SSE -> Anthropic SSE（优化：零内存拷贝保活与事件复用）
-function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}) {
+
+// 纯函数：把单个已解析的 OpenAI SSE chunk 归约为一条「发射指令」。
+// 不做任何 I/O，只做分类与字段提取 —— 这是流式转译里最易回归、也最该被测试的部分。
+// 返回 null 表示该 chunk 无需发射任何事件（如空 delta、[DONE] 已在外层过滤）。
+// 可能的 kind:
+//   "error"    —— 上游业务错误/非零 code，应降级为 notice 文本
+//   "thinking" —— DeepSeek reasoning_content 思维链增量
+//   "text"     —— 正文文本增量
+//   "tool_use" —— 工具调用块（可能伴随 id/name/arguments）
+// 纯函数：从已解析的上游 JSON 中提取错误消息（error 字段 / msg / message / 非零 code）。
+// reduceOpenAIChunk 与 formatOpenAIToAnthropicJson 共享，避免两处各自拼装。
+export function extractErrorMessage(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  return parsed.error?.message || parsed.msg || parsed.message ||
+    (parsed.code !== undefined && parsed.code !== 0 ? `Upstream error code ${parsed.code}` : null);
+}
+
+// 纯函数：判断上游是否携带业务错误（Tencent code !== 0 或显式 error 字段）。
+export function isUpstreamError(parsed) {
+  if (!parsed || typeof parsed !== "object") return false;
+  return !!(parsed.error || (parsed.code !== undefined && parsed.code !== 0));
+}
+
+// 纯函数：从已解析的 usage 中提取 token 计数，返回 { input, output }（缺失保留原值）。
+export function extractUsage(parsed, current = { input: 20, output: 1 }) {
+  const u = parsed?.usage;
+  if (!u) return current;
+  return {
+    input: u.prompt_tokens || current.input,
+    output: u.completion_tokens || current.output
+  };
+}
+
+export function reduceOpenAIChunk(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+
+  // 上游业务错误（Tencent code !== 0 或显式 error 字段）
+  if (isUpstreamError(parsed)) {
+    const msg = extractErrorMessage(parsed) || "Unknown error";
+    return { kind: "error", message: msg };
+  }
+
+  const delta = parsed.choices?.[0]?.delta;
+  const finishReason = parsed.choices?.[0]?.finish_reason;
+
+  // 工具调用：可能在同一 chunk 内携带多个 tool_call
+  if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) {
+    const calls = delta.tool_calls.map(tc => ({
+      id: tc.id || null,
+      name: tc.function?.name || "tool",
+      arguments: tc.function?.arguments || ""
+    }));
+    return { kind: "tool_use", calls, stopReason: "tool_use" };
+  }
+
+  // 思维链增量
+  if (delta?.reasoning_content) {
+    return { kind: "thinking", text: delta.reasoning_content };
+  }
+
+  // 正文增量
+  if (delta?.content) {
+    return { kind: "text", text: delta.content };
+  }
+
+  // finish_reason 标记（无内容，但影响最终 stop_reason）
+  if (finishReason === "tool_calls") {
+    return { kind: "tool_use", calls: [], stopReason: "tool_use" };
+  }
+
+  return null;
+}
+
+export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}) {
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -350,9 +418,10 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
             const parsed = JSON.parse(jsonStr);
 
             // 检查上游是否嵌入了业务错误（如 Tencent code !== 0 或 error 字段）
-            const isError = parsed.error || (parsed.code !== undefined && parsed.code !== 0);
-            if (isError) {
-              const errMsg = parsed.error?.message || parsed.msg || parsed.message || (parsed.code ? `Upstream error code ${parsed.code}` : "Unknown error");
+            // 委托纯函数 reducer 判定与提取错误消息，避免此分支逻辑与 reducer 分叉
+            const errorEmission = reduceOpenAIChunk(parsed);
+            if (errorEmission?.kind === "error") {
+              const errMsg = errorEmission.message;
               console.warn(`[Stream Upstream Error] ${errMsg}`);
               if (currentBlockType !== "text") {
                 await closeCurrentBlock();
@@ -552,17 +621,16 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
         if (jsonStr === "[DONE]") continue;
         try {
           const parsed = JSON.parse(jsonStr);
-          if (parsed.error || (parsed.code !== undefined && parsed.code !== 0)) {
-            const errMsg = parsed.error?.message || parsed.msg || parsed.message || (parsed.code ? `Upstream error ${parsed.code}` : "Unknown error");
+          if (isUpstreamError(parsed)) {
+            const errMsg = extractErrorMessage(parsed) || "Unknown error";
             accumulated += `\n[Upstream Notice: ${errMsg}]\n`;
             continue;
           }
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) accumulated += delta;
-          if (parsed.usage) {
-            if (parsed.usage.prompt_tokens) inputTokens = parsed.usage.prompt_tokens;
-            if (parsed.usage.completion_tokens) outputTokens = parsed.usage.completion_tokens;
-          }
+          const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
+          inputTokens = usage.input;
+          outputTokens = usage.output;
         } catch (e) {}
       }
       buffer = pos > 0 ? buffer.slice(pos) : buffer;
@@ -573,13 +641,11 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
         const parsed = JSON.parse(buffer.trim());
         accumulated = parsed.choices?.[0]?.message?.content ||
                       parsed.choices?.[0]?.delta?.content ||
-                      parsed.error?.message ||
-                      parsed.msg ||
+                      extractErrorMessage(parsed) ||
                       buffer.trim();
-        if (parsed.usage) {
-          if (parsed.usage.prompt_tokens) inputTokens = parsed.usage.prompt_tokens;
-          if (parsed.usage.completion_tokens) outputTokens = parsed.usage.completion_tokens;
-        }
+        const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
+        inputTokens = usage.input;
+        outputTokens = usage.output;
       } catch (e) {
         accumulated = buffer.trim();
       }

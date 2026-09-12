@@ -1,25 +1,87 @@
-import { sanitizeMessages } from "../engine/sanitizer.js";
+import { sanitizeMessages } from "../exchange/sanitizer.js";
+import { buildResponseHeaders } from "../http/headers.js";
+import {
+  orderAccounts,
+  computeCooldown,
+  classify,
+  businessErrorCode,
+  backoffMinutesForStreak
+} from "./scheduler.js";
 
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
 
 // 账号 429 / 额度耗尽动态退避记录: accountId -> { expiresAt: number, streak: number }
+// 进程内为写穿缓存；跨 isolate 的真实状态落在 KV，否则每个 isolate 各退避各的，冷却形同虚设。
 const accountCooldownRecord = new Map();
+const COOLDOWN_KV_PREFIX = "WB_COOLDOWN_";
+const COOLDOWN_KV_MAX_TTL_S = 900; // KV 最小 TTL 60s；退避上限 8 分钟，留足余量
 let roundRobinCounter = 0;
 
-function markAccountRateLimited(account) {
-  const current = accountCooldownRecord.get(account.id) || { streak: 0 };
-  const streak = current.streak + 1;
-  // 指数退避：首次 1分钟 -> 2分钟 -> 4分钟 -> 最长 8 分钟
-  const backoffMinutes = Math.min(Math.pow(2, streak - 1), 8);
-  const expiresAt = Date.now() + backoffMinutes * 60 * 1000;
-  accountCooldownRecord.set(account.id, { expiresAt, streak });
-  console.warn(`[WorkBuddy] Account "${account.name || account.id}" 429/rate-limited (streak ${streak}), cooling down for ${backoffMinutes}m...`);
+let lastHydrateTimestamp = 0;
+const HYDRATE_THROTTLE_MS = 5 * 1000; // 5 秒防抖：同一 isolate 内 5 秒内只水合一次 KV，消除高并发下的无谓往返
+
+function getKv(env) {
+  return env?.GATEWAY_KV || env?.WORKBUDDY_KV || null;
 }
 
-function clearAccountCooldown(account) {
+// 把 KV 中的冷却记录水合进本 isolate 的缓存（5 秒内节流，避免高频并发下每请求做 KV 批量读）
+async function hydrateCooldowns(env, accounts, force = false) {
+  const kv = getKv(env);
+  if (!kv || !accounts?.length) return;
+  const now = Date.now();
+  if (!force && (now - lastHydrateTimestamp < HYDRATE_THROTTLE_MS)) {
+    return;
+  }
+  lastHydrateTimestamp = now;
+
+  const results = await Promise.allSettled(
+    accounts.map(acc => kv.get(`${COOLDOWN_KV_PREFIX}${acc.id}`, "json"))
+  );
+  results.forEach((r, i) => {
+    if (r.status !== "fulfilled" || !r.value?.expiresAt) return;
+    const record = r.value;
+    if (record.expiresAt < now) return; // 已过期，不写入缓存
+    const local = accountCooldownRecord.get(accounts[i].id);
+    // 以更晚的过期时间为准，避免本 isolate 的陈旧记录覆盖 KV 的更新
+    if (!local || local.expiresAt < record.expiresAt) {
+      accountCooldownRecord.set(accounts[i].id, record);
+    }
+  });
+}
+
+async function persistCooldown(env, accountId, record) {
+  const kv = getKv(env);
+  if (!kv) return;
+  const ttlS = Math.max(60, Math.min(
+    Math.ceil((record.expiresAt - Date.now()) / 1000) + 60,
+    COOLDOWN_KV_MAX_TTL_S
+  ));
+  try {
+    await kv.put(`${COOLDOWN_KV_PREFIX}${accountId}`, JSON.stringify(record), { expirationTtl: ttlS });
+  } catch (e) {
+    console.error(`Failed to persist cooldown for ${accountId}:`, e);
+  }
+}
+
+function markAccountRateLimited(account, env) {
+  const record = computeCooldown(account.id, accountCooldownRecord);
+  accountCooldownRecord.set(account.id, record);
+  // 异步写入 KV，让其他 isolate 也能看到这次冷却
+  persistCooldown(env, account.id, record);
+  console.warn(`[WorkBuddy] Account "${account.name || account.id}" 429/rate-limited (streak ${record.streak}), cooling down for ${backoffMinutesForStreak(record.streak)}m...`);
+}
+
+function clearAccountCooldown(account, env) {
   accountCooldownRecord.delete(account.id);
+  // 同步清除 KV 中的冷却记录，避免其他 isolate 继续按旧记录跳过该账号
+  const kv = getKv(env);
+  if (kv) {
+    kv.delete(`${COOLDOWN_KV_PREFIX}${account.id}`).catch(e => {
+      console.error(`Failed to clear cooldown for ${account.id}:`, e);
+    });
+  }
 }
 
 export class WorkBuddyProvider {
@@ -149,33 +211,12 @@ export class WorkBuddyProvider {
       return new Response(JSON.stringify({ error: { message: "No active WorkBuddy accounts configured" } }), { status: 500 });
     }
 
-    const now = Date.now();
-    // 优先调度健康且未处于 429 冷却期的账号
-    const healthyAccounts = allAccounts.filter(acc => {
-      const rec = accountCooldownRecord.get(acc.id);
-      return !rec || rec.expiresAt < now;
-    });
-    const coolingAccounts = allAccounts.filter(acc => {
-      const rec = accountCooldownRecord.get(acc.id);
-      return rec && rec.expiresAt >= now;
-    });
+    // 先水合其他 isolate 写入的冷却记录，再做健康度筛选
+    await hydrateCooldowns(this.env, allAccounts);
 
-    let accounts = [];
-    if (healthyAccounts.length > 0) {
-      const startIdx = roundRobinCounter++ % healthyAccounts.length;
-      accounts = [
-        ...healthyAccounts.slice(startIdx),
-        ...healthyAccounts.slice(0, startIdx),
-        ...coolingAccounts
-      ];
-    } else {
-      coolingAccounts.sort((a, b) => {
-        const tA = accountCooldownRecord.get(a.id)?.expiresAt || 0;
-        const tB = accountCooldownRecord.get(b.id)?.expiresAt || 0;
-        return tA - tB;
-      });
-      accounts = coolingAccounts.length > 0 ? coolingAccounts : allAccounts;
-    }
+    // 账号排序委托给纯函数调度器：健康账号按 round-robin 轮转，冷却账号按到期时间兜底
+    const accounts = orderAccounts(allAccounts, accountCooldownRecord, Date.now(), roundRobinCounter);
+    roundRobinCounter += 1;
 
     if (payload.messages) {
       payload.messages = sanitizeMessages(payload.messages);
@@ -231,14 +272,14 @@ export class WorkBuddyProvider {
           }
           const retryResp = await makeRequest(token);
           if (retryResp.ok) {
-            clearAccountCooldown(account);
-            const headers = new Headers(retryResp.headers);
-            headers.set("X-Gateway-Account", account.id || "primary");
-            headers.set("X-Gateway-Account-Id", account.id || "primary");
+            clearAccountCooldown(account, this.env);
             return new Response(retryResp.body, {
               status: retryResp.status,
               statusText: retryResp.statusText,
-              headers: headers
+              headers: buildResponseHeaders(retryResp.headers, {
+                "X-Gateway-Account": account.id || "primary",
+                "X-Gateway-Account-Id": account.id || "primary"
+              })
             });
           }
           resp = retryResp;
@@ -251,23 +292,23 @@ export class WorkBuddyProvider {
             const clone = resp.clone();
             try {
               const resJson = await clone.json();
-              if (resJson.code !== undefined && resJson.code !== 0) {
+              if (businessErrorCode(resJson) !== 0) {
                 console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, backoff cooling down and auto-switching...`);
-                markAccountRateLimited(account);
+                markAccountRateLimited(account, this.env);
                 lastResponse = resp;
                 continue;
               }
             } catch (e) {}
           }
           // 请求成功，清除冷却与连续惩罚标记
-          clearAccountCooldown(account);
-          const headers = new Headers(resp.headers);
-          headers.set("X-Gateway-Account", account.id || "primary");
-          headers.set("X-Gateway-Account-Id", account.id || "primary");
+          clearAccountCooldown(account, this.env);
           return new Response(resp.body, {
             status: resp.status,
             statusText: resp.statusText,
-            headers: headers
+            headers: buildResponseHeaders(resp.headers, {
+              "X-Gateway-Account": account.id || "primary",
+              "X-Gateway-Account-Id": account.id || "primary"
+            })
           });
         }
 
@@ -275,29 +316,19 @@ export class WorkBuddyProvider {
         const status = resp.status;
 
         // 触发账号切换条件：429 限流 / 5xx 服务异常 / 403 风控合规拦截 / 额度耗尽
-        if (status === 429 || status >= 500) {
+        const errText = await resp.text();
+        const action = classify(status, errText);
+
+        if (action === "retry") {
+          // 5xx 服务端瞬时故障：切换下一账号，不惩罚当前账号
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned ${status}, auto-switching to next account...`);
-          if (status === 429) {
-            markAccountRateLimited(account);
-          }
           continue;
         }
 
-        const errText = await resp.text();
-        if (
-          status === 403 ||
-          errText.includes("11140") ||
-          errText.includes("11128") ||
-          errText.includes("6004") ||
-          errText.includes("quota") ||
-          errText.includes("rate limit") ||
-          errText.includes("频率限制") ||
-          errText.includes("欠费") ||
-          errText.includes("余额不足") ||
-          errText.includes("安全审核")
-        ) {
+        if (action === "cooldown") {
+          // 429 / 403 / 额度 / 风控：惩罚性退避后切换下一账号
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" quota/safety filter triggered (${status}: ${errText.substring(0, 80)}), cooling down and auto-switching to next account...`);
-          markAccountRateLimited(account);
+          markAccountRateLimited(account, this.env);
           continue;
         }
 

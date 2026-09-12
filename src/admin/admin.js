@@ -1,5 +1,5 @@
-import { getConfig, saveConfig, VERSION } from "../config.js";
-import { corsHeaders } from "../engine/exchange.js";
+import { getConfig, saveConfig, redactConfig, validateConfig, VERSION } from "../config/config.js";
+import { corsHeaders } from "../http/headers.js";
 
 export async function handleAdminRequest(request, env, authResult, fleet) {
   const url = new URL(request.url);
@@ -69,7 +69,8 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
   // 1. GET /admin/api/config
   if (path === "/admin/api/config" && request.method === "GET") {
     const config = await getConfig(env);
-    return new Response(JSON.stringify(config, null, 2), {
+    // 机密字段（accessToken / refreshToken / apiKey / cron_secret 等）脱敏后再返回
+    return new Response(JSON.stringify(redactConfig(config), null, 2), {
       status: 200,
       headers: { "Content-Type": "application/json", ...corsHeaders }
     });
@@ -81,6 +82,14 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
       const newConfig = await request.json();
       if (!newConfig.providers || !newConfig.routes) {
         return new Response(JSON.stringify({ error: { message: "Invalid config schema: providers and routes required" } }), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      }
+      // 详细 schema 校验：在写入前拦截缺失 provider / 畸形 routes 的配置
+      const validationErrors = validateConfig(newConfig);
+      if (validationErrors.length > 0) {
+        return new Response(JSON.stringify({ error: { message: "Invalid config: " + validationErrors.join("; ") } }), {
           status: 400,
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });

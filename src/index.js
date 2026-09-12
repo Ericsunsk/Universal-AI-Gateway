@@ -1,6 +1,7 @@
-import { getConfig, VERSION } from "./config.js";
-import { authenticateAccess } from "./auth.js";
-import { corsHeaders, dispatchExchange } from "./engine/exchange.js";
+import { getConfig, VERSION } from "./config/config.js";
+import { authenticateAccess } from "./auth/auth.js";
+import { corsHeaders } from "./http/headers.js";
+import { dispatchExchange } from "./exchange/exchange.js";
 import { getProviderFleet } from "./providers/fleet.js";
 import { handleAdminRequest } from "./admin/admin.js";
 
@@ -96,8 +97,9 @@ export default {
     }
 
     // 5. 手动签到接口 (/checkin)
+    // 需要 Master Key 或 Cron Secret：此接口会触发上游真实签到，不能对普通虚拟密钥开放
     if (path === "/checkin") {
-      const auth = authenticateAccess(request, config);
+      const auth = authenticateAccess(request, config, { requireMaster: true });
       if (!auth.ok) return auth.response;
 
       const results = await fleet.runDailyCheckins();

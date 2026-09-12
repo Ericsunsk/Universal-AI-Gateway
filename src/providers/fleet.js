@@ -1,4 +1,5 @@
 import { createProvider } from "./index.js";
+import { hasGetBalance, hasOnSchedule, hasDailyCheckin } from "./contract.js";
 
 let cachedFleet = null;
 let cachedFleetConfigRef = null;
@@ -36,7 +37,7 @@ export class ProviderFleet {
   async getBalance(targetId = null) {
     const providerId = targetId || this.config.usage_provider_id || "workbuddy";
     const provider = this.getProvider(providerId);
-    if (!provider || typeof provider.getBalance !== "function") {
+    if (!provider || !hasGetBalance(provider)) {
       return { success: false, balance: 0, total: 0, unit: "积分" };
     }
     try {
@@ -58,7 +59,7 @@ export class ProviderFleet {
   async runScheduledTasks() {
     const tasks = [];
     for (const provider of this.getAllActive()) {
-      if (typeof provider.onSchedule === "function") {
+      if (hasOnSchedule(provider)) {
         tasks.push(provider.onSchedule().catch(err => console.error(`[Fleet] Scheduled task failed for ${provider.id}:`, err)));
       }
     }
@@ -69,7 +70,7 @@ export class ProviderFleet {
   async runDailyCheckins() {
     const results = [];
     for (const provider of this.getAllActive()) {
-      if (typeof provider.doDailyCheckin === "function") {
+      if (hasDailyCheckin(provider)) {
         try {
           const res = await provider.doDailyCheckin();
           results.push({ provider: provider.id, res });
