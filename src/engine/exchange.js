@@ -1,4 +1,4 @@
-import { stripAnsi } from "./sanitizer.js";
+import { stripAnsi, optimizeToolOutput } from "./sanitizer.js";
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -84,11 +84,11 @@ function normalizeOpenAIMessages(messages) {
  * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
  * 3. 对历史工具执行结果（tool_result）的大块冗余终端输出进行两端保留式剪枝。
  */
-function pruneMessageContents(messages, isCompact, recentSafeTurns = 15) {
+function pruneMessageContents(messages, isCompact) {
   const total = messages.length;
   return messages.map((msg, idx) => {
     if (!msg || !Array.isArray(msg.content)) return msg;
-    const isOlder = (total - idx) > recentSafeTurns;
+    const turnAge = total - idx;
     let modified = false;
     const newContent = msg.content.map(part => {
       if (!part || typeof part !== "object") return part;
@@ -96,25 +96,10 @@ function pruneMessageContents(messages, isCompact, recentSafeTurns = 15) {
         let text = typeof part.content === "string" ? part.content : (
           Array.isArray(part.content) ? part.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n") : JSON.stringify(part.content || "")
         );
-        const cleaned = stripAnsi(text);
-        if (cleaned !== text) {
-          text = cleaned;
+        const optimized = optimizeToolOutput(text, turnAge, isCompact);
+        if (optimized !== text) {
           modified = true;
-        }
-        if (isCompact && text.length > 200) {
-          modified = true;
-          return { ...part, content: text.slice(0, 100) + "\n...[output truncated for summary]...\n" + text.slice(-50) };
-        }
-        if (isOlder && text.length > 800) {
-          modified = true;
-          const omitted = text.length - 350;
-          return {
-            ...part,
-            content: text.slice(0, 250) + `\n...[Gateway Notice: ${omitted} chars of historical tool output collapsed to optimize context & latency]...\n` + text.slice(-100)
-          };
-        }
-        if (modified) {
-          return { ...part, content: text };
+          return { ...part, content: optimized };
         }
       }
       return part;
@@ -126,14 +111,14 @@ function pruneMessageContents(messages, isCompact, recentSafeTurns = 15) {
 function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
-  // 当 maxTurnsLimit <= 0 时，保留全部会话轮次，但仍执行工具结果清洗（移除 ANSI 干扰码及对超长远古工具输出智能两端折叠）
+  // 当 maxTurnsLimit <= 0 时，保留全部会话轮次，但仍执行工具结果清洗（RTK 式 Token 压缩、测试成功项折叠与渐进式退火）
   if (maxTurnsLimit <= 0) {
-    return pruneMessageContents(messages, isCompact, 15);
+    return pruneMessageContents(messages, isCompact);
   }
 
   const total = messages.length;
   const maxWindow = isCompact ? Math.max(maxTurnsLimit * 1.5, 70) : maxTurnsLimit;
-  if (total <= maxWindow) return pruneMessageContents(messages, isCompact, 15);
+  if (total <= maxWindow) return pruneMessageContents(messages, isCompact);
 
   let cutIdx = Math.max(1, total - maxWindow);
   while (cutIdx < total - 5) {
@@ -151,7 +136,7 @@ function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
     ? { role: "user", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Resuming from active context.]` }
     : { role: "assistant", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Ready for next step.]` };
 
-  return pruneMessageContents([firstMsg, bridgeMsg, ...recentMsgs], isCompact, 12);
+  return pruneMessageContents([firstMsg, bridgeMsg, ...recentMsgs], isCompact);
 }
 
 // 内部协议工具：Anthropic 请求体 -> OpenAI 请求体
