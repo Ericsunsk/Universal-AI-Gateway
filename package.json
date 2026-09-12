@@ -8,7 +8,9 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "dry-run": "wrangler deploy --dry-run",
-    "test": "node --test"
+    "test": "node --test",
+    "deobfuscate": "node scripts/decode-trae.js",
+    "login:trae": "node scripts/login-trae.js"
   },
   "keywords": [
     "ai-gateway",

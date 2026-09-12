@@ -142,7 +142,7 @@ export async function getConfig(env, forceRefresh = false) {
 }
 
 // 敏感字段清单：这些值永不通过 API 返回给客户端
-const SECRET_FIELDS = ["accessToken", "refreshToken", "apiKey", "cookie", "token"];
+const SECRET_FIELDS = ["accessToken", "refreshToken", "apiKey", "cookie", "token", "jwtToken"];
 const REDACTED = "***REDACTED***";
 
 function isRedacted(value) {
