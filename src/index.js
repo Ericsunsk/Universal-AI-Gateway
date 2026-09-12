@@ -52,25 +52,14 @@ export default {
     }
 
     // 3. 状态检查 (/status)
+    // 仅返回无害的存活信息。余额 / 签到日志 / Token 刷新时间属敏感运营数据，
+    // 已收敛到需鉴权的 /admin/api/status 与 /v1/usage，避免公开泄露上游账号状态。
     if (path === "/status") {
-      let lastCheckin = null;
-      let lastRefresh = null;
       const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
-      if (kv) {
-        try {
-          const raw = await kv.get("LAST_CHECKIN");
-          if (raw) lastCheckin = JSON.parse(raw);
-          lastRefresh = await kv.get("LAST_REFRESH");
-        } catch (e) {}
-      }
-      const bal = await fleet.getBalance();
       return new Response(JSON.stringify({
         service: "universal-ai-gateway",
         version: VERSION,
-        kvEnabled: !!kv,
-        balance: bal.balance,
-        lastRefresh: lastRefresh,
-        lastCheckin: lastCheckin
+        kvEnabled: !!kv
       }, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json", ...corsHeaders }

@@ -45,7 +45,7 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
       ],
       public_endpoints: [
         { path: "/healthz", method: "GET", description: "Worker liveness heartbeat" },
-        { path: "/status", method: "GET", description: "Public health and balance summary" },
+        { path: "/status", method: "GET", description: "Public health summary (no sensitive data)" },
         { path: "/v1/usage", method: "GET", description: "CC-Switch compatible credit inquiry (requires API Key)" },
         { path: "/v1/models", method: "GET", description: "OpenAI-compatible models catalog (requires API Key)" },
         { path: "/v1/messages", method: "POST", description: "Anthropic Messages protocol exchange (Claude Code)" },

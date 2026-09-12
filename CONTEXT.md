@@ -22,17 +22,19 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **failover** — the retry loop in `workbuddy.js` `callChat`: try accounts in scheduler order, classify each failure, switch account (or cool down + switch), and only return the error to the client when it's `fatal`.
 
-## Protocol translation (`src/engine/exchange.js`)
+## Protocol translation (`src/exchange/exchange.js`)
 
 - **exchange / dispatch** — the layer that translates between the client-facing protocol (Anthropic or OpenAI) and the upstream protocol, in both directions.
 
-- **sanitize** — rewriting Claude-Code / client fingerprints to bypass upstream keyword filters (Tencent error `11128`). In `src/engine/sanitizer.js`.
+- **sanitize** — rewriting Claude-Code / client fingerprints to bypass upstream keyword filters (Tencent error `11128`). In `src/exchange/sanitizer.js`.
 
 - **normalize** — reordering OpenAI `tool_calls`/`tool_results` to satisfy upstream message-sequence rules (Tencent error `11148`). `normalizeOpenAIMessages`.
 
 - **transform** — the request-side mapping: Anthropic `tool_use`/`tool_result` blocks → OpenAI `tool_calls`/`tool` messages, and vice versa for the response.
 
 - **reduce** — the pure per-chunk classifier (`reduceOpenAIChunk`) that maps one parsed OpenAI SSE chunk → a typed emission (`error` / `thinking` / `text` / `tool_use`). The streaming state machine (`streamOpenAIToAnthropic`) consumes it, but the error-classification branch is the only part wired through the reducer today; text/thinking/tool-call emission remains inline.
+
+- **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/exchange.js`).
 
 ## Classification vocabulary (in the scheduler)
 

@@ -67,6 +67,8 @@ flowchart TD
     end
 ```
 
+> 🔧 **开发者**：项目源码按领域分层组织于 `src/`（`http/` `config/` `auth/` `exchange/` `providers/`），领域词汇表见 [`CONTEXT.md`](CONTEXT.md) —— 其中定义了 route、candidate、account、cooldown、account scheduler、sanitize、normalize 等术语的精确含义。
+
 ---
 
 ## 🚀 快速部署方案
@@ -249,8 +251,8 @@ claude
 | `/v1/usage` | `GET` | Virtual Key / Master Key | CC-Switch 专用的实时积分/额度查询接口 |
 | `/admin` | `GET` | 公开 | Agent-Native 自解释规范与端点导航索引 |
 | `/admin/api/*` | `*` | Master Key Required | 管理后台后端 REST API（配置热存、状态查询、运维动作） |
-| `/status` | `GET` | 公开 | Worker 运行状态与最近签到日志健康检查 |
-| `/checkin` | `POST/GET` | Virtual Key / Master Key | 手动触发所有激活渠道执行签到 |
+| `/status` | `GET` | 公开 | Worker 存活状态（仅 service/version，不含余额等敏感数据） |
+| `/checkin` | `POST/GET` | Master Key / Cron Secret | 手动触发所有激活渠道执行签到（不对普通 Virtual Key 开放） |
 | `/healthz` | `GET` | 公开 | 容器存活心跳探测 |
 
 ---
