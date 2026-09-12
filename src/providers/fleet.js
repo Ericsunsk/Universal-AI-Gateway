@@ -45,7 +45,9 @@ export class ProviderFleet {
         success: !!res.success,
         balance: res.balance ?? 0,
         total: res.total ?? 0,
-        unit: res.unit || "积分"
+        unit: res.unit || "积分",
+        accounts_count: res.accounts_count || 1,
+        accounts: res.accounts || []
       };
     } catch (e) {
       return { success: false, balance: 0, total: 0, unit: "积分", error: e.message };

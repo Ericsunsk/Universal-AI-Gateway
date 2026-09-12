@@ -4,6 +4,10 @@ import { sanitizeMessages } from "../engine/sanitizer.js";
 const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
 
+// 账号 429 / 额度耗尽冷却记录: accountId -> timestamp (冷却期内请求自动分流至池中其他健康账号)
+const accountCooldownMap = new Map();
+let roundRobinCounter = 0;
+
 export class WorkBuddyProvider {
   constructor(config, env) {
     this.id = config.id || "workbuddy";
@@ -119,11 +123,28 @@ export class WorkBuddyProvider {
     return null;
   }
 
-  // 核心 Chat 接口：支持多账号自动故障转移（Failover on 429 / Quota Error）与级联取消
+  // 核心 Chat 接口：支持多账号负载均衡（Round-Robin）与自动故障转移（Failover on 429 / Quota Error）
   async callChat(payload, options = {}) {
-    const accounts = this.getAccounts();
-    if (accounts.length === 0) {
+    const allAccounts = this.getAccounts();
+    if (allAccounts.length === 0) {
       return new Response(JSON.stringify({ error: { message: "No active WorkBuddy accounts configured" } }), { status: 500 });
+    }
+
+    const now = Date.now();
+    // 优先调度健康且未处于 429 冷却期的账号
+    const healthyAccounts = allAccounts.filter(acc => (accountCooldownMap.get(acc.id) || 0) < now);
+    const coolingAccounts = allAccounts.filter(acc => (accountCooldownMap.get(acc.id) || 0) >= now);
+
+    let accounts = [];
+    if (healthyAccounts.length > 0) {
+      const startIdx = roundRobinCounter++ % healthyAccounts.length;
+      accounts = [
+        ...healthyAccounts.slice(startIdx),
+        ...healthyAccounts.slice(0, startIdx),
+        ...coolingAccounts
+      ];
+    } else {
+      accounts = allAccounts;
     }
 
     if (payload.messages) {
@@ -180,6 +201,7 @@ export class WorkBuddyProvider {
           }
           const retryResp = await makeRequest(token);
           if (retryResp.ok) {
+            accountCooldownMap.delete(account.id);
             return retryResp;
           }
           resp = retryResp;
@@ -193,12 +215,15 @@ export class WorkBuddyProvider {
             try {
               const resJson = await clone.json();
               if (resJson.code !== undefined && resJson.code !== 0) {
-                console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, auto-switching next account...`);
+                console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, cooling down and auto-switching...`);
+                accountCooldownMap.set(account.id, Date.now() + 120 * 1000);
                 lastResponse = resp;
                 continue;
               }
             } catch (e) {}
           }
+          // 请求成功，清除冷却标记
+          accountCooldownMap.delete(account.id);
           return resp;
         }
 
@@ -208,12 +233,16 @@ export class WorkBuddyProvider {
         // 触发账号切换条件：429 限流 / 5xx 服务异常 / 额度耗尽
         if (status === 429 || status >= 500) {
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned ${status}, auto-switching to next account...`);
+          if (status === 429) {
+            accountCooldownMap.set(account.id, Date.now() + 120 * 1000); // 冷却 2 分钟，避免后续请求空耗
+          }
           continue;
         }
 
         const errText = await resp.text();
-        if (errText.includes("11128") || errText.includes("quota") || errText.includes("rate limit") || errText.includes("欠费") || errText.includes("余额不足")) {
+        if (errText.includes("11128") || errText.includes("6004") || errText.includes("quota") || errText.includes("rate limit") || errText.includes("频率限制") || errText.includes("欠费") || errText.includes("余额不足")) {
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" quota/filter triggered, auto-switching to next account...`);
+          accountCooldownMap.set(account.id, Date.now() + 120 * 1000);
           continue;
         }
 
