@@ -6,7 +6,7 @@ export const corsHeaders = {
 
 // 模块级单例 Encoder / Decoder 与预编码静态 Buffer（零 GC 内存分配）
 const textEncoder = new TextEncoder();
-const KEEP_ALIVE_BYTES = textEncoder.encode(": keep-alive\n\n");
+const KEEP_ALIVE_BYTES = textEncoder.encode("event: ping\ndata: {\"type\":\"ping\"}\n\n");
 const EVENT_MSG_STOP_BYTES = textEncoder.encode("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
 
 // 内部协议工具：Tools 转换
@@ -76,13 +76,72 @@ function normalizeOpenAIMessages(messages) {
   return result;
 }
 
+/**
+ * 智能上下文窗口剪枝与管理：
+ * 1. 彻底根治超长会话（如 Claude Code 累积数十上百轮、上千条消息）在 Cloudflare Workers 触发 1102 (CPU/Memory Limit) 致命错误。
+ * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
+ * 3. 对历史工具执行结果（tool_result）的大块冗余终端输出进行两端保留式剪枝。
+ */
+function pruneMessageContents(messages, isCompact, recentSafeTurns = 12) {
+  const total = messages.length;
+  return messages.map((msg, idx) => {
+    if (!msg || !Array.isArray(msg.content)) return msg;
+    const isOlder = (total - idx) > recentSafeTurns;
+    let modified = false;
+    const newContent = msg.content.map(part => {
+      if (!part || typeof part !== "object") return part;
+      if (part.type === "tool_result") {
+        let text = typeof part.content === "string" ? part.content : (
+          Array.isArray(part.content) ? part.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n") : JSON.stringify(part.content || "")
+        );
+        if (isCompact && text.length > 120) {
+          modified = true;
+          return { ...part, content: text.slice(0, 80) + "...[output truncated for summary]..." };
+        }
+        if (isOlder && text.length > 400) {
+          modified = true;
+          return { ...part, content: text.slice(0, 200) + "\n...[output truncated by gateway]...\n" + text.slice(-80) };
+        }
+      }
+      return part;
+    });
+    return modified ? { ...msg, content: newContent } : msg;
+  });
+}
+
+function pruneAnthropicMessages(messages, isCompact) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const total = messages.length;
+  const maxWindow = isCompact ? 70 : 40;
+  if (total <= maxWindow) return pruneMessageContents(messages, isCompact, 15);
+
+  let cutIdx = Math.max(1, total - maxWindow);
+  while (cutIdx < total - 5) {
+    const m = messages[cutIdx];
+    const isToolResult = m && m.role === "user" && Array.isArray(m.content) && m.content.some(c => c && c.type === "tool_result");
+    if (!isToolResult) break;
+    cutIdx++;
+  }
+
+  const firstMsg = messages[0];
+  const recentMsgs = messages.slice(cutIdx);
+  const truncatedCount = cutIdx - 1;
+  const firstRecent = recentMsgs[0];
+  const bridgeMsg = firstRecent && firstRecent.role === "assistant"
+    ? { role: "user", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Resuming from active context.]` }
+    : { role: "assistant", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Ready for next step.]` };
+
+  return pruneMessageContents([firstMsg, bridgeMsg, ...recentMsgs], isCompact, 12);
+}
+
 // 内部协议工具：Anthropic 请求体 -> OpenAI 请求体
 function transformAnthropicToOpenAI(body, targetModel) {
   const model = targetModel || body.model || "deepseek-v4.1-flash";
   const openaiMessages = [];
 
-  const totalMessages = Array.isArray(body.messages) ? body.messages.length : 0;
-  const lastMsg = totalMessages > 0 ? body.messages[totalMessages - 1] : null;
+  const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+  const totalMessages = rawMessages.length;
+  const lastMsg = totalMessages > 0 ? rawMessages[totalMessages - 1] : null;
   const lastText = lastMsg && typeof lastMsg.content === "string" ? lastMsg.content : (
     Array.isArray(lastMsg?.content) ? lastMsg.content.map(c => c.text || "").join(" ") : ""
   );
@@ -98,6 +157,9 @@ function transformAnthropicToOpenAI(body, targetModel) {
     lastText.includes("<analysis>")
   );
 
+  // 核心优化：滑动窗口与工具结果剪枝，彻底消除 1000+ 轮超长历史对 Workers 10ms CPU/内存的严重冲击
+  const messages = pruneAnthropicMessages(rawMessages, isCompact);
+
   if (body.system) {
     const sysText = typeof body.system === "string"
       ? body.system
@@ -107,86 +169,78 @@ function transformAnthropicToOpenAI(body, targetModel) {
     openaiMessages.push({ role: "system", content: sysText });
   }
 
-  if (Array.isArray(body.messages)) {
-    for (let mIdx = 0; mIdx < body.messages.length; mIdx++) {
-      const msg = body.messages[mIdx];
-      if (!msg) continue;
-      const isOlder = (totalMessages - mIdx) > 15;
+  for (let mIdx = 0; mIdx < messages.length; mIdx++) {
+    const msg = messages[mIdx];
+    if (!msg) continue;
 
-      if (typeof msg.content === "string") {
+    if (typeof msg.content === "string") {
+      openaiMessages.push({
+        role: msg.role === "assistant" ? "assistant" : "user",
+        content: msg.content
+      });
+    } else if (Array.isArray(msg.content)) {
+      const toolUseBlocks = [];
+      const toolResultBlocks = [];
+      const textBlocks = [];
+
+      for (let i = 0; i < msg.content.length; i++) {
+        const b = msg.content[i];
+        if (!b) continue;
+        if (b.type === "tool_use") toolUseBlocks.push(b);
+        else if (b.type === "tool_result") toolResultBlocks.push(b);
+        else textBlocks.push(b);
+      }
+
+      if (msg.role === "assistant" && toolUseBlocks.length > 0) {
+        let textContent = null;
+        if (textBlocks.length === 1) {
+          textContent = textBlocks[0].text || null;
+        } else if (textBlocks.length > 1) {
+          textContent = textBlocks.map(b => b.text || "").join("\n");
+        }
+
+        const toolCalls = toolUseBlocks.map(tb => ({
+          id: tb.id,
+          type: "function",
+          function: {
+            name: tb.name,
+            arguments: typeof tb.input === "string" ? tb.input : JSON.stringify(tb.input || {})
+          }
+        }));
+        openaiMessages.push({
+          role: "assistant",
+          content: textContent,
+          tool_calls: toolCalls
+        });
+      } else if (toolResultBlocks.length > 0) {
+        for (let i = 0; i < toolResultBlocks.length; i++) {
+          const rb = toolResultBlocks[i];
+          let resContent = "";
+          if (typeof rb.content === "string") {
+            resContent = rb.content;
+          } else if (Array.isArray(rb.content)) {
+            resContent = rb.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n");
+          } else {
+            resContent = JSON.stringify(rb.content || "");
+          }
+
+          openaiMessages.push({
+            role: "tool",
+            tool_call_id: rb.tool_use_id,
+            content: resContent
+          });
+        }
+      } else {
+        let combined = "";
+        if (textBlocks.length === 1) {
+          combined = textBlocks[0].text || "";
+        } else if (textBlocks.length > 1) {
+          combined = textBlocks.map(b => b.text || "").join("\n");
+        }
         openaiMessages.push({
           role: msg.role === "assistant" ? "assistant" : "user",
-          content: msg.content
+          content: combined
         });
-      } else if (Array.isArray(msg.content)) {
-        const toolUseBlocks = [];
-        const toolResultBlocks = [];
-        const textBlocks = [];
-
-        for (let i = 0; i < msg.content.length; i++) {
-          const b = msg.content[i];
-          if (!b) continue;
-          if (b.type === "tool_use") toolUseBlocks.push(b);
-          else if (b.type === "tool_result") toolResultBlocks.push(b);
-          else textBlocks.push(b);
-        }
-
-        if (msg.role === "assistant" && toolUseBlocks.length > 0) {
-          let textContent = null;
-          if (textBlocks.length === 1) {
-            textContent = textBlocks[0].text || null;
-          } else if (textBlocks.length > 1) {
-            textContent = textBlocks.map(b => b.text || "").join("\n");
-          }
-
-          const toolCalls = toolUseBlocks.map(tb => ({
-            id: tb.id,
-            type: "function",
-            function: {
-              name: tb.name,
-              arguments: typeof tb.input === "string" ? tb.input : JSON.stringify(tb.input || {})
-            }
-          }));
-          openaiMessages.push({
-            role: "assistant",
-            content: textContent,
-            tool_calls: toolCalls
-          });
-        } else if (toolResultBlocks.length > 0) {
-          for (let i = 0; i < toolResultBlocks.length; i++) {
-            const rb = toolResultBlocks[i];
-            let resContent = "";
-            if (typeof rb.content === "string") {
-              resContent = rb.content;
-            } else if (Array.isArray(rb.content)) {
-              resContent = rb.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n");
-            } else {
-              resContent = JSON.stringify(rb.content || "");
-            }
-
-            // 智能剪枝：对总结请求或早于最近15轮的超长工具结果进行两端保留式截断，彻底消除巨型输出造成的内存与CPU超时
-            if ((isCompact || (isOlder && resContent.length > 400)) && resContent.length > 300) {
-              resContent = resContent.slice(0, 200) + "\n...[output truncated for summary / context limit]...\n" + resContent.slice(-80);
-            }
-
-            openaiMessages.push({
-              role: "tool",
-              tool_call_id: rb.tool_use_id,
-              content: resContent
-            });
-          }
-        } else {
-          let combined = "";
-          if (textBlocks.length === 1) {
-            combined = textBlocks[0].text || "";
-          } else if (textBlocks.length > 1) {
-            combined = textBlocks.map(b => b.text || "").join("\n");
-          }
-          openaiMessages.push({
-            role: msg.role === "assistant" ? "assistant" : "user",
-            content: combined
-          });
-        }
       }
     }
   }
@@ -272,16 +326,39 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
         if (done) break;
 
         buffer += streamDecoder.decode(value, { stream: true });
+        let pos = 0;
         let lineEnd;
-        while ((lineEnd = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, lineEnd).trim();
-          buffer = buffer.slice(lineEnd + 1);
+        while ((lineEnd = buffer.indexOf("\n", pos)) !== -1) {
+          const line = buffer.slice(pos, lineEnd).trim();
+          pos = lineEnd + 1;
           if (!line || !line.startsWith("data:")) continue;
           const jsonStr = line.slice(5).trim();
           if (jsonStr === "[DONE]") continue;
 
           try {
             const parsed = JSON.parse(jsonStr);
+
+            // 检查上游是否嵌入了业务错误（如 Tencent code !== 0 或 error 字段）
+            const isError = parsed.error || (parsed.code !== undefined && parsed.code !== 0);
+            if (isError) {
+              const errMsg = parsed.error?.message || parsed.msg || parsed.message || (parsed.code ? `Upstream error code ${parsed.code}` : "Unknown error");
+              console.warn(`[Stream Upstream Error] ${errMsg}`);
+              if (currentBlockType !== "text") {
+                await closeCurrentBlock();
+                currentBlockIndex = Math.max(0, currentBlockIndex + 1);
+                currentBlockType = "text";
+                await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
+                  type: "content_block_start",
+                  index: currentBlockIndex,
+                  content_block: { type: "text", text: "" }
+                })}\n\n`));
+              }
+              await writer.write(textEncoder.encode(
+                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(`\n[Upstream Notice: ${errMsg}]\n`)}}}\n\n`
+              ));
+              continue;
+            }
+
             const delta = parsed.choices?.[0]?.delta;
             if (!delta) continue;
 
@@ -355,9 +432,41 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
             }
           } catch (e) {}
         }
+        buffer = pos > 0 ? buffer.slice(pos) : buffer;
       }
 
-      await closeCurrentBlock();
+      // 若流结束时 buffer 尚存非 SSE 格式内容（如上游返回单一 JSON）
+      if (currentBlockIndex === -1 && buffer.trim()) {
+        try {
+          const parsed = JSON.parse(buffer.trim());
+          const text = parsed.choices?.[0]?.message?.content ||
+                       parsed.choices?.[0]?.delta?.content ||
+                       parsed.error?.message ||
+                       parsed.msg ||
+                       (parsed.code ? `Upstream error ${parsed.code}` : buffer.trim());
+          if (text) {
+            currentBlockIndex = 0;
+            currentBlockType = "text";
+            await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" }
+            })}\n\n`));
+            await writer.write(textEncoder.encode(
+              `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(text)}}}\n\n`
+            ));
+          }
+        } catch (e) {}
+      }
+
+      // 核心协议保障：若整个流未产生任何 content_block，强制合成 1 个空 text 块闭环，绝不让 Claude Code 触发 ph.length === 0 的流式回退报警
+      if (currentBlockIndex === -1) {
+        currentBlockIndex = 0;
+        await writer.write(textEncoder.encode(`event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`));
+        await writer.write(textEncoder.encode(`event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`));
+      } else {
+        await closeCurrentBlock();
+      }
 
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
@@ -366,12 +475,33 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       })}\n\n`));
 
       await writer.write(EVENT_MSG_STOP_BYTES);
+    } catch (err) {
+      console.error("[Stream Error]", err);
+      // 容灾输出：即使网络或上游异常断流，也输出结构化友好提示并优雅闭环，不直接 crash 客户端
+      try {
+        if (currentBlockType !== "text") {
+          await closeCurrentBlock();
+          currentBlockIndex = Math.max(0, currentBlockIndex + 1);
+          currentBlockType = "text";
+          await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
+            type: "content_block_start",
+            index: currentBlockIndex,
+            content_block: { type: "text", text: "" }
+          })}\n\n`));
+        }
+        await writer.write(textEncoder.encode(
+          `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(`\n[Gateway Warning: Upstream stream interrupted (${err.message || "EOF"})]\n`)}}}\n\n`
+        ));
+        await closeCurrentBlock();
+        await writer.write(textEncoder.encode(`event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}\n\n`));
+        await writer.write(EVENT_MSG_STOP_BYTES);
+      } catch (e) {}
     } finally {
       clearInterval(pingInterval);
-      await writer.close();
+      try { await writer.close(); } catch (e) {}
     }
   })().catch(err => {
-    writer.abort(err);
+    try { writer.abort(err); } catch (e) {}
   });
 
   return new Response(readable, {
@@ -400,15 +530,21 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
+      let pos = 0;
       let lineEnd;
-      while ((lineEnd = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, lineEnd).trim();
-        buffer = buffer.slice(lineEnd + 1);
+      while ((lineEnd = buffer.indexOf("\n", pos)) !== -1) {
+        const line = buffer.slice(pos, lineEnd).trim();
+        pos = lineEnd + 1;
         if (!line || !line.startsWith("data:")) continue;
         const jsonStr = line.slice(5).trim();
         if (jsonStr === "[DONE]") continue;
         try {
           const parsed = JSON.parse(jsonStr);
+          if (parsed.error || (parsed.code !== undefined && parsed.code !== 0)) {
+            const errMsg = parsed.error?.message || parsed.msg || parsed.message || (parsed.code ? `Upstream error ${parsed.code}` : "Unknown error");
+            accumulated += `\n[Upstream Notice: ${errMsg}]\n`;
+            continue;
+          }
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) accumulated += delta;
           if (parsed.usage) {
@@ -417,12 +553,17 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel) {
           }
         } catch (e) {}
       }
+      buffer = pos > 0 ? buffer.slice(pos) : buffer;
     }
 
     if (!accumulated && buffer.trim()) {
       try {
         const parsed = JSON.parse(buffer.trim());
-        accumulated = parsed.choices?.[0]?.message?.content || buffer.trim();
+        accumulated = parsed.choices?.[0]?.message?.content ||
+                      parsed.choices?.[0]?.delta?.content ||
+                      parsed.error?.message ||
+                      parsed.msg ||
+                      buffer.trim();
         if (parsed.usage) {
           if (parsed.usage.prompt_tokens) inputTokens = parsed.usage.prompt_tokens;
           if (parsed.usage.completion_tokens) outputTokens = parsed.usage.completion_tokens;
@@ -435,6 +576,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel) {
     reader.releaseLock();
   }
 
+  accumulated = accumulated || " ";
   outputTokens = Math.max(outputTokens, Math.ceil(accumulated.length / 4));
 
   return new Response(JSON.stringify({

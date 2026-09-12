@@ -183,8 +183,20 @@ export class WorkBuddyProvider {
           resp = retryResp;
         }
 
-        // 成功响应直接返回
+        // 成功响应直接返回（若请求 stream 但返回 application/json，检测是否为腾讯 200 业务错误码）
         if (resp.ok) {
+          const contentType = resp.headers.get("content-type") || "";
+          if (payload.stream && contentType.includes("application/json")) {
+            const clone = resp.clone();
+            try {
+              const resJson = await clone.json();
+              if (resJson.code !== undefined && resJson.code !== 0) {
+                console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, auto-switching next account...`);
+                lastResponse = resp;
+                continue;
+              }
+            } catch (e) {}
+          }
           return resp;
         }
 
