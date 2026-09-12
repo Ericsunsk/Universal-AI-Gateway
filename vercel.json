@@ -1,6 +1,5 @@
 {
   "version": 2,
-  "regions": ["sin1"],
   "installCommand": "npm install --omit=dev",
   "rewrites": [
     {
