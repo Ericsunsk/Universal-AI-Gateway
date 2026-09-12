@@ -9,27 +9,34 @@ export const config = {
 const memoryKvStorage = new Map();
 
 function createKvAdapter(env) {
-  const restUrl = env.KV_REST_API_URL || env.UPSTASH_REDIS_REST_URL;
-  const restToken = env.KV_REST_API_TOKEN || env.UPSTASH_REDIS_REST_TOKEN;
+  const restUrl = env.KV_REST_API_URL || env.UPSTASH_REDIS_REST_URL || env.REDIS_REST_API_URL;
+  const restToken = env.KV_REST_API_TOKEN || env.UPSTASH_REDIS_REST_TOKEN || env.REDIS_REST_API_TOKEN;
 
   if (restUrl && restToken) {
     return {
       async get(key) {
         try {
-          const resp = await fetch(`${restUrl}/get/${encodeURIComponent(key)}`, {
-            headers: { Authorization: `Bearer ${restToken}` },
+          // 优先使用标准 POST 命令数组，彻底规避 key 中的特殊字符与 URL 编码截断问题
+          const resp = await fetch(restUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${restToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(["GET", key]),
           });
-          if (!resp.ok) return null;
+          if (!resp.ok) return memoryKvStorage.get(key) || null;
           const data = await resp.json();
-          return data.result ?? null;
+          return data.result ?? (memoryKvStorage.get(key) || null);
         } catch (e) {
           console.error(`[Upstash KV] GET ${key} failed:`, e);
           return memoryKvStorage.get(key) || null;
         }
       },
       async put(key, value) {
+        const valStr = typeof value === "string" ? value : JSON.stringify(value);
+        memoryKvStorage.set(key, valStr);
         try {
-          const valStr = typeof value === "string" ? value : JSON.stringify(value);
           await fetch(restUrl, {
             method: "POST",
             headers: {
@@ -38,10 +45,8 @@ function createKvAdapter(env) {
             },
             body: JSON.stringify(["SET", key, valStr]),
           });
-          memoryKvStorage.set(key, valStr);
         } catch (e) {
           console.error(`[Upstash KV] PUT ${key} failed:`, e);
-          memoryKvStorage.set(key, typeof value === "string" ? value : JSON.stringify(value));
         }
       },
     };
