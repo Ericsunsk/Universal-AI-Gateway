@@ -4,9 +4,23 @@ import { sanitizeMessages } from "../engine/sanitizer.js";
 const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
 
-// 账号 429 / 额度耗尽冷却记录: accountId -> timestamp (冷却期内请求自动分流至池中其他健康账号)
-const accountCooldownMap = new Map();
+// 账号 429 / 额度耗尽动态退避记录: accountId -> { expiresAt: number, streak: number }
+const accountCooldownRecord = new Map();
 let roundRobinCounter = 0;
+
+function markAccountRateLimited(account) {
+  const current = accountCooldownRecord.get(account.id) || { streak: 0 };
+  const streak = current.streak + 1;
+  // 指数退避：首次 1分钟 -> 2分钟 -> 4分钟 -> 最长 8 分钟
+  const backoffMinutes = Math.min(Math.pow(2, streak - 1), 8);
+  const expiresAt = Date.now() + backoffMinutes * 60 * 1000;
+  accountCooldownRecord.set(account.id, { expiresAt, streak });
+  console.warn(`[WorkBuddy] Account "${account.name || account.id}" 429/rate-limited (streak ${streak}), cooling down for ${backoffMinutes}m...`);
+}
+
+function clearAccountCooldown(account) {
+  accountCooldownRecord.delete(account.id);
+}
 
 export class WorkBuddyProvider {
   constructor(config, env) {
@@ -137,8 +151,14 @@ export class WorkBuddyProvider {
 
     const now = Date.now();
     // 优先调度健康且未处于 429 冷却期的账号
-    const healthyAccounts = allAccounts.filter(acc => (accountCooldownMap.get(acc.id) || 0) < now);
-    const coolingAccounts = allAccounts.filter(acc => (accountCooldownMap.get(acc.id) || 0) >= now);
+    const healthyAccounts = allAccounts.filter(acc => {
+      const rec = accountCooldownRecord.get(acc.id);
+      return !rec || rec.expiresAt < now;
+    });
+    const coolingAccounts = allAccounts.filter(acc => {
+      const rec = accountCooldownRecord.get(acc.id);
+      return rec && rec.expiresAt >= now;
+    });
 
     let accounts = [];
     if (healthyAccounts.length > 0) {
@@ -149,7 +169,12 @@ export class WorkBuddyProvider {
         ...coolingAccounts
       ];
     } else {
-      accounts = allAccounts;
+      coolingAccounts.sort((a, b) => {
+        const tA = accountCooldownRecord.get(a.id)?.expiresAt || 0;
+        const tB = accountCooldownRecord.get(b.id)?.expiresAt || 0;
+        return tA - tB;
+      });
+      accounts = coolingAccounts.length > 0 ? coolingAccounts : allAccounts;
     }
 
     if (payload.messages) {
@@ -206,8 +231,15 @@ export class WorkBuddyProvider {
           }
           const retryResp = await makeRequest(token);
           if (retryResp.ok) {
-            accountCooldownMap.delete(account.id);
-            return retryResp;
+            clearAccountCooldown(account);
+            const headers = new Headers(retryResp.headers);
+            headers.set("X-Gateway-Account", account.name || account.id);
+            headers.set("X-Gateway-Account-Id", account.id);
+            return new Response(retryResp.body, {
+              status: retryResp.status,
+              statusText: retryResp.statusText,
+              headers: headers
+            });
           }
           resp = retryResp;
         }
@@ -220,16 +252,23 @@ export class WorkBuddyProvider {
             try {
               const resJson = await clone.json();
               if (resJson.code !== undefined && resJson.code !== 0) {
-                console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, cooling down and auto-switching...`);
-                accountCooldownMap.set(account.id, Date.now() + 120 * 1000);
+                console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, backoff cooling down and auto-switching...`);
+                markAccountRateLimited(account);
                 lastResponse = resp;
                 continue;
               }
             } catch (e) {}
           }
-          // 请求成功，清除冷却标记
-          accountCooldownMap.delete(account.id);
-          return resp;
+          // 请求成功，清除冷却与连续惩罚标记
+          clearAccountCooldown(account);
+          const headers = new Headers(resp.headers);
+          headers.set("X-Gateway-Account", account.name || account.id);
+          headers.set("X-Gateway-Account-Id", account.id);
+          return new Response(resp.body, {
+            status: resp.status,
+            statusText: resp.statusText,
+            headers: headers
+          });
         }
 
         lastResponse = resp;
@@ -239,7 +278,7 @@ export class WorkBuddyProvider {
         if (status === 429 || status >= 500) {
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned ${status}, auto-switching to next account...`);
           if (status === 429) {
-            accountCooldownMap.set(account.id, Date.now() + 120 * 1000); // 冷却 2 分钟，避免后续请求空耗
+            markAccountRateLimited(account);
           }
           continue;
         }
@@ -247,7 +286,7 @@ export class WorkBuddyProvider {
         const errText = await resp.text();
         if (errText.includes("11128") || errText.includes("6004") || errText.includes("quota") || errText.includes("rate limit") || errText.includes("频率限制") || errText.includes("欠费") || errText.includes("余额不足")) {
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" quota/filter triggered, auto-switching to next account...`);
-          accountCooldownMap.set(account.id, Date.now() + 120 * 1000);
+          markAccountRateLimited(account);
           continue;
         }
 

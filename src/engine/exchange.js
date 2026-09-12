@@ -277,7 +277,7 @@ function transformAnthropicToOpenAI(body, targetModel, config = {}) {
 }
 
 // 内部流式转译：OpenAI SSE -> Anthropic SSE（优化：零内存拷贝保活与事件复用）
-function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null) {
+function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}) {
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -521,13 +521,14 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
-      ...corsHeaders
+      ...corsHeaders,
+      ...extraHeaders
     }
   });
 }
 
 // 内部非流式转译：OpenAI -> Anthropic JSON (优化：增量流式读取，零全量内存拷贝)
-async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel) {
+async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, extraHeaders = {}) {
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
@@ -601,7 +602,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel) {
     usage: { input_tokens: inputTokens, output_tokens: outputTokens }
   }), {
     status: 200,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
+    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders, ...extraHeaders }
   });
 }
 
@@ -645,7 +646,8 @@ export async function dispatchExchange({
   let lastError = null;
   let lastResponse = null;
 
-  for (const candidate of candidates) {
+  for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
+    const candidate = candidates[candidateIndex];
     const provider = fleet.getProvider(candidate.provider);
     if (!provider) continue;
 
@@ -671,11 +673,19 @@ export async function dispatchExchange({
       }
 
       if (upstreamRes && upstreamRes.ok) {
+        const hitAccount = upstreamRes.headers.get("x-gateway-account") || "default";
+        const isFallback = candidateIndex > 0;
+        const debugHeaders = {
+          "X-Gateway-Account": hitAccount,
+          "X-Gateway-Model": candidate.model,
+          "X-Gateway-Fallback": isFallback ? "true" : "false"
+        };
+
         if (isAnthropic && provider.type !== "anthropic") {
           if (body.stream !== false) {
-            return streamOpenAIToAnthropic(upstreamRes, model, request?.signal);
+            return streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders);
           } else {
-            return await formatOpenAIToAnthropicJson(upstreamRes, model);
+            return await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders);
           }
         }
 
@@ -683,7 +693,8 @@ export async function dispatchExchange({
           status: 200,
           headers: {
             ...corsHeaders,
-            ...(upstreamRes.headers.get("content-type") ? { "Content-Type": upstreamRes.headers.get("content-type") } : {})
+            ...(upstreamRes.headers.get("content-type") ? { "Content-Type": upstreamRes.headers.get("content-type") } : {}),
+            ...debugHeaders
           }
         });
       }
