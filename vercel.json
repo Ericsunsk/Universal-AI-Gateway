@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "installCommand": "npm install --omit=dev",
+  "installCommand": "npm install --omit=dev --ignore-scripts",
   "rewrites": [
     {
       "source": "/(.*)",
