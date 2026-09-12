@@ -10,3 +10,5 @@ dist/
 # Dependencies & OS
 node_modules/
 .DS_Store
+.vercel
+.env*
