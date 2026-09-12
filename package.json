@@ -1,7 +1,7 @@
 {
-  "name": "worker-ai-gateway",
-  "version": "2.3.0",
-  "description": "High-performance, configurable AI Gateway on Cloudflare Workers with protocol translation, multi-provider fallback, WorkBuddy auto-checkin, and Web Admin console.",
+  "name": "universal-ai-gateway",
+  "version": "2.4.0",
+  "description": "High-performance, multi-engine Universal AI Gateway (Cloudflare Workers, Vercel, Node.js) with protocol translation, multi-provider fallback, WorkBuddy auto-checkin, and Web Admin console.",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -10,8 +10,11 @@
     "dry-run": "wrangler deploy --dry-run"
   },
   "keywords": [
-    "cloudflare-workers",
     "ai-gateway",
+    "universal-ai-gateway",
+    "vercel",
+    "serverless",
+    "cloudflare-workers",
     "one-api",
     "anthropic",
     "openai",

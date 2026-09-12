@@ -8,10 +8,10 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
   // Agent-Native 自解释规范与索引（供 AI 智能体直接读取与调用）
   if (path === "/admin" || path === "/admin/") {
     return new Response(JSON.stringify({
-      service: "worker-ai-gateway",
+      service: "universal-ai-gateway",
       version: VERSION,
       mode: "agent-native",
-      description: "Cloudflare Worker AI Gateway Management API for Autonomous Agents",
+      description: "Universal AI Gateway Management API (Cloudflare Workers, Vercel, Node.js) for Autonomous Agents",
       auth: {
         type: "Bearer Token or x-api-key",
         required_key: "MASTER_KEY",
@@ -116,7 +116,7 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
     const bal = await fleet.getBalance();
 
     return new Response(JSON.stringify({
-      service: "worker-ai-gateway",
+      service: "universal-ai-gateway",
       version: VERSION,
       time: new Date().toISOString(),
       balance: bal.balance,

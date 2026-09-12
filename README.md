@@ -1,10 +1,10 @@
-# ⚡ Worker-AI-Gateway
+# ⚡ Universal-AI-Gateway
 
 <div align="center">
 
-**基于 Cloudflare Workers 的全能型轻量级 AI 统一网关 (Worker-One-API)**
+**通用全功能 AI 统一网关 (Cloudflare Workers & Vercel Serverless 双引擎架构)**
 
-[![GitHub stars](https://img.shields.io/github/stars/Ericsunsk/Worker-AI-Gateway?style=social)](https://github.com/Ericsunsk/Worker-AI-Gateway)
+[![GitHub stars](https://img.shields.io/github/stars/Ericsunsk/Universal-AI-Gateway?style=social)](https://github.com/Ericsunsk/Universal-AI-Gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Cloudflare Workers](https://img.shields.io/badge/Deploy-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![Vercel](https://img.shields.io/badge/Deploy-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
@@ -19,7 +19,7 @@
 
 ## 📖 简介
 
-**Worker-AI-Gateway** 是一款运行在 Cloudflare Workers 边缘计算平台上的高性能通用 AI 网关。它不仅能实现 **Anthropic ⟷ OpenAI 双向跨协议转译**，还深度集成了 **腾讯云代码助手 (WorkBuddy / CodeBuddy)** 插件，完美解决 **Claude Code 11128 拦截**、**无感 Token 自动续期**、**每日定时自动签到领积分** 以及 **CC-Switch 桌面端实时积分余额卡片** 展示。
+**Universal-AI-Gateway** 是一款高性能通用型多平台 AI 网关（原生支持 **Cloudflare Workers** 与 **Vercel Serverless** 双引擎）。它不仅能实现 **Anthropic ⟷ OpenAI 双向跨协议转译**，还深度集成了 **腾讯云代码助手 (WorkBuddy / CodeBuddy)** 插件，完美解决 **Claude Code 11128 拦截**、**无感 Token 自动续期**、**每日定时自动签到领积分**、**突破 10ms CPU 限制 (Vercel 引擎)** 以及 **CC-Switch 桌面端实时积分余额卡片** 展示。
 
 无论你是个人开发者需要稳定使用 DeepSeek / Claude Code，还是团队需要一套低成本、免服务器维护、支持故障自动 Fallback 的 AI 网关，本项目都能开箱即用。
 
@@ -27,7 +27,7 @@
 
 ## ✨ 核心特性
 
-| 功能维度 | 原生直连 / 传统反代 | ⚡ Worker-AI-Gateway |
+| 功能维度 | 原生直连 / 传统反代 | ⚡ Universal-AI-Gateway |
 | :--- | :--- | :--- |
 | **协议支持** | 仅支持单一上游格式 | **双向转译**：同时对外暴露 `/v1/messages` (Claude) 与 `/v1/chat/completions` (OpenAI) |
 | **思维链 & 工具** | 易丢失或乱码 | **完整支持**：原生还原 `thinking` 推理流、Tool Calling 函数调用与心跳保活 |
@@ -75,14 +75,14 @@ flowchart TD
 
 Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 GitHub，后续每次代码有更新，Cloudflare 会**全自动构建并发布**。
 
-1. **Fork 或使用本项目**：确保仓库已存在于你的 GitHub 账号下（如 `你的用户名/Worker-AI-Gateway`）。
+1. **Fork 或使用本项目**：确保仓库已存在于你的 GitHub 账号下（如 `你的用户名/Universal-AI-Gateway`）。
 2. **创建 KV 数据库**：
    - 打开 [Cloudflare 控制台](https://dash.cloudflare.com/) ➔ 进入 **Storage & Databases** ➔ **KV**。
    - 点击 **Create Namespace**，名称填写 `GATEWAY_KV`。
    - 记录下生成的 **Namespace ID**。
 3. **连接 GitHub 仓库**：
    - 进入 Cloudflare 控制台 ➔ **Workers & Pages** ➔ 点击 **Create** ➔ **Workers** ➔ 选择 **Import from Git**（或在已有 Worker 的 **Settings** ➔ **Builds** 中点击 **Connect Git repository**）。
-   - 授权并选择你的仓库：`Worker-AI-Gateway`。
+   - 授权并选择你的仓库：`Universal-AI-Gateway`。
    - **生产分支**：`main`。
    - **构建命令**：`npm install`。
    - **部署命令**：`npx wrangler deploy`。
@@ -104,8 +104,8 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
 
 1. **克隆项目并安装依赖**：
    ```bash
-   git clone https://github.com/Ericsunsk/Worker-AI-Gateway.git
-   cd worker-ai-gateway
+   git clone https://github.com/Ericsunsk/Universal-AI-Gateway.git
+   cd Universal-AI-Gateway
    npm install
    ```
 
@@ -141,7 +141,7 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
 针对超大上下文（如 Claude Code 上千条交互日志、长文本分析）或高并发场景，Vercel Serverless 提供 **1024MB RAM** 与高达 **10~15 秒 CPU 计算时间**（相比 Cloudflare 免费版严格的 10ms CPU 上限，彻底根治 1102 CPU 超限问题）。
 
 1. **一键导入项目**：
-   - 访问 [Vercel 仪表盘](https://vercel.com/new)，选择并导入你的 `Worker-AI-Gateway` GitHub 仓库。
+   - 访问 [Vercel 仪表盘](https://vercel.com/new)，选择并导入你的 `Universal-AI-Gateway` GitHub 仓库。
    - Framework Preset 保持为 `Other`。
 2. **配置环境变量 (Environment Variables)**：
    在 Vercel 项目部署设置中添加以下环境变量：

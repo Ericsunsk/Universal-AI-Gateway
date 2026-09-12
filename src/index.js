@@ -39,7 +39,7 @@ export default {
     if (path === "/" || path === "/healthz") {
       return new Response(JSON.stringify({
         status: "ok",
-        service: "worker-ai-gateway",
+        service: "universal-ai-gateway",
         version: VERSION,
         providers_active: fleet.activeCount,
         models_available: Object.keys(config.routes || {}).length,
@@ -64,7 +64,7 @@ export default {
       }
       const bal = await fleet.getBalance();
       return new Response(JSON.stringify({
-        service: "worker-ai-gateway",
+        service: "universal-ai-gateway",
         version: VERSION,
         kvEnabled: !!kv,
         balance: bal.balance,

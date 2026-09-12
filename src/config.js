@@ -1,4 +1,4 @@
-export const VERSION = "2.3.0";
+export const VERSION = "2.4.0";
 
 let cachedConfig = null;
 let cachedConfigTimestamp = 0;
