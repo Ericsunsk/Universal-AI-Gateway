@@ -131,7 +131,15 @@ async function handleNodeRequest(req, res) {
     for (const [k, v] of webResponse.headers.entries()) {
       resHeaders[k] = v;
     }
+    // 强制中间代理与边缘 CDN 禁用缓冲，确保 SSE 首字即发
+    resHeaders["x-accel-buffering"] = "no";
+    if (resHeaders["content-type"]?.includes("text/event-stream")) {
+      resHeaders["cache-control"] = "no-cache, no-transform";
+    }
     res.writeHead(webResponse.status, resHeaders);
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
 
     if (!webResponse.body) {
       res.end();
