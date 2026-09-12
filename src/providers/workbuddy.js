@@ -274,7 +274,7 @@ export class WorkBuddyProvider {
         lastResponse = resp;
         const status = resp.status;
 
-        // 触发账号切换条件：429 限流 / 5xx 服务异常 / 额度耗尽
+        // 触发账号切换条件：429 限流 / 5xx 服务异常 / 403 风控合规拦截 / 额度耗尽
         if (status === 429 || status >= 500) {
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned ${status}, auto-switching to next account...`);
           if (status === 429) {
@@ -284,8 +284,19 @@ export class WorkBuddyProvider {
         }
 
         const errText = await resp.text();
-        if (errText.includes("11128") || errText.includes("6004") || errText.includes("quota") || errText.includes("rate limit") || errText.includes("频率限制") || errText.includes("欠费") || errText.includes("余额不足")) {
-          console.warn(`[WorkBuddy] Account "${account.name || account.id}" quota/filter triggered, auto-switching to next account...`);
+        if (
+          status === 403 ||
+          errText.includes("11140") ||
+          errText.includes("11128") ||
+          errText.includes("6004") ||
+          errText.includes("quota") ||
+          errText.includes("rate limit") ||
+          errText.includes("频率限制") ||
+          errText.includes("欠费") ||
+          errText.includes("余额不足") ||
+          errText.includes("安全审核")
+        ) {
+          console.warn(`[WorkBuddy] Account "${account.name || account.id}" quota/safety filter triggered (${status}: ${errText.substring(0, 80)}), cooling down and auto-switching to next account...`);
           markAccountRateLimited(account);
           continue;
         }
