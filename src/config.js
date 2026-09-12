@@ -11,6 +11,7 @@ export function getDefaultConfig(env) {
   return {
     master_key: masterKey,
     cron_secret: env.CRON_SECRET || "",
+    max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : (typeof process !== "undefined" && (process.env?.VERCEL || process.env?.NODE_ENV) ? 0 : 40),
     usage_provider_id: "workbuddy",
     providers: [
       {

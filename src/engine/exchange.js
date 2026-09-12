@@ -109,10 +109,16 @@ function pruneMessageContents(messages, isCompact, recentSafeTurns = 12) {
   });
 }
 
-function pruneAnthropicMessages(messages, isCompact) {
+function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  // 当 maxTurnsLimit <= 0 时，彻底禁用会话剪枝，100% 原始长上下文完整传输（适用于 Vercel / 高性能环境）
+  if (maxTurnsLimit <= 0) {
+    return messages;
+  }
+
   const total = messages.length;
-  const maxWindow = isCompact ? 70 : 40;
+  const maxWindow = isCompact ? Math.max(maxTurnsLimit * 1.5, 70) : maxTurnsLimit;
   if (total <= maxWindow) return pruneMessageContents(messages, isCompact, 15);
 
   let cutIdx = Math.max(1, total - maxWindow);
@@ -135,7 +141,7 @@ function pruneAnthropicMessages(messages, isCompact) {
 }
 
 // 内部协议工具：Anthropic 请求体 -> OpenAI 请求体
-function transformAnthropicToOpenAI(body, targetModel) {
+function transformAnthropicToOpenAI(body, targetModel, config = {}) {
   const model = targetModel || body.model || "deepseek-v4.1-flash";
   const openaiMessages = [];
 
@@ -157,8 +163,14 @@ function transformAnthropicToOpenAI(body, targetModel) {
     lastText.includes("<analysis>")
   );
 
-  // 核心优化：滑动窗口与工具结果剪枝，彻底消除 1000+ 轮超长历史对 Workers 10ms CPU/内存的严重冲击
-  const messages = pruneAnthropicMessages(rawMessages, isCompact);
+  // 动态上下文保留策略：Vercel / Node 环境下默认 0（完全不剪枝，长上下文保真），Cloudflare Workers 免费版环境下默认 40
+  const maxTurns = config?.max_context_turns !== undefined
+    ? config.max_context_turns
+    : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TURNS !== undefined
+        ? parseInt(process.env.MAX_CONTEXT_TURNS, 10)
+        : (typeof process !== "undefined" && (process.env?.VERCEL || process.env?.NODE_ENV) ? 0 : 40));
+
+  const messages = pruneAnthropicMessages(rawMessages, isCompact, maxTurns);
 
   if (body.system) {
     const sysText = typeof body.system === "string"
@@ -645,7 +657,7 @@ export async function dispatchExchange({
         if (provider.type === "anthropic") {
           upstreamRes = await provider.callMessages({ ...body, model: candidate.model }, { signal: request?.signal });
         } else {
-          const openaiPayload = transformAnthropicToOpenAI(body, candidate.model);
+          const openaiPayload = transformAnthropicToOpenAI(body, candidate.model, config);
           if (provider.type === "workbuddy") {
             openaiPayload.stream = true;
           }
