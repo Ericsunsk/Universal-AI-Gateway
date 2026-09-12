@@ -233,8 +233,8 @@ export class WorkBuddyProvider {
           if (retryResp.ok) {
             clearAccountCooldown(account);
             const headers = new Headers(retryResp.headers);
-            headers.set("X-Gateway-Account", account.name || account.id);
-            headers.set("X-Gateway-Account-Id", account.id);
+            headers.set("X-Gateway-Account", account.id || "primary");
+            headers.set("X-Gateway-Account-Id", account.id || "primary");
             return new Response(retryResp.body, {
               status: retryResp.status,
               statusText: retryResp.statusText,
@@ -262,8 +262,8 @@ export class WorkBuddyProvider {
           // 请求成功，清除冷却与连续惩罚标记
           clearAccountCooldown(account);
           const headers = new Headers(resp.headers);
-          headers.set("X-Gateway-Account", account.name || account.id);
-          headers.set("X-Gateway-Account-Id", account.id);
+          headers.set("X-Gateway-Account", account.id || "primary");
+          headers.set("X-Gateway-Account-Id", account.id || "primary");
           return new Response(resp.body, {
             status: resp.status,
             statusText: resp.statusText,
