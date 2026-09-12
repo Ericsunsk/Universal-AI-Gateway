@@ -7,6 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/Ericsunsk/Worker-AI-Gateway?style=social)](https://github.com/Ericsunsk/Worker-AI-Gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Cloudflare Workers](https://img.shields.io/badge/Deploy-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
+[![Vercel](https://img.shields.io/badge/Deploy-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
 [![Node Version](https://img.shields.io/badge/Node-%3E%3D18.0.0-339933?logo=node.js&logoColor=white)]()
 [![Protocol](https://img.shields.io/badge/Protocol-Anthropic%20%7C%20OpenAI-6366F1.svg)]()
 
@@ -132,6 +133,29 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
    ```bash
    npm run deploy
    ```
+
+---
+
+### 方案 C：Vercel Serverless 一键部署（🔥 零 10ms CPU 限制，超长上下文首选）
+
+针对超大上下文（如 Claude Code 上千条交互日志、长文本分析）或高并发场景，Vercel Serverless 提供 **1024MB RAM** 与高达 **10~15 秒 CPU 计算时间**（相比 Cloudflare 免费版严格的 10ms CPU 上限，彻底根治 1102 CPU 超限问题）。
+
+1. **一键导入项目**：
+   - 访问 [Vercel 仪表盘](https://vercel.com/new)，选择并导入你的 `Worker-AI-Gateway` GitHub 仓库。
+   - Framework Preset 保持为 `Other`。
+2. **配置环境变量 (Environment Variables)**：
+   在 Vercel 项目部署设置中添加以下环境变量：
+   - `API_KEY`: 客户端调用的默认 Key（例如 `sk-workbuddy-deepseek`）
+   - `MASTER_KEY`: 管理后台主密钥
+   - `USER_ID`: 你的腾讯云用户 ID
+   - `ACCESS_TOKEN`: 你的 WorkBuddy AccessToken
+   - `REFRESH_TOKEN`: 你的 WorkBuddy RefreshToken
+   - *(可选)* `CRON_SECRET`: Vercel Cron 定时任务鉴权密钥（用于每日自动签到领积分）
+   - *(可选)* `KV_REST_API_URL` & `KV_REST_API_TOKEN`: 若需要持久化 KV，可在 Vercel Storage 中一键创建免费 Upstash Redis / Vercel KV，系统将全自动接入；不填则默认使用高效内存级热缓存。
+3. **点击 Deploy**：
+   部署完成后即可获得 `https://your-project.vercel.app`。可绑定个人自定义域名（国内访问更稳定）。
+   - **Claude Code 接入**：设置 `ANTHROPIC_BASE_URL="https://your-project.vercel.app"`。
+   - **自动签到**：项目已内置 `vercel.json`，每天 UTC 01:00 自动触发 `/checkin` 领积分。
 
 ---
 

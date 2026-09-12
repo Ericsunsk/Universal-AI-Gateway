@@ -10,6 +10,7 @@ export function getDefaultConfig(env) {
 
   return {
     master_key: masterKey,
+    cron_secret: env.CRON_SECRET || "",
     usage_provider_id: "workbuddy",
     providers: [
       {

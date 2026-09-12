@@ -28,6 +28,11 @@ export function authenticateAccess(request, config, { model = null, requireMaste
     return { ok: true, principal: { isMaster: true, role: "admin", name: "Master Admin" } };
   }
 
+  // 1.1 验证 Cron Secret (用于 Vercel Cron 定时任务鉴权)
+  if (config.cron_secret && token === config.cron_secret) {
+    return { ok: true, principal: { isMaster: true, role: "cron", name: "Cron Trigger" } };
+  }
+
   if (requireMaster) {
     return {
       ok: false,
