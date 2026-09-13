@@ -50,26 +50,9 @@ export function getDefaultConfig(env) {
             "X-Title": "Worker Gateway"
           }
         }
-      },
-      {
-        id: "trae",
-        name: "Trae (豆包代码补全)",
-        type: "trae",
-        enabled: true,
-        config: {
-          accessToken: env.TRAE_ACCESS_TOKEN || "",
-          refreshToken: env.TRAE_REFRESH_TOKEN || "",
-          userId: env.TRAE_USER_ID || "",
-          deviceId: env.TRAE_DEVICE_ID || "",
-          machineId: env.TRAE_MACHINE_ID || "",
-          deviceBrand: env.TRAE_DEVICE_BRAND || "MacBookPro17,1"
-        }
       }
     ],
     routes: {
-      "trae-completion": [
-        { provider: "trae", model: "trae-completion" }
-      ],
       "deepseek-v4.1-flash": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
