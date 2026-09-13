@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "installCommand": "echo 'skip npm install (zero runtime dependencies)'",
+  "installCommand": "npm install --omit=dev --ignore-scripts",
   "rewrites": [
     {
       "source": "/(.*)",
