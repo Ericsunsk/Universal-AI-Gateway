@@ -2,7 +2,7 @@ import { Readable } from "node:stream";
 import worker from "../src/index.js";
 
 export const config = {
-  maxDuration: 60, // 允许最大 60 秒执行时长（Vercel Hobby 免费上限）
+  maxDuration: 300, // 允许最大 300 秒执行时长（适配长时间思考模型与深度代码审计）
 };
 
 // 内存级 KV 降级缓存（当未绑定 Upstash / Vercel KV 时在容器生命周期内持久）
@@ -152,6 +152,11 @@ async function handleNodeRequest(req, res) {
     }
 
     const nodeStream = Readable.fromWeb(webResponse.body);
+    nodeStream.on("data", () => {
+      if (typeof res.flush === "function") {
+        res.flush();
+      }
+    });
     nodeStream.on("error", (err) => {
       console.error("[Vercel Stream Pipe Error]", err);
       res.destroy(err);

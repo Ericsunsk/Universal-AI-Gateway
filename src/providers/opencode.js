@@ -639,6 +639,9 @@ export class OpenCodeProvider {
       let buffer = "";
       let hasToolCalls = false;
 
+      const emittedTextKeys = new Set();
+      const emittedArgsKeys = new Set();
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -653,7 +656,25 @@ export class OpenCodeProvider {
             if (!raw || raw === "[DONE]") continue;
             try {
               const parsed = JSON.parse(raw);
-              if (parsed.type === "response.output_text.delta" && parsed.delta) {
+
+              // 1. 推理思考开始：立即发射 thinking 增量，防止客户端触发「首块无内容超时」回退
+              if (parsed.type === "response.output_item.added" && parsed.item?.type === "reasoning") {
+                const chunk = {
+                  choices: [
+                    {
+                      delta: {
+                        reasoning_content: " "
+                      }
+                    }
+                  ]
+                };
+                await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+              }
+
+              // 2. 正文流式增量
+              else if (parsed.type === "response.output_text.delta" && parsed.delta) {
+                const key = `${parsed.output_index ?? 0}_${parsed.content_index ?? 0}`;
+                emittedTextKeys.add(key);
                 const openaiChunk = {
                   choices: [
                     {
@@ -664,8 +685,29 @@ export class OpenCodeProvider {
                   ]
                 };
                 await writer.write(encoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
-              } else if (parsed.type === "response.output_item.added" && parsed.item?.type === "function_call") {
+              }
+
+              // 3. 消息块完成兜底：若部分上游模型直接在 output_item.done 中打包文本，确保不漏发
+              else if (parsed.type === "response.output_item.done" && parsed.item?.type === "message") {
+                if (Array.isArray(parsed.item.content)) {
+                  for (let ci = 0; ci < parsed.item.content.length; ci++) {
+                    const part = parsed.item.content[ci];
+                    const key = `${parsed.output_index ?? 0}_${ci}`;
+                    if (!emittedTextKeys.has(key) && part.type === "output_text" && part.text) {
+                      emittedTextKeys.add(key);
+                      const openaiChunk = {
+                        choices: [{ delta: { content: part.text } }]
+                      };
+                      await writer.write(encoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
+                    }
+                  }
+                }
+              }
+
+              // 4. 工具调用开始 (function_call)
+              else if (parsed.type === "response.output_item.added" && parsed.item?.type === "function_call") {
                 hasToolCalls = true;
+                const callId = parsed.item.call_id || parsed.item.id || `call_${crypto.randomUUID().slice(0, 8)}`;
                 const chunk = {
                   choices: [
                     {
@@ -673,7 +715,7 @@ export class OpenCodeProvider {
                         tool_calls: [
                           {
                             index: parsed.output_index || 0,
-                            id: parsed.item.id || `call_${crypto.randomUUID().slice(0, 8)}`,
+                            id: callId,
                             type: "function",
                             function: {
                               name: parsed.item.name || "tool",
@@ -686,8 +728,13 @@ export class OpenCodeProvider {
                   ]
                 };
                 await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-              } else if (parsed.type === "response.function_call_arguments.delta") {
+              }
+
+              // 5. 工具调用参数增量
+              else if (parsed.type === "response.function_call_arguments.delta") {
                 hasToolCalls = true;
+                const key = `${parsed.output_index ?? 0}`;
+                emittedArgsKeys.add(key);
                 const chunk = {
                   choices: [
                     {
@@ -705,7 +752,38 @@ export class OpenCodeProvider {
                   ]
                 };
                 await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
-              } else if (parsed.type === "response.completed") {
+              }
+
+              // 6. 工具调用完成兜底参数
+              else if (parsed.type === "response.output_item.done" && parsed.item?.type === "function_call") {
+                hasToolCalls = true;
+                const key = `${parsed.output_index ?? 0}`;
+                if (!emittedArgsKeys.has(key) && parsed.item.arguments) {
+                  emittedArgsKeys.add(key);
+                  const chunk = {
+                    choices: [
+                      {
+                        delta: {
+                          tool_calls: [
+                            {
+                              index: parsed.output_index || 0,
+                              function: {
+                                arguments: typeof parsed.item.arguments === "string"
+                                  ? parsed.item.arguments
+                                  : JSON.stringify(parsed.item.arguments)
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  };
+                  await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+                }
+              }
+
+              // 7. 完成事件
+              else if (parsed.type === "response.completed") {
                 const finishReason = hasToolCalls ? "tool_calls" : "stop";
                 await writer.write(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`));
               }
