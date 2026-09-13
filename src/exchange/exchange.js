@@ -1,5 +1,6 @@
 import { stripAnsi, optimizeToolOutput } from "./sanitizer.js";
 import { corsHeaders, buildResponseHeaders } from "../http/headers.js";
+import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 
 // 模块级单例 Encoder / Decoder 与预编码静态 Buffer（零 GC 内存分配）
 const textEncoder = new TextEncoder();
@@ -268,47 +269,9 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}) {
   if (body.max_tokens !== undefined) payload.max_tokens = body.max_tokens;
   if (body.top_p !== undefined) payload.top_p = body.top_p;
 
-  // 推理强度与思维链提取：支持 Claude Code thinking.budget_tokens 与模型后缀 [high]/[low]/[minimal] 等
-  let reasoningEffort = body.reasoning_effort;
-  let reasoningEnabled = true;
-
-  const suffixMatch = String(body.model || "").match(/\[(minimal|low|medium|high|xhigh|max|off|nothink|none)\]/i);
-  if (suffixMatch) {
-    const rawEffort = suffixMatch[1].toLowerCase();
-    if (rawEffort === "off" || rawEffort === "nothink" || rawEffort === "none") {
-      reasoningEnabled = false;
-      reasoningEffort = "minimal";
-    } else {
-      reasoningEffort = rawEffort;
-    }
-  }
-
-  if (body.thinking) {
-    if (body.thinking.type === "disabled") {
-      reasoningEnabled = false;
-      reasoningEffort = "minimal";
-    } else if (body.thinking.type === "enabled") {
-      reasoningEnabled = true;
-      const budget = Number(body.thinking.budget_tokens) || 0;
-      if (!reasoningEffort) {
-        if (budget > 0 && budget <= 1024) reasoningEffort = "minimal";
-        else if (budget <= 4096) reasoningEffort = "low";
-        else if (budget <= 8192) reasoningEffort = "medium";
-        else if (budget <= 16000) reasoningEffort = "high";
-        else if (budget > 16000) reasoningEffort = "xhigh";
-      }
-    }
-  }
-
-  if (reasoningEffort || !reasoningEnabled) {
-    payload.reasoning = {
-      enabled: reasoningEnabled,
-      ...(reasoningEffort ? { effort: reasoningEffort } : {})
-    };
-    if (reasoningEffort) {
-      payload.reasoning_effort = reasoningEffort;
-    }
-  }
+  // 共享思维链与推理强度调度器：统一解析与注入
+  const reasoningIntent = parseReasoningIntent({ model: body.model || model, body });
+  applyReasoningToPayload(payload, reasoningIntent, "openai", targetModel || model);
 
   return payload;
 }
@@ -745,10 +708,9 @@ export async function dispatchExchange({
 }) {
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
-  // 自动提取推理强度后缀如 [high]、[low] 并剥离上下文标识如 [1M]、[200k]
-  const suffixMatch = (model || "").match(/\[(minimal|low|medium|high|xhigh|max|off|nothink|none)\]/i);
-  const requestedEffort = suffixMatch ? suffixMatch[1].toLowerCase() : null;
-  const cleanModel = (model || "deepseek-v4.1-flash").replace(/\[.*?\]$/, "").trim();
+  // 共享解析推理强度与干净模型名
+  const reasoningIntent = parseReasoningIntent({ model, body });
+  const cleanModel = reasoningIntent.cleanModel || "deepseek-v4.1-flash";
   let candidates = routes[model] || routes[cleanModel];
 
   // 动态路由发现：若未显式配置静态路由，自动探测是否为 OpenCode 官方最新同步的免费模型
@@ -812,9 +774,11 @@ export async function dispatchExchange({
 
       if (isAnthropic) {
         if (provider.type === "anthropic") {
-          upstreamRes = await provider.callMessages({ ...body, model: candidate.model }, { signal: request?.signal, request });
+          const anthropicPayload = applyReasoningToPayload({ ...body, model: candidate.model }, reasoningIntent, "anthropic", candidate.model);
+          upstreamRes = await provider.callMessages(anthropicPayload, { signal: request?.signal, request });
         } else {
           const openaiPayload = transformAnthropicToOpenAI(body, candidate.model, config);
+          applyReasoningToPayload(openaiPayload, reasoningIntent, provider.type, candidate.model);
           if (provider.type === "workbuddy") {
             openaiPayload.stream = true;
           }
@@ -822,14 +786,7 @@ export async function dispatchExchange({
         }
       } else {
         const openaiPayload = { ...body, model: candidate.model };
-        if (requestedEffort) {
-          if (["off", "nothink", "none"].includes(requestedEffort)) {
-            openaiPayload.reasoning = { enabled: false };
-          } else {
-            openaiPayload.reasoning_effort = requestedEffort;
-            openaiPayload.reasoning = { effort: requestedEffort, enabled: true };
-          }
-        }
+        applyReasoningToPayload(openaiPayload, reasoningIntent, provider.type, candidate.model);
         if (provider.type === "workbuddy") {
           openaiPayload.stream = true;
         }

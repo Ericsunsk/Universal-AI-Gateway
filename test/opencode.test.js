@@ -574,7 +574,7 @@ test("transformAnthropicToOpenAI maps Claude Code thinking budget and model suff
     messages: [{ role: "user", content: "hi" }]
   }, "ling-3.0-flash-fin-free");
 
-  assert.deepEqual(payloadDisabled.reasoning, { effort: "minimal", enabled: false });
+  assert.deepEqual(payloadDisabled.reasoning, { enabled: false });
 });
 
 
