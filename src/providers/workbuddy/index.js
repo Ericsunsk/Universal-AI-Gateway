@@ -9,6 +9,15 @@ const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
 let roundRobinCounter = 0;
 
+// 抖动重试基准延迟（Q6 可配置）：env RETRY_BASE_MS，默认 600ms。
+// Vercel 与 CF 超时/计费模型不同，允许两边设不同值；非法值回退默认。
+export const DEFAULT_RETRY_DELAY_MS = 600;
+export function retryDelayMs(env) {
+  const raw = Number(env?.RETRY_BASE_MS);
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_RETRY_DELAY_MS;
+  return Math.floor(raw);
+}
+
 export class WorkBuddyProvider {
   constructor(config, env) {
     this.id = config.id || "workbuddy";
@@ -219,7 +228,7 @@ export class WorkBuddyProvider {
       // 遇到 502 / 503 / 504 服务端瞬时抖动，毫秒级原地快速重试一次（避开上游偶发拥塞）
       if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
         console.warn(`[WorkBuddy] Account "${account.name || account.id}" hit ${resp.status}, retrying in 600ms...`);
-        await new Promise(r => setTimeout(r, 600));
+        await new Promise(r => setTimeout(r, retryDelayMs(this.env)));
         if (options.signal?.aborted) {
           throw new DOMException("The operation was aborted", "AbortError");
         }
@@ -303,7 +312,7 @@ export class WorkBuddyProvider {
       }
       console.warn(`[WorkBuddy] Account "${account.name || account.id}" network error: ${err.message}, retrying in 600ms...`);
       try {
-        await new Promise(r => setTimeout(r, 600));
+        await new Promise(r => setTimeout(r, retryDelayMs(this.env)));
         if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
         const retryResp = await makeRequest(token);
         if (retryResp.ok) return { done: retryResp };

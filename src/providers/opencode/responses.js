@@ -237,15 +237,30 @@ export function translateResponsesJsonToOpenAI(json, { model, elapsed, upstreamH
 }
 
 // Responses SSE → OpenAI SSE（text 与 tool_calls 实时转译）。
-export function translateResponsesStreamToOpenAI(upstreamBody, { elapsed, upstreamHeaders }) {
+// signal：客户端中断时同步 cancel 上游 reader 并 abort writer，否则协程卡在
+// reader.read()/writer.write() 永不释放（与 stream.js 同一泄漏模式）。
+export function translateResponsesStreamToOpenAI(upstreamBody, { elapsed, upstreamHeaders, signal } = {}) {
 // 将 Responses API 的 SSE 流实时转译为标准 OpenAI SSE 流（支持 text 和 tool_calls）
 const { readable, writable } = new TransformStream();
 const writer = writable.getWriter();
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+let upstreamReader = null;
+const abortPump = (reason) => {
+  try { upstreamReader?.cancel(reason); } catch (e) {}
+  try { writer.abort(reason instanceof Error ? reason : new Error("Client aborted")); } catch (e) {}
+};
+if (signal) {
+  if (signal.aborted) {
+    abortPump(signal.reason);
+  } else {
+    signal.addEventListener("abort", () => abortPump(signal.reason), { once: true });
+  }
+}
 
 (async () => {
   const reader = upstreamBody.getReader();
+  upstreamReader = reader;
   let buffer = "";
   let hasToolCalls = false;
 

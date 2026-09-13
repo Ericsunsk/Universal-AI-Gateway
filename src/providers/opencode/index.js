@@ -367,7 +367,7 @@ export class OpenCodeProvider {
       });
     }
 
-    return translateResponsesStreamToOpenAI(resp.body, { elapsed, upstreamHeaders: resp.headers });
+    return translateResponsesStreamToOpenAI(resp.body, { elapsed, upstreamHeaders: resp.headers, signal: options.signal });
   }
 
   async getBalance() {

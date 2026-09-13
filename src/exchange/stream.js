@@ -103,6 +103,13 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
+  const sseHeaders = {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    ...corsHeaders,
+    ...extraHeaders
+  };
 
   (async () => {
     let pingInterval = setInterval(async () => {
@@ -111,15 +118,33 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       } catch (e) {}
     }, 4000);
 
-    // 监听客户端主动中断取消（Ctrl+C / 停止生成），级联终止上游读取与保活定时器
+    // 监听客户端主动中断取消（Ctrl+C / 停止生成），级联终止上游读取与保活定时器。
+    // 上游 reader 必须同步 cancel：否则协程卡在 reader.read()（上游停顿）或 writer.write()
+    //（下游已断、背压永不释放），定时器与 IIFE 泄漏到进程结束。Vercel Node 入口若不断开
+    // 传播 signal，这里就是每次“停止生成”都漏一个定时器的地方。
+    let upstreamReader = null;
+    const abortUpstream = (reason) => {
+      clearInterval(pingInterval);
+      try { upstreamReader?.cancel(reason); } catch (e) {}
+      try { writer.abort(reason instanceof Error ? reason : new Error("Client aborted")); } catch (e) {}
+    };
     if (clientSignal) {
-      clientSignal.addEventListener("abort", () => {
-        clearInterval(pingInterval);
-        try { writer.abort(new Error("Client aborted")); } catch (e) {}
-      });
+      if (clientSignal.aborted) {
+        abortUpstream(clientSignal.reason);
+        return new Response(readable, { status: 200, headers: sseHeaders });
+      }
+      clientSignal.addEventListener("abort", () => abortUpstream(clientSignal.reason), { once: true });
     }
 
-    await writer.write(textEncoder.encode(`event: message_start\ndata: ${JSON.stringify({
+    // reader 必须在首次 await 之前创建并挂到 upstreamReader：
+    // abort 事件只能交错在 await 处，若赋值在 message_start 写之后，abort 恰落进来就 cancel 不到。
+    const reader = upstreamResponse.body.getReader();
+    upstreamReader = reader;
+
+    // message_start 在 try 之外：若下游恰在此刻断开，write 直接抛错，
+    // 必须就地清理后返回，否则跳过下面的 try/finally 泄漏定时器。
+    try {
+      await writer.write(textEncoder.encode(`event: message_start\ndata: ${JSON.stringify({
       type: "message_start",
       message: {
         id: msgId,
@@ -132,8 +157,11 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         usage: { input_tokens: 15, output_tokens: 1 }
       }
     })}\n\n`));
+    } catch (e) {
+      clearInterval(pingInterval);
+      return;
+    }
 
-    const reader = upstreamResponse.body.getReader();
     const streamDecoder = new TextDecoder();
     let buffer = "";
 
@@ -340,13 +368,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 
   return new Response(readable, {
     status: 200,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      ...corsHeaders,
-      ...extraHeaders
-    }
+    headers: sseHeaders
   });
 }
 

@@ -125,7 +125,7 @@ function createKvAdapter(env) {
 const ENV_ALLOWLIST = new Set([
   "API_KEY", "MASTER_KEY", "CRON_SECRET",
   "USER_ID", "ACCESS_TOKEN", "REFRESH_TOKEN",
-  "MAX_CONTEXT_TURNS",
+  "MAX_CONTEXT_TURNS", "RETRY_BASE_MS",
   "GATEWAY_KV", "WORKBUDDY_KV",
   "KV_REST_API_URL", "KV_REST_API_TOKEN",
   "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN",
@@ -211,6 +211,10 @@ async function handleWebRequest(request) {
 }
 
 async function handleNodeRequest(req, res) {
+  // Node 原生请求没有 abort 语义：res 关闭即视为客户端断开，级联中止转译。
+  // res 'close' 在正常结束时也会触发，此时 signal 已无在途消费者，中止无副作用。
+  const nodeAbort = new AbortController();
+  res.once("close", () => nodeAbort.abort());
   try {
     const url = resolveUrl(req);
     const headers = new Headers();
@@ -238,6 +242,9 @@ async function handleNodeRequest(req, res) {
       headers: headers,
       body: body,
       duplex: "half",
+      // 客户端断开（ res close ）→ 中止网关内转译协程与上游读取，
+      // 否则每次“停止生成”都泄漏一个保活定时器 + 卡死的流协程。
+      signal: nodeAbort.signal,
     });
 
     const { env, ctx } = makeRequestContext();

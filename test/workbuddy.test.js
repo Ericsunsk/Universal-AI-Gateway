@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { WorkBuddyProvider } from "../src/providers/workbuddy/index.js";
+import { WorkBuddyProvider, retryDelayMs, DEFAULT_RETRY_DELAY_MS } from "../src/providers/workbuddy/index.js";
 import { accountCooldownRecord, hydrateCooldowns } from "../src/providers/workbuddy/cooldown.js";
 
 const originalFetch = globalThis.fetch;
@@ -98,6 +98,55 @@ test("callChat cools the punished account and fails over to the next", async () 
   assert.equal(await res.text(), "served");
   assert.ok(accountCooldownRecord.has("t7a"), "429 account must be cooling");
   assert.equal(accountCooldownRecord.has("t7b"), false, "healthy account must not cool");
+});
+
+test("retryDelayMs honors env override with safe fallback (Q6)", () => {
+  assert.equal(DEFAULT_RETRY_DELAY_MS, 600);
+  assert.equal(retryDelayMs({}), 600);
+  assert.equal(retryDelayMs({ RETRY_BASE_MS: "200" }), 200);
+  assert.equal(retryDelayMs({ RETRY_BASE_MS: 0 }), 0);
+  assert.equal(retryDelayMs({ RETRY_BASE_MS: -5 }), 600, "negative clamps to default");
+  assert.equal(retryDelayMs({ RETRY_BASE_MS: "junk" }), 600, "non-numeric falls back");
+  assert.equal(retryDelayMs(null), 600);
+});
+
+test("RETRY_BASE_MS=0 makes jitter retry immediate", async () => {
+  scriptFetch({ chat: [new Response("bad gateway", { status: 502 }), new Response("fast", { status: 200 })] });
+  const p = new WorkBuddyProvider(
+    { id: "wb-t9", config: { accounts: [acc("t9a")] } },
+    { RETRY_BASE_MS: "0" }
+  );
+  const t0 = Date.now();
+  const out = await p.attemptAccount(acc("t9a"), {}, "{}", {});
+  assert.ok(out.done, "expected done after immediate retry");
+  assert.ok(Date.now() - t0 < 500, "must not sleep the default 600ms");
+});
+
+test("clear skips KV delete without local record, deletes after real cooldown (Q5)", async () => {
+  const ops = { delete: 0, put: 0 };
+  const kv = {
+    get: async () => null,
+    put: async () => { ops.put++; },
+    delete: async () => { ops.delete++; }
+  };
+  const p = new WorkBuddyProvider(
+    { id: "wb-t8", config: { accounts: [{ id: "t8a", userId: "u", accessToken: "t" }] } },
+    { GATEWAY_KV: kv }
+  );
+  // 成功且无冷却记录：零 KV 写
+  scriptFetch({ chat: [new Response("ok", { status: 200 })] });
+  const r1 = await p.callChat({ messages: [] }, {});
+  assert.equal(r1.status, 200);
+  assert.equal(ops.delete, 0, "no local record → no KV delete");
+  assert.equal(ops.put, 0, "success → no KV put");
+  // 429 落一次冷却（put 1 次），再成功一次 → 清掉它（delete 1 次）
+  scriptFetch({ chat: [new Response("limited", { status: 429 })] });
+  await p.callChat({ messages: [] }, {});
+  assert.equal(ops.put, 1);
+  scriptFetch({ chat: [new Response("ok2", { status: 200 })] });
+  const r3 = await p.callChat({ messages: [] }, {});
+  assert.equal(await r3.text(), "ok2");
+  assert.equal(ops.delete, 1, "real record → KV delete happens");
 });
 
 test("hydrateCooldowns handles both parsed objects and string JSON from KV", async () => {

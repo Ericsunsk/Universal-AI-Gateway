@@ -67,7 +67,10 @@ async function markAccountRateLimited(account, env) {
 }
 
 async function clearAccountCooldown(account, env) {
-  accountCooldownRecord.delete(account.id);
+  // 本 isolate 无记录时跳过 KV 删除：成功路径每次调用都来清一次，99% 是删寂寞。
+  // 代价是跨 isolate 摘帽延迟变为剩余 backoff（而非即时）：单账号不受影响（全冷却兜底照常用它），
+  // 多账号只是短期容量倾斜，且过期后水合自动忽略，自愈。一次成功请求省一次 KV 写，值。
+  if (!accountCooldownRecord.delete(account.id)) return;
   // 同步清除 KV 中的冷却记录，避免其他 isolate 继续按旧记录跳过该账号
   const kv = getKv(env);
   if (kv) {

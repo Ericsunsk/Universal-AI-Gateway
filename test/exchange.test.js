@@ -373,6 +373,46 @@ test("transformAnthropicToOpenAI validates system array with 400", () => {
   );
 });
 
+test("streamOpenAIToAnthropic cancels upstream on client abort (no stranded pump)", async () => {
+  let upstreamCancelled = false;
+  const slowUpstream = new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'));
+      // 然后停顿：不断流、不结束，模拟用户中途点“停止生成”
+    },
+    cancel() { upstreamCancelled = true; }
+  });
+  const upstream = new Response(slowUpstream, { status: 200 });
+  const ac = new AbortController();
+  const res = streamOpenAIToAnthropic(upstream, "m", ac.signal);
+  const reader = res.body.getReader();
+  const first = await reader.read();
+  assert.equal(first.done, false, "first block must arrive before abort");
+  ac.abort();
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(upstreamCancelled, true, "upstream reader must be cancelled on abort");
+  reader.releaseLock();
+});
+
+test("translateResponsesStreamToOpenAI cancels upstream on abort", async () => {
+  const { translateResponsesStreamToOpenAI } = await import("../src/providers/opencode/responses.js");
+  let upstreamCancelled = false;
+  const slowUpstream = new ReadableStream({
+    start(c) {
+      c.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"hi"}\n\n'));
+    },
+    cancel() { upstreamCancelled = true; }
+  });
+  const ac = new AbortController();
+  const res = translateResponsesStreamToOpenAI(slowUpstream, { elapsed: 1, upstreamHeaders: new Headers(), signal: ac.signal });
+  const reader = res.body.getReader();
+  await reader.read();
+  ac.abort();
+  await new Promise(r => setTimeout(r, 50));
+  assert.equal(upstreamCancelled, true, "responses pump must cancel upstream on abort");
+  reader.releaseLock();
+});
+
 test("dispatchExchange returns 400 (not 502) for image input", async () => {
   const fakeFleet = { getProvider: () => ({ type: "openai", callChat: async () => { throw new Error("must not reach upstream"); } }) };
   const res = await dispatchExchange({
