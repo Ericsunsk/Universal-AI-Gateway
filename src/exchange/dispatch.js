@@ -2,8 +2,8 @@
 // 转译细节在 ./transform.js 与 ./stream.js，本模块只做编排。
 import { corsHeaders } from "../http/headers.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
-import { hasCallChat, hasCallMessages, wantsStreamedChat } from "../providers/contract.js";
-import { runFailover } from "../failover.js";
+import { hasCallChat, hasCallMessages, wantsStreamedChat } from "../core/contract.js";
+import { runFailover } from "../core/failover.js";
 import { transformAnthropicToOpenAI } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
 
@@ -42,7 +42,7 @@ export async function dispatchExchange({
     });
   }
 
-  // 候选级故障转移收敛到 runFailover（见 src/failover.js）：循环、分类、耗尽收尾
+  // 候选级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、耗尽收尾
   // 由驱动器统一处理；单个候选的“试一次”（取 provider → 调上游 → 成功渲染 / 失败收口）见 attempt。
   return await runFailover(candidates, {
     onRetryable: async (candidate, action, fail) => {

@@ -11,8 +11,8 @@
 //   - 返回 null/undefined —— 跳过该项（如账号缺 token），不记失败。
 //   - 抛错 —— 传输失败：记录后试下一项；isAbort(err) 为 true 则直接抛出终止。
 // 耗尽：返回最后一个 fail.response；没有则调 renderExhausted({ lastError, lastFail })。
-import { classify } from "./providers/scheduler.js";
-import { corsHeaders } from "./http/headers.js";
+import { classify } from "./scheduler.js";
+import { corsHeaders } from "../http/headers.js";
 
 export async function runFailover(items, { attempt, onRetryable, isAbort, renderExhausted }) {
   let lastError = null;

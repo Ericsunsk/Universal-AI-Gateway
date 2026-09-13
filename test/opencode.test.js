@@ -9,7 +9,7 @@ import {
   convertToolsToSystemPrompt,
   ModelHealthTracker,
   transformOpenAIMessagesToResponsesInput
-} from "../src/providers/opencode.js";
+} from "../src/providers/opencode/index.js";
 import { createProvider } from "../src/providers/index.js";
 import { dispatchExchange, transformAnthropicToOpenAI } from "../src/exchange/exchange.js";
 

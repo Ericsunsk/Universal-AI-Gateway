@@ -5,60 +5,117 @@ export const config = {
   maxDuration: 300, // 允许最大 300 秒执行时长（适配长时间思考模型与深度代码审计）
 };
 
-// 内存级 KV 降级缓存（当未绑定 Upstash / Vercel KV 时在容器生命周期内持久）
-const memoryKvStorage = new Map();
+// 内存级 KV 降级缓存（当未绑定 Upstash / Vercel KV 时在容器生命周期内持久）。
+// 有上限 + TTL：无界 Map 在长寿容器里是缓慢泄漏；过期条目读时清理，超量时淘汰最旧。
+const MEMORY_KV_MAX_ENTRIES = 1000;
+const MEMORY_KV_TTL_MS = 60 * 60 * 1000; // 1 小时（冷却记录自带分钟级 TTL，此处只防陈旧配置）
+
+class MemoryKvStore {
+  constructor() {
+    this.store = new Map(); // key -> { value: string, expiresAt: number }
+  }
+
+  async get(key, type) {
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    if (entry.expiresAt < Date.now()) {
+      this.store.delete(key);
+      return null;
+    }
+    const val = entry.value;
+    const isJson = type === "json" || type?.type === "json";
+    if (isJson && typeof val === "string") {
+      try { return JSON.parse(val); } catch (e) { return null; }
+    }
+    return val;
+  }
+
+  async put(key, value) {
+    const valStr = typeof value === "string" ? value : JSON.stringify(value);
+    if (!this.store.has(key) && this.store.size >= MEMORY_KV_MAX_ENTRIES) {
+      // Map 按插入有序，删最旧一条
+      this.store.delete(this.store.keys().next().value);
+    }
+    // 重复 put 刷新过期时间并移到队尾，保持 LRU 语义
+    this.store.delete(key);
+    this.store.set(key, { value: valStr, expiresAt: Date.now() + MEMORY_KV_TTL_MS });
+  }
+
+  async delete(key) {
+    this.store.delete(key);
+  }
+}
+
+const memoryKvStorage = new MemoryKvStore();
 
 function createKvAdapter(env) {
   const restUrl = env.KV_REST_API_URL || env.UPSTASH_REDIS_REST_URL || env.REDIS_REST_API_URL;
   const restToken = env.KV_REST_API_TOKEN || env.UPSTASH_REDIS_REST_TOKEN || env.REDIS_REST_API_TOKEN;
 
   if (restUrl && restToken) {
+    // Upstash REST 主存 + 内存降级：远端失败时读内存；写/删双写，内存永不抛错。
+    const restCall = (command) => fetch(restUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${restToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(command),
+    });
     return {
-      async get(key) {
+      async get(key, type) {
+        let val;
         try {
           // 优先使用标准 POST 命令数组，彻底规避 key 中的特殊字符与 URL 编码截断问题
-          const resp = await fetch(restUrl, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${restToken}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(["GET", key]),
-          });
-          if (!resp.ok) return memoryKvStorage.get(key) || null;
-          const data = await resp.json();
-          return data.result ?? (memoryKvStorage.get(key) || null);
+          const resp = await restCall(["GET", key]);
+          if (!resp.ok) val = await memoryKvStorage.get(key);
+          else {
+            const data = await resp.json();
+            val = data.result ?? (await memoryKvStorage.get(key));
+          }
         } catch (e) {
           console.error(`[Upstash KV] GET ${key} failed:`, e);
-          return memoryKvStorage.get(key) || null;
+          val = await memoryKvStorage.get(key);
         }
+        if (!val) return null;
+        const isJson = type === "json" || type?.type === "json";
+        if (isJson && typeof val === "string") {
+          try { return JSON.parse(val); } catch (e) { return null; }
+        }
+        return val;
       },
       async put(key, value) {
-        const valStr = typeof value === "string" ? value : JSON.stringify(value);
-        memoryKvStorage.set(key, valStr);
+        await memoryKvStorage.put(key, value);
         try {
-          await fetch(restUrl, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${restToken}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify(["SET", key, valStr]),
-          });
+          const valStr = typeof value === "string" ? value : JSON.stringify(value);
+          await restCall(["SET", key, valStr]);
         } catch (e) {
           console.error(`[Upstash KV] PUT ${key} failed:`, e);
+        }
+      },
+      // 之前缺 delete：clearAccountCooldown 在 Upstash 部署上静默 TypeError，
+      // 冷却记录删不掉，只能等 TTL。补上 DEL 双写。
+      async delete(key) {
+        await memoryKvStorage.delete(key);
+        try {
+          await restCall(["DEL", key]);
+        } catch (e) {
+          console.error(`[Upstash KV] DEL ${key} failed:`, e);
         }
       },
     };
   }
 
-  // 默认内存存储
+  // 默认内存存储（KV 接口全集：get / put / delete）
   return {
-    async get(key) {
-      return memoryKvStorage.get(key) || null;
+    async get(key, type) {
+      return memoryKvStorage.get(key, type);
     },
     async put(key, value) {
-      memoryKvStorage.set(key, typeof value === "string" ? value : JSON.stringify(value));
+      await memoryKvStorage.put(key, value);
+    },
+    async delete(key) {
+      await memoryKvStorage.delete(key);
     },
   };
 }

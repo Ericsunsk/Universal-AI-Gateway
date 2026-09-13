@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runFailover } from "../src/failover.js";
+import { runFailover } from "../src/core/failover.js";
 
 const okResp = (text = "ok") => new Response(text, { status: 200 });
 const fail = (status, text, json = null) => ({

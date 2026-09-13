@@ -6,7 +6,7 @@ import {
   computeCooldown,
   classify,
   businessErrorCode
-} from "../src/providers/scheduler.js";
+} from "../src/core/scheduler.js";
 
 // ---- 退避时长：1 -> 2 -> 4 -> 8（封顶） ----
 test("backoffMinutesForStreak follows exponential capped at 8", () => {

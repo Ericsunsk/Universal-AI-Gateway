@@ -2,6 +2,13 @@
 
 Domain glossary for the Universal AI Gateway. These terms carry load-bearing meaning in the code; use them consistently when navigating or extending the system.
 
+## Module layout (DDD-lite: one context, role-based folders)
+
+- `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration).
+- `src/providers/` — upstream adapters only: one directory per multi-file provider (`opencode/`, `workbuddy/`, each with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
+- `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer`.
+- `src/config/`, `src/admin/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the Worker entry, `api/` the Vercel entry.
+
 ## Core concepts
 
 - **route** — a `model name → ordered candidate list` mapping (config `routes`). The unit of *model resolution*: a client asks for a logical model name, the gateway walks its candidates in order.
@@ -12,15 +19,15 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 
-- **provider contract** — the documented shape of what a provider adapter may implement (`src/providers/contract.js`). Capability predicates (`hasGetBalance`/`hasOnSchedule`/`hasDailyCheckin`/`hasCallChat`/`hasCallMessages`/`wantsStreamedChat`/`hasTokenRefresh`) replace hand-written `typeof` probes and `provider.type` switches. Dispatch probes capabilities, never the tag; `callChat` vs `callMessages` is decided by `hasCallMessages`, forced streaming by the adapter-declared `forceStream` flag.
+- **provider contract** — the documented shape of what a provider adapter may implement (`src/core/contract.js`). Capability predicates (`hasGetBalance`/`hasOnSchedule`/`hasDailyCheckin`/`hasCallChat`/`hasCallMessages`/`wantsStreamedChat`/`hasTokenRefresh`) replace hand-written `typeof` probes and `provider.type` switches. Dispatch probes capabilities, never the tag; `callChat` vs `callMessages` is decided by `hasCallMessages`, forced streaming by the adapter-declared `forceStream` flag.
 
 - **account** — one WorkBuddy credential inside a provider's `accounts` pool (`{ id, userId, accessToken, refreshToken }`). Multi-account round-robin happens at the account level, *below* the provider level.
 
-- **account scheduler** — the pure-function module (`src/providers/scheduler.js`) that owns account selection, exponential backoff, and error classification. Its functions (`orderAccounts`, `computeCooldown`, `classify`, `businessErrorCode`) have no I/O side effects; cooldown state is passed in as a `Map` and mutated by the caller (`workbuddy.js`).
+- **account scheduler** — the pure-function module (`src/core/scheduler.js`) that owns account selection, exponential backoff, and error classification. Its functions (`orderAccounts`, `computeCooldown`, `classify`, `businessErrorCode`) have no I/O side effects; cooldown state is passed in as a `Map` and mutated by the caller (`workbuddy.js`).
 
 - **cooldown** — a per-account exponential-backoff record (`{ expiresAt, streak }`). `streak` increments on each punishable failure; backoff = `2^(streak-1)` minutes, capped at 8. A cooled-down account is skipped until `expiresAt` passes.
 
-- **failover** — the shared attempt loop (`src/failover.js` `runFailover`): try items in order, classify each failure, switch item (cooling down the account on punishable failures), and only return the error when it's `fatal` or the pool is exhausted. Both the workbuddy account loop and the dispatch candidate loop leverage it; per-item behavior lives in the caller's `attempt`, retryable side effects in `onRetryable`.
+- **failover** — the shared attempt loop (`src/core/failover.js` `runFailover`): try items in order, classify each failure, switch item (cooling down the account on punishable failures), and only return the error when it's `fatal` or the pool is exhausted. Both the workbuddy account loop and the dispatch candidate loop leverage it; per-item behavior lives in the caller's `attempt`, retryable side effects in `onRetryable`.
 
 ## Protocol translation (`src/exchange/`)
 

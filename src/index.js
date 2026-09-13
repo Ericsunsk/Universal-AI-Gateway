@@ -2,7 +2,7 @@ import { getConfig, VERSION } from "./config/config.js";
 import { authenticateAccess } from "./auth/auth.js";
 import { corsHeaders } from "./http/headers.js";
 import { dispatchExchange } from "./exchange/exchange.js";
-import { getProviderFleet } from "./providers/fleet.js";
+import { getProviderFleet } from "./core/fleet.js";
 import { handleAdminRequest } from "./admin/admin.js";
 
 export default {

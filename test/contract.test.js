@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hasGetBalance, hasOnSchedule, hasDailyCheckin, hasCallChat, hasCallMessages, wantsStreamedChat, hasTokenRefresh } from "../src/providers/contract.js";
+import { hasGetBalance, hasOnSchedule, hasDailyCheckin, hasCallChat, hasCallMessages, wantsStreamedChat, hasTokenRefresh } from "../src/core/contract.js";
 
 test("contract predicates detect optional provider capabilities", () => {
   assert.equal(hasGetBalance({ getBalance: () => {} }), true);

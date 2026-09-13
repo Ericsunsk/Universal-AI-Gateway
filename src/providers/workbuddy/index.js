@@ -1,100 +1,13 @@
-import { sanitizeMessages } from "../exchange/sanitizer.js";
-import { buildResponseHeaders } from "../http/headers.js";
-import {
-  orderAccounts,
-  computeCooldown,
-  businessErrorCode,
-  backoffMinutesForStreak
-} from "./scheduler.js";
-import { runFailover } from "../failover.js";
+import { sanitizeMessages } from "../../exchange/sanitizer.js";
+import { buildResponseHeaders } from "../../http/headers.js";
+import { orderAccounts, businessErrorCode } from "../../core/scheduler.js";
+import { runFailover } from "../../core/failover.js";
+import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./cooldown.js";
 
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
-
-// 账号 429 / 额度耗尽动态退避记录: accountId -> { expiresAt: number, streak: number }
-// 进程内为写穿缓存；跨 isolate 的真实状态落在 KV，否则每个 isolate 各退避各的，冷却形同虚设。
-const accountCooldownRecord = new Map();
-const COOLDOWN_KV_PREFIX = "WB_COOLDOWN_";
-const COOLDOWN_KV_MAX_TTL_S = 900; // KV 最小 TTL 60s；退避上限 8 分钟，留足余量
 let roundRobinCounter = 0;
-
-let lastHydrateTimestamp = 0;
-const HYDRATE_THROTTLE_MS = 5 * 1000; // 5 秒防抖：同一 isolate 内 5 秒内只水合一次 KV，消除高并发下的无谓往返
-
-function getKv(env) {
-  return env?.GATEWAY_KV || env?.WORKBUDDY_KV || null;
-}
-
-// 把 KV 中的冷却记录水合进本 isolate 的缓存（5 秒内节流，避免高频并发下每请求做 KV 批量读）
-async function hydrateCooldowns(env, accounts, force = false) {
-  const kv = getKv(env);
-  if (!kv || !accounts?.length) return;
-  const now = Date.now();
-  if (!force && (now - lastHydrateTimestamp < HYDRATE_THROTTLE_MS)) {
-    return;
-  }
-  lastHydrateTimestamp = now;
-
-  const results = await Promise.allSettled(
-    accounts.map(acc => kv.get(`${COOLDOWN_KV_PREFIX}${acc.id}`, "json"))
-  );
-  results.forEach((r, i) => {
-    if (r.status !== "fulfilled" || !r.value?.expiresAt) return;
-    const record = r.value;
-    if (record.expiresAt < now) return; // 已过期，不写入缓存
-    const local = accountCooldownRecord.get(accounts[i].id);
-    // 以更晚的过期时间为准，避免本 isolate 的陈旧记录覆盖 KV 的更新
-    if (!local || local.expiresAt < record.expiresAt) {
-      accountCooldownRecord.set(accounts[i].id, record);
-    }
-  });
-}
-
-async function persistCooldown(env, accountId, record) {
-  const kv = getKv(env);
-  if (!kv) return;
-  const ttlS = Math.max(60, Math.min(
-    Math.ceil((record.expiresAt - Date.now()) / 1000) + 60,
-    COOLDOWN_KV_MAX_TTL_S
-  ));
-  try {
-    await kv.put(`${COOLDOWN_KV_PREFIX}${accountId}`, JSON.stringify(record), { expirationTtl: ttlS });
-  } catch (e) {
-    console.error(`Failed to persist cooldown for ${accountId}:`, e);
-  }
-}
-
-async function markAccountRateLimited(account, env) {
-  const record = computeCooldown(account.id, accountCooldownRecord);
-  accountCooldownRecord.set(account.id, record);
-  // 可靠落盘 KV 冷却记录（await 确保写入完成），跨 isolate 立即可见
-  await persistCooldown(env, account.id, record);
-  console.warn(`[WorkBuddy] Account "${account.name || account.id}" 429/rate-limited (streak ${record.streak}), cooling down for ${backoffMinutesForStreak(record.streak)}m...`);
-}
-
-async function clearAccountCooldown(account, env) {
-  accountCooldownRecord.delete(account.id);
-  // 同步清除 KV 中的冷却记录，避免其他 isolate 继续按旧记录跳过该账号
-  const kv = getKv(env);
-  if (kv) {
-    try {
-      await kv.delete(`${COOLDOWN_KV_PREFIX}${account.id}`);
-    } catch (e) {
-      console.error(`Failed to clear cooldown for ${account.id}:`, e);
-    }
-  }
-}
-
-// 冷却状态唯一写入口：调用方只传动作，不直接碰 Map / KV。
-// action "cooldown" = 惩罚性退避并落盘；"clear" = 清除惩罚标记。
-async function setAccountCooldown(account, env, action) {
-  if (action === "cooldown") {
-    await markAccountRateLimited(account, env);
-  } else {
-    await clearAccountCooldown(account, env);
-  }
-}
 
 export class WorkBuddyProvider {
   constructor(config, env) {
@@ -239,7 +152,7 @@ export class WorkBuddyProvider {
 
     const serializedPayload = JSON.stringify(payload);
 
-    // 账号级故障转移收敛到 runFailover（见 src/failover.js）：循环、分类、耗尽收尾
+    // 账号级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、耗尽收尾
     // 由驱动器统一处理；单个账号的“试一次”（401 刷新、抖动重试、业务码检测）见 attemptAccount。
     return await runFailover(accounts, {
       isAbort: (err) => err?.name === "AbortError",

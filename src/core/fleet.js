@@ -1,4 +1,4 @@
-import { createProvider } from "./index.js";
+import { createProvider } from "../providers/index.js";
 import { hasGetBalance, hasOnSchedule, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
 
 let cachedFleet = null;
