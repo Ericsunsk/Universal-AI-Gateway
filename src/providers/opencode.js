@@ -1,5 +1,31 @@
 import { buildResponseHeaders } from "../http/headers.js";
 
+export const DEFAULT_FREE_MODELS = [
+  "mimo-v2.5-free",
+  "ling-3.0-flash-fin-free",
+  "big-pickle",
+  "muse-spark-1.3-contributor-free",
+  "muse-spark-1.2-contributor-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-lightning-free",
+  "deepseek-v4-flash-free"
+];
+
+export function isFreeModel(id) {
+  if (!id || typeof id !== "string") return false;
+  const lower = id.toLowerCase().trim();
+  return (
+    lower.endsWith("-free") ||
+    lower.includes("-contributor-free") ||
+    lower.includes("-free-") ||
+    lower === "big-pickle"
+  );
+}
+
+let cachedFreeModels = null;
+let cachedFreeModelsTimestamp = 0;
+const MODELS_CACHE_TTL_MS = 3600 * 1000; // 1小时缓存
+
 export class OpenCodeProvider {
   constructor(config, env) {
     this.id = config.id || "opencode";
@@ -7,6 +33,9 @@ export class OpenCodeProvider {
     this.type = "opencode";
     this.env = env;
     this.config = config.config || {};
+
+    // 实例初始化时异步预热拉取官方最新免费模型
+    this.fetchOfficialFreeModels().catch(() => {});
   }
 
   get baseUrl() {
@@ -14,10 +43,111 @@ export class OpenCodeProvider {
     return url.replace(/\/$/, "");
   }
 
+  async fetchOfficialFreeModels(forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && cachedFreeModels && (now - cachedFreeModelsTimestamp < MODELS_CACHE_TTL_MS)) {
+      return cachedFreeModels;
+    }
+
+    const kv = this.env?.GATEWAY_KV || this.env?.WORKBUDDY_KV;
+    if (!forceRefresh && kv) {
+      try {
+        const raw = await kv.get("OPENCODE_FREE_MODELS");
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            cachedFreeModels = parsed;
+            cachedFreeModelsTimestamp = now;
+            return parsed;
+          }
+        }
+      } catch (e) {}
+    }
+
+    try {
+      const resp = await fetch(`${this.baseUrl}/models`, {
+        headers: {
+          "User-Agent": "opencode/1.18.30",
+          "x-opencode-client": "cli"
+        },
+        signal: AbortSignal.timeout(6000)
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        const models = (json.data || [])
+          .map(m => m.id)
+          .filter(isFreeModel);
+
+        if (models.length > 0) {
+          const merged = Array.from(new Set([...models, ...DEFAULT_FREE_MODELS]));
+          cachedFreeModels = merged;
+          cachedFreeModelsTimestamp = now;
+          if (kv) {
+            try {
+              await kv.put("OPENCODE_FREE_MODELS", JSON.stringify(merged));
+            } catch (e) {}
+          }
+          console.log(`[OpenCode] Auto-synced ${merged.length} official free models from upstream`);
+          return merged;
+        }
+      }
+    } catch (err) {
+      console.warn(`[OpenCode] Failed to fetch official models, falling back to cached/default:`, err.message);
+    }
+
+    cachedFreeModels = DEFAULT_FREE_MODELS;
+    cachedFreeModelsTimestamp = now;
+    return DEFAULT_FREE_MODELS;
+  }
+
+  getFreeModels() {
+    return cachedFreeModels || DEFAULT_FREE_MODELS;
+  }
+
+  resolveModel(modelName) {
+    if (!modelName) return "mimo-v2.5-free";
+    let target = modelName.trim();
+
+    // 友好别名映射到官方实际免费模型 ID
+    if (target === "muse-spark-1.3") return "muse-spark-1.3-contributor-free";
+    if (target === "muse-spark-1.2") return "muse-spark-1.2-contributor-free";
+    if (target === "mimo-v2.5") return "mimo-v2.5-free";
+    if (target === "ling-3.0-flash-fin" || target === "ling-3.0-flash") return "ling-3.0-flash-fin-free";
+    if (target === "nemotron-3-ultra") return "nemotron-3-ultra-free";
+    if (target === "nemotron-3.5-lightning") return "nemotron-3.5-lightning-free";
+    if (target === "deepseek-v4-flash") return "deepseek-v4-flash-free";
+
+    if (isFreeModel(target)) return target;
+
+    // 尝试添加 -free 后缀匹配官方已同步的免费模型
+    const withFree = `${target}-free`;
+    const known = this.getFreeModels();
+    if (known.includes(withFree)) return withFree;
+
+    return target;
+  }
+
   async callChat(payload, options = {}) {
+    const targetModel = this.resolveModel(payload.model);
+
+    // 仅限免费模型：严格阻断任何非免费模型的调用，避免 401 鉴权崩溃
+    if (!isFreeModel(targetModel)) {
+      return new Response(JSON.stringify({
+        error: {
+          type: "InvalidModelError",
+          message: `Model "${payload.model}" is not an OpenCode free tier model. OpenCode Zen provider strictly supports free models only.`
+        }
+      }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    const adaptedPayload = { ...payload, model: targetModel };
+
     // 自动适配：muse-spark 在 OpenCode Zen 后端仅部署于 /zen/v1/responses 端点
-    if (payload.model && payload.model.includes("muse-spark")) {
-      return this.callResponsesApi(payload, options);
+    if (targetModel.includes("muse-spark")) {
+      return this.callResponsesApi(adaptedPayload, options);
     }
 
     const url = `${this.baseUrl}/chat/completions`;
@@ -235,6 +365,11 @@ export class OpenCodeProvider {
   }
 
   async onSchedule() {
-    // 免登录免费模型无需维护 Token 或定时签到
+    // 定时触发：从 OpenCode 官方 API 自动同步最新的免费模型库
+    try {
+      await this.fetchOfficialFreeModels(true);
+    } catch (e) {
+      console.error("[OpenCode] Cron model sync failed:", e.message);
+    }
   }
 }

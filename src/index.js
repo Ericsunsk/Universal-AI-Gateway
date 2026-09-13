@@ -103,14 +103,18 @@ export default {
       const auth = authenticateAccess(request, config);
       if (!auth.ok) return auth.response;
 
-      const modelNames = Object.keys(config.routes || {});
+      const configuredModels = Object.keys(config.routes || {});
+      const opencode = fleet?.getProvider?.("opencode");
+      const opencodeFreeModels = typeof opencode?.getFreeModels === "function" ? opencode.getFreeModels() : [];
+      const allModels = Array.from(new Set([...configuredModels, ...opencodeFreeModels]));
+
       return new Response(JSON.stringify({
         object: "list",
-        data: modelNames.map(id => ({
+        data: allModels.map(id => ({
           id,
           object: "model",
           created: Math.floor(Date.now() / 1000),
-          owned_by: "worker-gateway"
+          owned_by: opencodeFreeModels.includes(id) ? "opencode-zen-free" : "worker-gateway"
         }))
       }), {
         status: 200,

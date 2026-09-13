@@ -707,6 +707,22 @@ export async function dispatchExchange({
   const cleanModel = (model || "deepseek-v4.1-flash").replace(/\[.*?\]$/, "").trim();
   let candidates = routes[model] || routes[cleanModel];
 
+  // 动态路由发现：若未显式配置静态路由，自动探测是否为 OpenCode 官方最新同步的免费模型
+  if (!candidates || candidates.length === 0) {
+    const opencode = fleet?.getProvider?.("opencode");
+    if (opencode && typeof opencode.resolveModel === "function") {
+      const resolved = opencode.resolveModel(cleanModel);
+      const freeModels = typeof opencode.getFreeModels === "function" ? opencode.getFreeModels() : [];
+      if (freeModels.includes(resolved) || (resolved && resolved.endsWith("-free"))) {
+        candidates = [
+          { provider: "opencode", model: resolved },
+          { provider: "opencode", model: "mimo-v2.5-free" },
+          { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+        ];
+      }
+    }
+  }
+
   // 路由模糊回退
   if (!candidates || candidates.length === 0) {
     if (cleanModel.includes("haiku")) {

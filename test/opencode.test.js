@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OpenCodeProvider } from "../src/providers/opencode.js";
+import { OpenCodeProvider, isFreeModel, DEFAULT_FREE_MODELS } from "../src/providers/opencode.js";
 import { createProvider } from "../src/providers/index.js";
 import { dispatchExchange } from "../src/exchange/exchange.js";
 
@@ -279,5 +279,119 @@ test("OpenCodeProvider routes muse-spark models to /zen/v1/responses endpoint", 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("isFreeModel distinguishes free vs paid models accurately", () => {
+  assert.equal(isFreeModel("mimo-v2.5-free"), true);
+  assert.equal(isFreeModel("ling-3.0-flash-fin-free"), true);
+  assert.equal(isFreeModel("muse-spark-1.3-contributor-free"), true);
+  assert.equal(isFreeModel("big-pickle"), true);
+  assert.equal(isFreeModel("nemotron-3-ultra-free"), true);
+  assert.equal(isFreeModel("some-free-model"), true);
+
+  assert.equal(isFreeModel("gpt-5.6-sol"), false);
+  assert.equal(isFreeModel("claude-sonnet-5"), false);
+  assert.equal(isFreeModel("muse-spark-1.3"), false);
+  assert.equal(isFreeModel(""), false);
+  assert.equal(isFreeModel(null), false);
+});
+
+test("OpenCodeProvider rejects paid models with 400 InvalidModelError", async () => {
+  const provider = new OpenCodeProvider({}, {});
+  const res = await provider.callChat({
+    model: "gpt-5.6-sol",
+    messages: [{ role: "user", content: "hello" }]
+  });
+
+  assert.equal(res.status, 400);
+  const data = await res.json();
+  assert.equal(data.error.type, "InvalidModelError");
+  assert.ok(data.error.message.includes("OpenCode Zen provider strictly supports free models only"));
+});
+
+test("fetchOfficialFreeModels pulls from upstream and filters out non-free models", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchedUrl = null;
+
+  globalThis.fetch = async (url) => {
+    fetchedUrl = url;
+    return new Response(JSON.stringify({
+      object: "list",
+      data: [
+        { id: "claude-sonnet-5" },
+        { id: "gpt-5.6-sol" },
+        { id: "mimo-v2.5-free" },
+        { id: "new-super-ai-free" }
+      ]
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  try {
+    const provider = new OpenCodeProvider({}, {});
+    const models = await provider.fetchOfficialFreeModels(true);
+
+    assert.ok(fetchedUrl.endsWith("/models"));
+    assert.ok(models.includes("new-super-ai-free"));
+    assert.ok(models.includes("mimo-v2.5-free"));
+    assert.ok(!models.includes("claude-sonnet-5"));
+    assert.ok(!models.includes("gpt-5.6-sol"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("dispatchExchange dynamically routes unconfigured free models to opencode", async () => {
+  const fakeFleet = {
+    getProvider: (name) => {
+      if (name === "opencode") {
+        return new OpenCodeProvider({ type: "opencode" }, {});
+      }
+      return null;
+    }
+  };
+
+  const originalFetch = globalThis.fetch;
+  let capturedModel = null;
+
+  globalThis.fetch = async (url, options) => {
+    const body = JSON.parse(options.body);
+    capturedModel = body.model;
+    return new Response(JSON.stringify({
+      id: "gen-789",
+      object: "chat.completion",
+      choices: [{ index: 0, message: { role: "assistant", content: "Dynamic discovery success!" } }]
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  try {
+    // 空路由配置，未显式声明 nemotron-3-ultra-free
+    const emptyConfig = { routes: {} };
+
+    const res = await dispatchExchange({
+      request: new Request("http://localhost/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" }
+      }),
+      body: { model: "nemotron-3-ultra-free", messages: [{ role: "user", content: "hi" }] },
+      model: "nemotron-3-ultra-free",
+      config: emptyConfig,
+      fleet: fakeFleet,
+      format: "openai"
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(capturedModel, "nemotron-3-ultra-free");
+    const json = await res.json();
+    assert.equal(json.choices[0].message.content, "Dynamic discovery success!");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 
 
