@@ -216,6 +216,11 @@ export ANTHROPIC_API_KEY="sk-workbuddy-gateway"
 claude
 ```
 
+> 网关的免费模型（如 `mimo-v2.5-free`）不在 Claude Code 内置模型目录里，首次会提示
+> `isn't described by this version's model catalog`，属正常警告不影响使用。
+> 如需消除：升级 Claude Code 后用 `behavesAs` 映射，或设置
+> `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`。
+
 ---
 
 ### 3. Cursor / NextChat / OpenAI 生态客户端

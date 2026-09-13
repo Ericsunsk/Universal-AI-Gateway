@@ -99,7 +99,13 @@ export function reduceOpenAIChunk(parsed) {
   return null;
 }
 
-export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}) {
+// 上游流停滞熔断：连续该时长收不到上游任何字节即判定上游卡死（如某些模型只回 200 头然后静默），
+// 主动收尾而不是让客户端挂到平台超时。只看“无字节”时长，持续吐 token 的慢模型不受影响。
+// options.stallMs 供测试注入小值；生产默认 180s（< Vercel 300s 上限，远大于实测最慢模型的 118s）。
+export const UPSTREAM_STALL_MS = 180 * 1000;
+
+export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
+  const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -112,7 +118,18 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
   };
 
   (async () => {
+    let lastUpstreamByteAt = Date.now();
+    let stalled = false;
     let pingInterval = setInterval(async () => {
+      // 停滞熔断：上游长时间零字节 → 取消上游读取，读循环以 done 收尾走正常闭环
+      //（不 abort writer，否则下游收不到 message_stop）。客户端看到空内容而非无限挂起。
+      if (!stalled && Date.now() - lastUpstreamByteAt > stallMs) {
+        stalled = true;
+        console.warn(`[Stream Stall] No upstream bytes for ${stallMs}ms, closing stream for model "${requestedModel}"`);
+        clearInterval(pingInterval);
+        try { upstreamReader?.cancel(new Error("Upstream stalled")); } catch (e) {}
+        return;
+      }
       try {
         await writer.write(KEEP_ALIVE_BYTES);
       } catch (e) {}
@@ -185,6 +202,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (value?.byteLength) lastUpstreamByteAt = Date.now();
 
         buffer += streamDecoder.decode(value, { stream: true });
         let pos = 0;
@@ -322,9 +340,15 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       }
 
       // 核心协议保障：若整个流未产生任何 content_block，强制合成 1 个空 text 块闭环，绝不让 Claude Code 触发 ph.length === 0 的流式回退报警
+      // 停滞熔断触发时带一句明示，避免客户端把“上游卡死”误读成“模型回了空答案”。
       if (currentBlockIndex === -1) {
         currentBlockIndex = 0;
         await writer.write(textEncoder.encode(`event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`));
+        if (stalled) {
+          await writer.write(textEncoder.encode(
+            `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(`\n[Gateway Warning: Upstream stalled, no data for ${Math.round(stallMs / 1000)}s]\n`)}}}\n\n`
+          ));
+        }
         await writer.write(textEncoder.encode(`event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`));
       } else {
         await closeCurrentBlock();

@@ -478,3 +478,23 @@ test("dispatchExchange does not fail over model errors onto the same model", asy
   assert.equal(res.status, 400);
   assert.deepEqual(calls, ["first"], "same model next → fail fast, no pointless retry");
 });
+
+test("streamOpenAIToAnthropic closes stalled upstream instead of hanging", async () => {
+  // 上游 200 但正文永远不来字节：必须熔断收尾，不能无限 ping
+  const hung = new Response(new ReadableStream({ start() {} }), {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" }
+  });
+  const started = Date.now();
+  const resp = streamOpenAIToAnthropic(hung, "m", null, {}, { stallMs: 50 });
+  const events = await readAnthropicEvents(resp);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 15000, `stall guard must fire promptly (took ${elapsed}ms)`);
+  assert.equal(events[0].event, "message_start");
+  assert.equal(events[events.length - 1].event, "message_stop");
+  const text = events
+    .filter(e => e.event === "content_block_delta")
+    .map(d => d.data.delta.text || "")
+    .join("");
+  assert.match(text, /stalled/);
+});
