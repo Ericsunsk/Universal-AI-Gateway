@@ -38,6 +38,15 @@ export function getDefaultConfig(env) {
         }
       },
       {
+        id: "opencode",
+        name: "OpenCode Zen (Free Tier)",
+        type: "opencode",
+        enabled: true,
+        config: {
+          baseUrl: "https://opencode.ai/zen/v1"
+        }
+      },
+      {
         id: "openrouter",
         name: "OpenRouter (备用)",
         type: "openai",
@@ -57,43 +66,70 @@ export function getDefaultConfig(env) {
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
         { provider: "workbuddy", model: "deepseek-v4-flash" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
         { provider: "openrouter", model: "deepseek/deepseek-chat" }
       ],
       "deepseek-v4-flash": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
+        { provider: "opencode", model: "big-pickle" }
       ],
       "deepseek-v4-pro": [
         { provider: "workbuddy", model: "deepseek-v4-pro" },
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
         { provider: "openrouter", model: "deepseek/deepseek-r1" }
       ],
       "claude-3-7-sonnet-20250219": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
         { provider: "workbuddy", model: "deepseek-v4-flash" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
         { provider: "openrouter", model: "anthropic/claude-3.7-sonnet" }
       ],
       "claude-3-5-sonnet-20241022": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
         { provider: "workbuddy", model: "deepseek-v4-flash" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
         { provider: "openrouter", model: "anthropic/claude-3.5-sonnet" }
       ],
       "claude-3-5-haiku-20241022": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
+        { provider: "opencode", model: "big-pickle" }
       ],
       "claude-3-haiku-20240307": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
       ],
       "claude-3-opus-20240229": [
         { provider: "workbuddy", model: "deepseek-v4-pro" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
         { provider: "openrouter", model: "anthropic/claude-3-opus" }
       ],
       "glm-5.2": [
-        { provider: "workbuddy", model: "glm-5.2" }
+        { provider: "workbuddy", model: "glm-5.2" },
+        { provider: "opencode", model: "mimo-v2.5-free" }
       ],
       "kimi-k3-1": [
-        { provider: "workbuddy", model: "kimi-k3-1" }
+        { provider: "workbuddy", model: "kimi-k3-1" },
+        { provider: "opencode", model: "mimo-v2.5-free" }
+      ],
+      "mimo-v2.5-free": [
+        { provider: "opencode", model: "mimo-v2.5-free" }
+      ],
+      "ling-3.0-flash-fin-free": [
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+      ],
+      "big-pickle": [
+        { provider: "opencode", model: "big-pickle" }
+      ],
+      "nemotron-3-ultra-free": [
+        { provider: "opencode", model: "nemotron-3-ultra-free" }
       ]
     },
     virtual_keys: {
