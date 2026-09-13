@@ -223,7 +223,7 @@ export class WorkBuddyProvider {
     }
 
     const serializedPayload = JSON.stringify(payload);
-    let lastResponse = null;
+    let lastErrorResponse = null;
 
     for (const account of accounts) {
       let token = await this.getActiveToken(account);
@@ -295,7 +295,14 @@ export class WorkBuddyProvider {
               if (businessErrorCode(resJson) !== 0) {
                 console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, backoff cooling down and auto-switching...`);
                 markAccountRateLimited(account, this.env);
-                lastResponse = resp;
+                lastErrorResponse = new Response(JSON.stringify(resJson), {
+                  status: 200,
+                  headers: buildResponseHeaders(resp.headers, {
+                    "Content-Type": "application/json",
+                    "X-Gateway-Account": account.id || "primary",
+                    "X-Gateway-Account-Id": account.id || "primary"
+                  })
+                });
                 continue;
               }
             } catch (e) {}
@@ -312,11 +319,19 @@ export class WorkBuddyProvider {
           });
         }
 
-        lastResponse = resp;
         const status = resp.status;
 
         // 触发账号切换条件：429 限流 / 5xx 服务异常 / 403 风控合规拦截 / 额度耗尽
         const errText = await resp.text();
+        lastErrorResponse = new Response(errText, {
+          status: status,
+          headers: buildResponseHeaders(resp.headers, {
+            "Content-Type": "application/json",
+            "X-Gateway-Account": account.id || "primary",
+            "X-Gateway-Account-Id": account.id || "primary"
+          })
+        });
+
         const action = classify(status, errText);
 
         if (action === "retry") {
@@ -333,10 +348,7 @@ export class WorkBuddyProvider {
         }
 
         // 其他不可恢复客户端错误直接返回
-        return new Response(errText, {
-          status: status,
-          headers: { "Content-Type": "application/json" }
-        });
+        return lastErrorResponse;
       } catch (err) {
         if (err.name === "AbortError") {
           throw err; // 客户端主动中断取消，直接抛出终止
@@ -347,7 +359,15 @@ export class WorkBuddyProvider {
           if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
           const retryResp = await makeRequest(token);
           if (retryResp.ok) return retryResp;
-          lastResponse = retryResp;
+          const retryErrText = await retryResp.text();
+          lastErrorResponse = new Response(retryErrText, {
+            status: retryResp.status,
+            headers: buildResponseHeaders(retryResp.headers, {
+              "Content-Type": "application/json",
+              "X-Gateway-Account": account.id || "primary",
+              "X-Gateway-Account-Id": account.id || "primary"
+            })
+          });
         } catch (retryErr) {
           if (retryErr.name === "AbortError") throw retryErr;
           console.warn(`[WorkBuddy] Account "${account.name || account.id}" retry failed: ${retryErr.message}, switching next...`);
@@ -355,7 +375,7 @@ export class WorkBuddyProvider {
       }
     }
 
-    return lastResponse || new Response(JSON.stringify({ error: { message: "All WorkBuddy accounts in pool failed" } }), { status: 502 });
+    return lastErrorResponse || new Response(JSON.stringify({ error: { message: "All WorkBuddy accounts in pool failed" } }), { status: 502, headers: { "Content-Type": "application/json" } });
   }
 
   // 余额 / 积分查询：并发聚合账号池所有账号积分

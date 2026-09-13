@@ -710,7 +710,7 @@ export async function dispatchExchange({
   }
 
   let lastError = null;
-  let lastResponse = null;
+  let lastErrorResponse = null;
 
   for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
     const candidate = candidates[candidateIndex];
@@ -766,16 +766,28 @@ export async function dispatchExchange({
       }
 
       if (upstreamRes) {
-        lastResponse = upstreamRes;
         const status = upstreamRes.status;
+        const errText = await upstreamRes.text();
+        lastErrorResponse = {
+          status: status,
+          text: errText,
+          headers: upstreamRes.headers
+        };
+
         if (status === 429 || status >= 500) {
           console.warn(`[Fallback] Provider "${candidate.provider}" returned ${status}, retrying next candidate...`);
           continue;
         }
 
-        // 优化：直接读取错误文本，无需多余 clone() 避免额外内存拷贝
-        const errText = await upstreamRes.text();
-        if (errText.includes("11128") || errText.includes("rate limit") || errText.includes("quota")) {
+        if (
+          status === 403 ||
+          errText.includes("11140") ||
+          errText.includes("11128") ||
+          errText.includes("14018") ||
+          errText.includes("rate limit") ||
+          errText.includes("quota") ||
+          errText.includes("安全审核")
+        ) {
           console.warn(`[Fallback] Provider "${candidate.provider}" quota/filter triggered, retrying next candidate...`);
           continue;
         }
@@ -791,10 +803,9 @@ export async function dispatchExchange({
     }
   }
 
-  if (lastResponse) {
-    const errText = await lastResponse.text();
-    return new Response(errText, {
-      status: lastResponse.status,
+  if (lastErrorResponse) {
+    return new Response(lastErrorResponse.text, {
+      status: lastErrorResponse.status,
       headers: { "Content-Type": "application/json", ...corsHeaders }
     });
   }

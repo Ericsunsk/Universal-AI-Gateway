@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {
   transformAnthropicToOpenAI,
   normalizeOpenAIMessages,
-  transformToolsToOpenAI
+  transformToolsToOpenAI,
+  dispatchExchange
 } from "../src/exchange/exchange.js";
 
 // ---- 工具定义转译：Anthropic input_schema -> OpenAI function ----
@@ -283,8 +284,47 @@ test("isUpstreamError detects error field and non-zero code", () => {
 
 test("extractUsage extracts prompt/completion tokens, preserves fallback", () => {
   assert.deepEqual(extractUsage({ usage: { prompt_tokens: 100, completion_tokens: 50 } }, { input: 0, output: 0 }), { input: 100, output: 50 });
-  // 缺失字段保留当前值
   assert.deepEqual(extractUsage({ usage: { prompt_tokens: 100 } }, { input: 20, output: 1 }), { input: 100, output: 1 });
-  // 无 usage 原样返回
   assert.deepEqual(extractUsage({}, { input: 20, output: 1 }), { input: 20, output: 1 });
+});
+
+test("dispatchExchange preserves upstream error without body consumption crash", async () => {
+  const fakeFleet = {
+    getProvider: (name) => {
+      if (name === "fake") {
+        return {
+          type: "workbuddy",
+          callChat: async () => {
+            return new Response(JSON.stringify({ error: { code: 14018, msg: "额度已用尽" } }), {
+              status: 429,
+              headers: { "Content-Type": "application/json" }
+            });
+          }
+        };
+      }
+      return null;
+    }
+  };
+
+  const fakeConfig = {
+    routes: {
+      "test-model": [{ provider: "fake", model: "test-model" }]
+    }
+  };
+
+  const res = await dispatchExchange({
+    request: new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    }),
+    body: { model: "test-model", messages: [{ role: "user", content: "hi" }] },
+    model: "test-model",
+    config: fakeConfig,
+    fleet: fakeFleet,
+    format: "openai"
+  });
+
+  assert.equal(res.status, 429);
+  const text = await res.text();
+  assert.ok(text.includes("额度已用尽"));
 });
