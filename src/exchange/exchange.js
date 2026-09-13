@@ -327,9 +327,10 @@ export function reduceOpenAIChunk(parsed) {
     return { kind: "tool_use", calls, stopReason: "tool_use" };
   }
 
-  // 思维链增量
-  if (delta?.reasoning_content) {
-    return { kind: "thinking", text: delta.reasoning_content };
+  // 思维链增量（兼容 DeepSeek reasoning_content 与 OpenCode / MiMo reasoning）
+  const reasoningDelta = delta?.reasoning_content || delta?.reasoning;
+  if (reasoningDelta) {
+    return { kind: "thinking", text: reasoningDelta };
   }
 
   // 正文增量
@@ -442,8 +443,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             const delta = parsed.choices?.[0]?.delta;
             if (!delta) continue;
 
-            // 思维链 (DeepSeek reasoning_content)
-            const reasoningChunk = delta.reasoning_content || "";
+            // 思维链 (DeepSeek reasoning_content / OpenCode reasoning)
+            const reasoningChunk = delta.reasoning_content || delta.reasoning || "";
             if (reasoningChunk) {
               if (currentBlockType !== "thinking") {
                 await closeCurrentBlock();
@@ -602,6 +603,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   let accumulated = "";
+  let accumulatedThinking = "";
   let buffer = "";
   let inputTokens = 20;
   let outputTokens = 1;
@@ -626,6 +628,8 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
             accumulated += `\n[Upstream Notice: ${errMsg}]\n`;
             continue;
           }
+          const reasoning = parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
+          if (reasoning) accumulatedThinking += reasoning;
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) accumulated += delta;
           const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
@@ -639,7 +643,11 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
     if (!accumulated && buffer.trim()) {
       try {
         const parsed = JSON.parse(buffer.trim());
-        accumulated = parsed.choices?.[0]?.message?.content ||
+        const message = parsed.choices?.[0]?.message;
+        const reasoning = message?.reasoning_content || message?.reasoning ||
+                          parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
+        if (reasoning) accumulatedThinking = reasoning;
+        accumulated = message?.content ||
                       parsed.choices?.[0]?.delta?.content ||
                       extractErrorMessage(parsed) ||
                       buffer.trim();
@@ -655,13 +663,19 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
   }
 
   accumulated = accumulated || " ";
-  outputTokens = Math.max(outputTokens, Math.ceil(accumulated.length / 4));
+  outputTokens = Math.max(outputTokens, Math.ceil((accumulated.length + accumulatedThinking.length) / 4));
+
+  const content = [];
+  if (accumulatedThinking) {
+    content.push({ type: "thinking", thinking: accumulatedThinking });
+  }
+  content.push({ type: "text", text: accumulated });
 
   return new Response(JSON.stringify({
     id: msgId,
     type: "message",
     role: "assistant",
-    content: [{ type: "text", text: accumulated }],
+    content: content,
     model: requestedModel || "claude-3-5-haiku-20241022",
     stop_reason: "end_turn",
     stop_sequence: null,
@@ -775,20 +789,26 @@ export async function dispatchExchange({
         };
 
         if (status === 429 || status >= 500) {
-          console.warn(`[Fallback] Provider "${candidate.provider}" returned ${status}, retrying next candidate...`);
+          console.warn(`[Fallback] Provider "${candidate.provider}" (${candidate.model}) returned ${status}, retrying next candidate...`);
           continue;
         }
 
+        const lowerErr = errText.toLowerCase();
         if (
           status === 403 ||
-          errText.includes("11140") ||
-          errText.includes("11128") ||
-          errText.includes("14018") ||
-          errText.includes("rate limit") ||
-          errText.includes("quota") ||
-          errText.includes("安全审核")
+          lowerErr.includes("11140") ||
+          lowerErr.includes("11128") ||
+          lowerErr.includes("14018") ||
+          lowerErr.includes("rate limit") ||
+          lowerErr.includes("quota") ||
+          lowerErr.includes("freeusagelimiterror") ||
+          lowerErr.includes("endpoint is unavailable") ||
+          lowerErr.includes("too many requests") ||
+          lowerErr.includes("overloaded") ||
+          lowerErr.includes("service unavailable") ||
+          lowerErr.includes("安全审核")
         ) {
-          console.warn(`[Fallback] Provider "${candidate.provider}" quota/filter triggered, retrying next candidate...`);
+          console.warn(`[Fallback] Provider "${candidate.provider}" (${candidate.model}) quota/limit/filter triggered, retrying next candidate...`);
           continue;
         }
 
