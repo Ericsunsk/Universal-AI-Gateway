@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getDefaultConfig, redactConfig, saveConfig, validateConfig } from "../src/config/config.js";
+import { getDefaultConfig, redactConfig, saveConfig, validateConfig, backfillMissingRoutes } from "../src/config/config.js";
 import { timingSafeEqual, authenticateAccess } from "../src/auth/auth.js";
 import { buildResponseHeaders } from "../src/http/headers.js";
 
@@ -172,4 +172,37 @@ test("buildResponseHeaders strips hop-by-hop headers", () => {
   assert.equal("connection" in result, false);
   assert.equal(result["x-ratelimit-remaining"], "42");
   assert.equal(result["x-gateway-account"], "primary");
+});
+
+// ---- #10 存量 KV 路由回填（只增不改） ----
+test("backfillMissingRoutes adds missing default routes without touching existing", () => {
+  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const stored = {
+    providers: JSON.parse(JSON.stringify(defaults.providers)),
+    routes: { "mimo-v2.5-free": JSON.parse(JSON.stringify(defaults.routes["mimo-v2.5-free"])) }
+  };
+  const custom = [{ provider: "opencode", model: "custom-model" }];
+  stored.routes["my-custom"] = custom;
+  const out = backfillMissingRoutes(stored, defaults);
+  assert.ok(out.routes["nemotron-3.5-lightning-free"], "missing default route backfilled");
+  assert.deepEqual(out.routes["my-custom"], custom, "custom route untouched");
+  assert.deepEqual(out.routes["mimo-v2.5-free"], defaults.routes["mimo-v2.5-free"]);
+});
+
+test("backfillMissingRoutes keeps empty-provider config empty (degraded path)", () => {
+  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const stored = { providers: [], routes: {} };
+  backfillMissingRoutes(stored, defaults);
+  assert.deepEqual(stored.routes, {}, "no providers -> no backfill, stays degraded");
+});
+
+test("backfillMissingRoutes skips routes referencing unknown providers", () => {
+  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const stored = {
+    providers: [{ id: "opencode", config: {} }],
+    routes: {}
+  };
+  backfillMissingRoutes(stored, defaults);
+  assert.ok(stored.routes["nemotron-3.5-lightning-free"], "opencode-only route backfilled");
+  assert.equal(stored.routes["deepseek-v4.1-flash"], undefined, "workbuddy-mixed route skipped");
 });

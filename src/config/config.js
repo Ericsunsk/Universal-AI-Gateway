@@ -188,6 +188,30 @@ export function getDefaultConfig(env) {
   };
 }
 
+// 纯函数：用代码默认路由回填 KV 存量配置里缺失的路由（只增不改）。
+// 背景：KV 一旦写入就盖住代码默认，后续发版新增路由（如 nemotron-3.5）对存量环境不可见，
+// 必须手动清 KV 才能生效。本函数让读路径自动补齐缺失项，各环境无需动线上密钥。
+// 约束：只补“引用 provider 在存量配置里全部存在”的路由；空 provider 配置（如测试的降级场景）保持原样。
+export function backfillMissingRoutes(stored, defaults) {
+  if (!stored || typeof stored !== "object" || !defaults || typeof defaults !== "object") return stored;
+  const storedRoutes = stored.routes;
+  const defaultRoutes = defaults.routes;
+  if (!storedRoutes || typeof storedRoutes !== "object" || Array.isArray(storedRoutes)) return stored;
+  if (!defaultRoutes || typeof defaultRoutes !== "object" || Array.isArray(defaultRoutes)) return stored;
+  const providerIds = new Set();
+  eachProvider(stored.providers, (p) => { if (p?.id) providerIds.add(p.id); });
+  let added = 0;
+  for (const [model, routeList] of Object.entries(defaultRoutes)) {
+    if (storedRoutes[model] !== undefined) continue;
+    if (!Array.isArray(routeList) || routeList.length === 0) continue;
+    if (!routeList.every((r) => r && typeof r.provider === "string" && providerIds.has(r.provider))) continue;
+    storedRoutes[model] = JSON.parse(JSON.stringify(routeList));
+    added++;
+  }
+  if (added > 0) console.log(`[Config] Backfilled ${added} missing route(s) from code defaults`);
+  return stored;
+}
+
 export async function getConfig(env, forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && cachedConfig && (now - cachedConfigTimestamp < CONFIG_CACHE_TTL_MS)) {
@@ -200,6 +224,10 @@ export async function getConfig(env, forceRefresh = false) {
       const raw = await kv.get("GATEWAY_CONFIG");
       if (raw) {
         const parsed = JSON.parse(raw);
+        // 存量 KV 可能落后于代码默认路由：内存中回填缺失项（不写 KV，无版本冲突）。
+        try {
+          backfillMissingRoutes(parsed, getDefaultConfig(env));
+        } catch (e) {}
         cachedConfig = parsed;
         cachedConfigTimestamp = now;
         return parsed;
