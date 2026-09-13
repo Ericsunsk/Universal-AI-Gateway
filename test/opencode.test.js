@@ -238,3 +238,46 @@ test("dispatchExchange cascades through OpenCode models when FreeUsageLimitError
   }
 });
 
+test("OpenCodeProvider routes muse-spark models to /zen/v1/responses endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedUrl = null;
+  let capturedBody = null;
+
+  globalThis.fetch = async (url, options) => {
+    capturedUrl = url;
+    capturedBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      id: "resp_123",
+      object: "response",
+      created_at: 1789280000,
+      output: [
+        {
+          type: "message",
+          content: [{ type: "output_text", text: "Sparkling hello!" }]
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  try {
+    const provider = new OpenCodeProvider({}, {});
+    const res = await provider.callChat({
+      model: "muse-spark-1.3",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false
+    });
+
+    assert.equal(res.status, 200);
+    assert.ok(capturedUrl.endsWith("/responses"), "Must call /responses endpoint");
+    assert.equal(capturedBody.model, "muse-spark-1.3-contributor-free", "Must normalize to free tier variant");
+    const json = await res.json();
+    assert.equal(json.choices[0].message.content, "Sparkling hello!");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
