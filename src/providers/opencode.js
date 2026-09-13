@@ -499,6 +499,11 @@ export class OpenCodeProvider {
     if (payload.max_tokens !== undefined) {
       responsesPayload.max_output_tokens = Math.max(payload.max_tokens, 1024);
     }
+    if (payload.reasoning) {
+      responsesPayload.reasoning = payload.reasoning;
+    } else if (payload.reasoning_effort) {
+      responsesPayload.reasoning = { effort: payload.reasoning_effort };
+    }
 
     // Claude Code Tool Calling 深度支持：透传 tools 与 tool_choice 到 Responses API
     if (Array.isArray(payload.tools) && payload.tools.length > 0) {

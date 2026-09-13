@@ -10,7 +10,7 @@ import {
   ModelHealthTracker
 } from "../src/providers/opencode.js";
 import { createProvider } from "../src/providers/index.js";
-import { dispatchExchange } from "../src/exchange/exchange.js";
+import { dispatchExchange, transformAnthropicToOpenAI } from "../src/exchange/exchange.js";
 
 test("OpenCodeProvider initializes with correct defaults", () => {
   const provider = new OpenCodeProvider({}, {});
@@ -547,6 +547,36 @@ test("ModelHealthTracker monitors latency, tracks cooldown, and prioritizes heal
   assert.equal(sorted[0], "ling-3.0-flash-fin-free");
   assert.equal(sorted[1], "mimo-v2.5-free");
 });
+
+test("transformAnthropicToOpenAI maps Claude Code thinking budget and model suffix to reasoning effort", () => {
+  // 1. 通过模型后缀调节推理强度
+  const payloadHigh = transformAnthropicToOpenAI({
+    model: "muse-spark-1.3[high]",
+    messages: [{ role: "user", content: "Solve hard math problem" }]
+  }, "muse-spark-1.3-contributor-free");
+
+  assert.equal(payloadHigh.reasoning_effort, "high");
+  assert.deepEqual(payloadHigh.reasoning, { effort: "high", enabled: true });
+
+  // 2. 通过 Claude Code thinking.budget_tokens 调节推理强度
+  const payloadBudget = transformAnthropicToOpenAI({
+    model: "muse-spark-1.3",
+    messages: [{ role: "user", content: "Write quick test" }],
+    thinking: { type: "enabled", budget_tokens: 1024 }
+  }, "muse-spark-1.3-contributor-free");
+
+  assert.equal(payloadBudget.reasoning_effort, "minimal");
+  assert.deepEqual(payloadBudget.reasoning, { effort: "minimal", enabled: true });
+
+  // 3. 通过 thinking.type: disabled 或 [off] 关闭思维链
+  const payloadDisabled = transformAnthropicToOpenAI({
+    model: "ling-3.0-flash[off]",
+    messages: [{ role: "user", content: "hi" }]
+  }, "ling-3.0-flash-fin-free");
+
+  assert.deepEqual(payloadDisabled.reasoning, { effort: "minimal", enabled: false });
+});
+
 
 
 
