@@ -647,10 +647,13 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
         const reasoning = message?.reasoning_content || message?.reasoning ||
                           parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
         if (reasoning) accumulatedThinking = reasoning;
-        accumulated = message?.content ||
-                      parsed.choices?.[0]?.delta?.content ||
-                      extractErrorMessage(parsed) ||
-                      buffer.trim();
+        if (message && message.content !== undefined && message.content !== null) {
+          accumulated = message.content;
+        } else if (parsed.choices?.[0]?.delta?.content) {
+          accumulated = parsed.choices[0].delta.content;
+        } else {
+          accumulated = extractErrorMessage(parsed) || (accumulatedThinking ? "" : buffer.trim());
+        }
         const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
         inputTokens = usage.input;
         outputTokens = usage.output;
