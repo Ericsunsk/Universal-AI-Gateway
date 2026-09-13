@@ -149,6 +149,26 @@ export function getDefaultConfig(env) {
         { provider: "opencode", model: "nemotron-3-ultra-free" },
         { provider: "opencode", model: "mimo-v2.5-free" },
         { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+      ],
+      "muse-spark-1.3": [
+        { provider: "opencode", model: "muse-spark-1.3-contributor-free" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+      ],
+      "muse-spark-1.3-contributor-free": [
+        { provider: "opencode", model: "muse-spark-1.3-contributor-free" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+      ],
+      "muse-spark-1.2-contributor-free": [
+        { provider: "opencode", model: "muse-spark-1.2-contributor-free" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+      ],
+      "deepseek-v4-flash-free": [
+        { provider: "opencode", model: "deepseek-v4-flash-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
+        { provider: "opencode", model: "mimo-v2.5-free" }
       ]
     },
     virtual_keys: {
