@@ -7,7 +7,8 @@ import {
   parseProxyList,
   deriveSessionAndFingerprint,
   convertToolsToSystemPrompt,
-  ModelHealthTracker
+  ModelHealthTracker,
+  transformOpenAIMessagesToResponsesInput
 } from "../src/providers/opencode.js";
 import { createProvider } from "../src/providers/index.js";
 import { dispatchExchange, transformAnthropicToOpenAI } from "../src/exchange/exchange.js";
@@ -576,6 +577,46 @@ test("transformAnthropicToOpenAI maps Claude Code thinking budget and model suff
 
   assert.deepEqual(payloadDisabled.reasoning, { enabled: false });
 });
+
+test("transformOpenAIMessagesToResponsesInput correctly transforms messages with tool calls and tool results", () => {
+  const messages = [
+    { role: "system", content: "You are an assistant." },
+    { role: "user", content: "What is 2+2?" },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_calc_1",
+          type: "function",
+          function: { name: "calculator", arguments: '{"exp":"2+2"}' }
+        }
+      ]
+    },
+    {
+      role: "tool",
+      tool_call_id: "call_calc_1",
+      content: "4"
+    }
+  ];
+
+  const input = transformOpenAIMessagesToResponsesInput(messages);
+  assert.equal(input.length, 4);
+  assert.deepEqual(input[0], { role: "system", content: "You are an assistant." });
+  assert.deepEqual(input[1], { role: "user", content: "What is 2+2?" });
+  assert.deepEqual(input[2], {
+    type: "function_call",
+    call_id: "call_calc_1",
+    name: "calculator",
+    arguments: '{"exp":"2+2"}'
+  });
+  assert.deepEqual(input[3], {
+    type: "function_call_output",
+    call_id: "call_calc_1",
+    output: "4"
+  });
+});
+
 
 
 

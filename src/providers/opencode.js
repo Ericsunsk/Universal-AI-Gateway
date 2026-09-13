@@ -491,7 +491,7 @@ export class OpenCodeProvider {
     const isStream = payload.stream !== false;
     const responsesPayload = {
       model: targetModel,
-      input: payload.messages,
+      input: transformOpenAIMessagesToResponsesInput(payload.messages),
       stream: isStream
     };
     if (payload.temperature !== undefined) responsesPayload.temperature = payload.temperature;
@@ -757,3 +757,125 @@ export class OpenCodeProvider {
     }
   }
 }
+
+/**
+ * 将 OpenAI 格式的 messages 转换为 OpenCode /zen/v1/responses 所需的 input 列表
+ * - 支持 user, system, assistant 文本消息 (确保 content 为字符串且非 null)
+ * - 支持 assistant.tool_calls 拆解为 function_call 节点
+ * - 支持 role: "tool" 转换为 function_call_output 节点
+ * - 自动成对闭合 function_call 与 function_call_output，防止上游 400 报错
+ */
+export function transformOpenAIMessagesToResponsesInput(messages) {
+  if (!Array.isArray(messages)) return [];
+
+  const input = [];
+  const emittedCallIds = new Set();
+  const pendingCallIds = new Set();
+
+  for (const msg of messages) {
+    if (!msg) continue;
+
+    // 1. 处理 tool 角色（工具执行结果转换为 function_call_output）
+    if (msg.role === "tool") {
+      const callId = msg.tool_call_id || (msg.id ? String(msg.id) : null) || `call_anon_${input.length}`;
+      let contentStr = "";
+      if (typeof msg.content === "string") {
+        contentStr = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        contentStr = msg.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n");
+      } else if (msg.content !== null && msg.content !== undefined) {
+        contentStr = JSON.stringify(msg.content);
+      }
+
+      // Responses API 强制要求：每个 function_call_output 前面必须有相同 call_id 的 function_call
+      if (!emittedCallIds.has(callId)) {
+        input.push({
+          type: "function_call",
+          call_id: callId,
+          name: "tool",
+          arguments: "{}"
+        });
+        emittedCallIds.add(callId);
+      }
+
+      input.push({
+        type: "function_call_output",
+        call_id: callId,
+        output: contentStr
+      });
+      pendingCallIds.delete(callId);
+      continue;
+    }
+
+    // 2. 处理 assistant 角色（包含普通文本以及 tool_calls）
+    if (msg.role === "assistant") {
+      let textContent = "";
+      if (typeof msg.content === "string") {
+        textContent = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        textContent = msg.content.map(c => typeof c === "string" ? c : (c.text || "")).join("\n").trim();
+      }
+
+      if (textContent) {
+        input.push({
+          role: "assistant",
+          content: textContent
+        });
+      }
+
+      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          const callId = tc.id || `call_${crypto.randomUUID().slice(0, 8)}`;
+          const funcName = tc.function?.name || tc.name || "tool";
+          const args = typeof tc.function?.arguments === "string"
+            ? tc.function.arguments
+            : JSON.stringify(tc.function?.arguments || tc.arguments || {});
+
+          emittedCallIds.add(callId);
+          pendingCallIds.add(callId);
+          input.push({
+            type: "function_call",
+            call_id: callId,
+            name: funcName,
+            arguments: args
+          });
+        }
+      } else if (!textContent) {
+        // 保证 content 为字符串而非 null，防止上游 400 content did not match any supported type
+        input.push({
+          role: "assistant",
+          content: ""
+        });
+      }
+      continue;
+    }
+
+    // 3. 处理 user / system / developer 等常规角色
+    const role = (msg.role === "developer" || msg.role === "system") ? "system" : "user";
+    let contentStr = "";
+    if (typeof msg.content === "string") {
+      contentStr = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      contentStr = msg.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n");
+    } else if (msg.content !== null && msg.content !== undefined) {
+      contentStr = String(msg.content);
+    }
+
+    input.push({
+      role: role,
+      content: contentStr
+    });
+  }
+
+  // 4. 清理遗留未闭合的 function_call
+  for (const pendingId of pendingCallIds) {
+    input.push({
+      type: "function_call_output",
+      call_id: pendingId,
+      output: "[Completed]"
+    });
+  }
+
+  return input;
+}
+
