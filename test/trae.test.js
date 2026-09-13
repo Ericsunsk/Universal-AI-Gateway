@@ -62,9 +62,9 @@ test("getAccounts: empty when no token", () => {
 });
 
 // ---- 网关与 appId ----
-test("default appId is the live-confirmed production id (677332)", () => {
+test("default appId is the live-confirmed UUID (X-App-Id)", () => {
   const p = new TraeProvider({ id: "trae", type: "trae", config: {} }, {});
-  assert.equal(p.appId, "677332");
+  assert.equal(p.appId, "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8");
   assert.equal(p.appId, TRAE_APP_ID);
   assert.equal(TRAE_CLIENT_ID, "ono9krqynydwx5");
 });
@@ -86,15 +86,17 @@ test("chatHost/usageHost default to core/grow traeapi.us, overridable", () => {
 });
 
 // ---- 请求头（设备指纹）----
-test("buildHeaders carries TTNetwork UA, appId, and device fingerprint", () => {
+test("buildHeaders carries Cloud-IDE-JWT auth, X-App-Id, and device fingerprint", () => {
   const p = new TraeProvider({
     id: "trae", type: "trae",
     config: { deviceId: "did-1", machineId: "mid-1", deviceBrand: "MacBookPro17,1" }
   }, {});
   const h = p.buildHeaders("tok-123", {});
   assert.equal(h["User-Agent"], "TTNetwork PC");
-  assert.equal(h["xAppId"], "677332");
-  assert.equal(h["Authorization"], "Bearer tok-123");
+  assert.equal(h["X-App-Id"], "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8");
+  assert.equal(h["Authorization"], "Cloud-IDE-JWT tok-123");
+  assert.equal(h["x-ide-token"], "tok-123");
+  assert.equal(h["x-plugin-channel"], "icube-ai");
   assert.equal(h["X-Device-Id"], "did-1");
   assert.equal(h["X-Machine-Id"], "mid-1");
   assert.equal(h["X-Device-Brand"], "MacBookPro17,1");
