@@ -168,7 +168,7 @@ export class OpenCodeProvider {
     const resp = await fetch(url, {
       method: "POST",
       headers: headers,
-      body: JSON.stringify(payload),
+      body: JSON.stringify(adaptedPayload),
       signal: options.signal,
       keepalive: true
     });
