@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { OpenCodeProvider, isFreeModel, DEFAULT_FREE_MODELS } from "../src/providers/opencode.js";
+import {
+  OpenCodeProvider,
+  isFreeModel,
+  DEFAULT_FREE_MODELS,
+  parseProxyList,
+  deriveSessionAndFingerprint,
+  convertToolsToSystemPrompt,
+  ModelHealthTracker
+} from "../src/providers/opencode.js";
 import { createProvider } from "../src/providers/index.js";
 import { dispatchExchange } from "../src/exchange/exchange.js";
 
@@ -50,7 +58,8 @@ test("OpenCodeProvider injects required session headers on callChat", async () =
     assert.ok(capturedHeaders["x-opencode-session"], "Must contain x-opencode-session");
     assert.ok(capturedHeaders["x-opencode-request"], "Must contain x-opencode-request");
     assert.equal(capturedHeaders["x-opencode-client"], "cli");
-    assert.equal(capturedHeaders["User-Agent"], "opencode/1.18.30");
+    assert.ok(capturedHeaders["User-Agent"].startsWith("opencode/1.18.30"), "User-Agent must start with opencode/1.18.30");
+    assert.equal(capturedHeaders["x-opencode-version"], "1.18.30");
     assert.equal(capturedBody.model, "mimo-v2.5-free");
     assert.equal(res.headers.get("x-gateway-account"), "opencode-zen");
   } finally {
@@ -392,6 +401,153 @@ test("dispatchExchange dynamically routes unconfigured free models to opencode",
     globalThis.fetch = originalFetch;
   }
 });
+
+test("parseProxyList parses comma, newline and semicolon separated proxies", () => {
+  assert.deepEqual(parseProxyList("http://p1:8080, http://p2:8080"), ["http://p1:8080", "http://p2:8080"]);
+  assert.deepEqual(parseProxyList("http://p1:8080\nhttp://p2:8080; http://p3:8080"), ["http://p1:8080", "http://p2:8080", "http://p3:8080"]);
+  assert.deepEqual(parseProxyList(""), []);
+  assert.deepEqual(parseProxyList(null), []);
+});
+
+test("deriveSessionAndFingerprint provides session affinity and authentic CLI headers", async () => {
+  const payload1 = {
+    messages: [
+      { role: "user", content: "Write a fibonacci function in Rust" }
+    ]
+  };
+
+  const payload2 = {
+    messages: [
+      { role: "user", content: "Write a fibonacci function in Rust" },
+      { role: "assistant", content: "fn fib(n: u32) -> u32 { ... }" },
+      { role: "user", content: "Now optimize it" }
+    ]
+  };
+
+  const fp1 = await deriveSessionAndFingerprint(payload1, {});
+  const fp2 = await deriveSessionAndFingerprint(payload2, {});
+
+  // 相同对话首条用户消息生成稳定一致的 Session ID
+  assert.equal(fp1.sessionId, fp2.sessionId);
+  assert.equal(fp1.platform, fp2.platform);
+  assert.equal(fp1.userAgent, fp2.userAgent);
+  // 单次请求 ID 每次不同
+  assert.notEqual(fp1.requestId, fp2.requestId);
+  assert.ok(fp1.userAgent.startsWith("opencode/1.18.30 ("));
+  assert.equal(fp1.version, "1.18.30");
+});
+
+test("OpenCodeProvider rotates proxy when encountering 429 rate limit", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchAttempts = 0;
+
+  globalThis.fetch = async (url, options) => {
+    fetchAttempts++;
+    if (fetchAttempts === 1) {
+      return new Response(JSON.stringify({
+        error: { message: "FreeUsageLimitError: Rate limit exceeded" }
+      }), { status: 429, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: "Success on proxy 2" } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+
+  try {
+    const provider = new OpenCodeProvider({
+      config: {
+        proxyUrls: "http://proxy1:8080, http://proxy2:8080"
+      }
+    }, {});
+
+    assert.equal(provider.proxyList.length, 2);
+    const res = await provider.callChat({
+      model: "mimo-v2.5-free",
+      messages: [{ role: "user", content: "test" }]
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(fetchAttempts, 2, "Must retry on next proxy");
+    const json = await res.json();
+    assert.equal(json.choices[0].message.content, "Success on proxy 2");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("callResponsesApi translates tools and function_call output correctly", async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedBody = null;
+
+  globalThis.fetch = async (url, options) => {
+    capturedBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      id: "resp_tools_test",
+      output: [
+        {
+          type: "function_call",
+          id: "call_abc123",
+          name: "Bash",
+          arguments: { command: "cargo test" }
+        }
+      ]
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  try {
+    const provider = new OpenCodeProvider({}, {});
+    const res = await provider.callResponsesApi({
+      model: "muse-spark-1.3",
+      messages: [{ role: "user", content: "run test" }],
+      stream: false,
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "Bash",
+            description: "Run shell command",
+            parameters: { type: "object", properties: { command: { type: "string" } } }
+          }
+        }
+      ],
+      tool_choice: "auto"
+    });
+
+    assert.equal(res.status, 200);
+    assert.ok(capturedBody.tools, "Must pass tools to Responses API");
+    assert.equal(capturedBody.tools[0].name, "Bash");
+    const json = await res.json();
+    assert.equal(json.choices[0].finish_reason, "tool_calls");
+    assert.equal(json.choices[0].message.tool_calls[0].function.name, "Bash");
+    assert.equal(json.choices[0].message.tool_calls[0].function.arguments, '{"command":"cargo test"}');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ModelHealthTracker monitors latency, tracks cooldown, and prioritizes healthy models", () => {
+  const tracker = new ModelHealthTracker();
+
+  tracker.recordSuccess("mimo-v2.5-free", 200);
+  tracker.recordSuccess("ling-3.0-flash-fin-free", 500);
+
+  // 延迟更低的排在更前面
+  let sorted = tracker.sortModels(["ling-3.0-flash-fin-free", "mimo-v2.5-free"]);
+  assert.equal(sorted[0], "mimo-v2.5-free");
+
+  // 模拟 mimo-v2.5-free 触发 429 频率限制
+  tracker.recordFailure("mimo-v2.5-free", 429, true);
+  assert.equal(tracker.isCooling("mimo-v2.5-free"), true);
+
+  // 处于冷却状态的模型自动沉底，未冷却的优先
+  sorted = tracker.sortModels(["mimo-v2.5-free", "ling-3.0-flash-fin-free"]);
+  assert.equal(sorted[0], "ling-3.0-flash-fin-free");
+  assert.equal(sorted[1], "mimo-v2.5-free");
+});
+
 
 
 

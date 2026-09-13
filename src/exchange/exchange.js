@@ -714,11 +714,24 @@ export async function dispatchExchange({
       const resolved = opencode.resolveModel(cleanModel);
       const freeModels = typeof opencode.getFreeModels === "function" ? opencode.getFreeModels() : [];
       if (freeModels.includes(resolved) || (resolved && resolved.endsWith("-free"))) {
-        candidates = [
-          { provider: "opencode", model: resolved },
-          { provider: "opencode", model: "mimo-v2.5-free" },
-          { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-        ];
+        const backupPool = freeModels.filter(m => m !== resolved);
+        const sortedBackups = typeof opencode.sortModelsByHealth === "function"
+          ? opencode.sortModelsByHealth(backupPool)
+          : backupPool;
+
+        // 若目标模型正在冷却中，优先由当前最健康的备份模型抢跑；否则目标模型优先
+        if (typeof opencode.isModelCooling === "function" && opencode.isModelCooling(resolved) && sortedBackups.length > 0) {
+          candidates = [
+            { provider: "opencode", model: sortedBackups[0] },
+            { provider: "opencode", model: resolved },
+            ...sortedBackups.slice(1, 4).map(m => ({ provider: "opencode", model: m }))
+          ];
+        } else {
+          candidates = [
+            { provider: "opencode", model: resolved },
+            ...sortedBackups.slice(0, 3).map(m => ({ provider: "opencode", model: m }))
+          ];
+        }
       }
     }
   }
@@ -755,20 +768,20 @@ export async function dispatchExchange({
 
       if (isAnthropic) {
         if (provider.type === "anthropic") {
-          upstreamRes = await provider.callMessages({ ...body, model: candidate.model }, { signal: request?.signal });
+          upstreamRes = await provider.callMessages({ ...body, model: candidate.model }, { signal: request?.signal, request });
         } else {
           const openaiPayload = transformAnthropicToOpenAI(body, candidate.model, config);
           if (provider.type === "workbuddy") {
             openaiPayload.stream = true;
           }
-          upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal });
+          upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal, request });
         }
       } else {
         const openaiPayload = { ...body, model: candidate.model };
         if (provider.type === "workbuddy") {
           openaiPayload.stream = true;
         }
-        upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal });
+        upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal, request });
       }
 
       if (upstreamRes && upstreamRes.ok) {

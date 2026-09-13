@@ -22,6 +22,203 @@ export function isFreeModel(id) {
   );
 }
 
+export function parseProxyList(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(s => String(s).trim()).filter(Boolean);
+  return String(raw)
+    .split(/[,;\n]/)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+export const PLATFORMS = [
+  "darwin; arm64",
+  "darwin; x64",
+  "linux; x64",
+  "windows; x64"
+];
+
+/**
+ * 计算会话亲和性标识与真实的 OpenCode CLI 指纹
+ * 在连续对话或多轮调用中复用同一个 Session ID，极大提升防风控能力
+ */
+export async function deriveSessionAndFingerprint(payload, options = {}) {
+  let sessionId = options.sessionId;
+  if (!sessionId && options.request?.headers) {
+    const getH = (k) => typeof options.request.headers.get === "function" ? options.request.headers.get(k) : options.request.headers[k];
+    sessionId = getH("x-session-id") || getH("x-conversation-id") || getH("session-id");
+  }
+
+  if (!sessionId) {
+    const firstUserMsg = payload?.messages?.find(m => m.role === "user");
+    const seed = firstUserMsg
+      ? (typeof firstUserMsg.content === "string" ? firstUserMsg.content : JSON.stringify(firstUserMsg.content))
+      : "";
+
+    if (seed && seed.length > 3) {
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(seed);
+        const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const hex = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+        sessionId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+      } catch (e) {
+        sessionId = crypto.randomUUID();
+      }
+    } else {
+      sessionId = crypto.randomUUID();
+    }
+  }
+
+  let charSum = 0;
+  for (let i = 0; i < sessionId.length; i++) {
+    charSum += sessionId.charCodeAt(i);
+  }
+  const platform = PLATFORMS[charSum % PLATFORMS.length];
+
+  return {
+    sessionId,
+    requestId: crypto.randomUUID(),
+    platform,
+    userAgent: `opencode/1.18.30 (${platform})`,
+    version: "1.18.30"
+  };
+}
+
+/**
+ * 工具调用提示词降级适配器（Polyfill）
+ * 当上游免费模型不支持原生 OpenAI JSON Tools 时，自动将工具注入 System Prompt
+ */
+export function convertToolsToSystemPrompt(tools) {
+  if (!Array.isArray(tools) || tools.length === 0) return "";
+  let prompt = "\n\n[AVAILABLE TOOLS]\nYou have access to the following tools to assist the user. If you need to call a tool, reply with a markdown code block tagged json in this exact format:\n```json\n{\n  \"tool\": \"tool_name\",\n  \"arguments\": {\n    \"param\": \"value\"\n  }\n}\n```\n\nTools:\n";
+  for (const t of tools) {
+    const fn = t.function || t;
+    prompt += `- ${fn.name}: ${fn.description || "No description"}\n  Parameters: ${JSON.stringify(fn.parameters || {})}\n`;
+  }
+  return prompt;
+}
+
+/**
+ * 免费模型健康度与延迟监控追踪器
+ * 记录连续 429 熔断、冷却时间和平均首字延迟 (TTFB)
+ */
+export class ModelHealthTracker {
+  constructor() {
+    this.stats = new Map();
+  }
+
+  getOrCreate(model) {
+    if (!this.stats.has(model)) {
+      this.stats.set(model, {
+        streak429: 0,
+        cooldownUntil: 0,
+        avgLatencyMs: 300,
+        callCount: 0,
+        successCount: 0
+      });
+    }
+    return this.stats.get(model);
+  }
+
+  recordSuccess(model, latencyMs) {
+    const entry = this.getOrCreate(model);
+    entry.streak429 = 0;
+    entry.cooldownUntil = 0;
+    entry.avgLatencyMs = entry.callCount === 0
+      ? latencyMs
+      : Math.round(entry.avgLatencyMs * 0.7 + latencyMs * 0.3);
+    entry.callCount++;
+    entry.successCount++;
+  }
+
+  recordFailure(model, status, isRateLimit = false) {
+    const entry = this.getOrCreate(model);
+    entry.callCount++;
+    if (isRateLimit || status === 429) {
+      entry.streak429 = (entry.streak429 || 0) + 1;
+      const backoffSec = Math.min(300, 30 * Math.pow(2, entry.streak429 - 1));
+      entry.cooldownUntil = Date.now() + backoffSec * 1000;
+    }
+  }
+
+  isCooling(model) {
+    const entry = this.stats.get(model);
+    return Boolean(entry && entry.cooldownUntil > Date.now());
+  }
+
+  getScore(model) {
+    const entry = this.stats.get(model);
+    if (!entry) return 1000;
+    if (entry.cooldownUntil > Date.now()) {
+      return -10000 - (entry.cooldownUntil - Date.now());
+    }
+    const latencyPenalty = Math.min(600, Math.round((entry.avgLatencyMs || 300) / 2));
+    return 1000 - latencyPenalty;
+  }
+
+  sortModels(models) {
+    return [...models].sort((a, b) => this.getScore(b) - this.getScore(a));
+  }
+
+  getSummary() {
+    const summary = {};
+    for (const [model, stat] of this.stats.entries()) {
+      summary[model] = {
+        latency: `${stat.avgLatencyMs}ms`,
+        cooling: stat.cooldownUntil > Date.now(),
+        cooldownRemainingSec: Math.max(0, Math.round((stat.cooldownUntil - Date.now()) / 1000)),
+        successRate: stat.callCount > 0 ? `${Math.round((stat.successCount / stat.callCount) * 100)}%` : "N/A"
+      };
+    }
+    return summary;
+  }
+}
+
+export const globalOpenCodeHealthTracker = new ModelHealthTracker();
+
+/**
+ * 跨环境的代理请求分发器 (Node.js/Vercel/Cloudflare Workers)
+ */
+export async function executeFetchWithProxy(url, fetchInit, proxyUrl) {
+  if (!proxyUrl) {
+    return fetch(url, fetchInit);
+  }
+
+  // Node.js / Vercel: 动态载入 ProxyAgent（使用变量规避 esbuild 静态解析打包）
+  if (typeof process !== "undefined" && process.versions?.node) {
+    try {
+      const modName = "undici";
+      const { ProxyAgent } = await import(/* @vite-ignore */ modName);
+      return await fetch(url, {
+        ...fetchInit,
+        dispatcher: new ProxyAgent(proxyUrl)
+      });
+    } catch (e) {
+      console.warn(`[OpenCode Proxy] Failed to use undici ProxyAgent with ${proxyUrl}:`, e.message);
+    }
+  }
+
+  // Cloudflare Workers 或通用转发端点: 支持带 ?url= 或代理改写
+  if (proxyUrl.includes("://")) {
+    try {
+      if (proxyUrl.includes("?url=") || proxyUrl.endsWith("?url")) {
+        const fullUrl = proxyUrl.includes("=") ? `${proxyUrl}${encodeURIComponent(url)}` : `${proxyUrl}=${encodeURIComponent(url)}`;
+        return await fetch(fullUrl, {
+          ...fetchInit,
+          headers: {
+            ...fetchInit.headers,
+            "X-Target-URL": url
+          }
+        });
+      }
+    } catch (e) {}
+  }
+
+  return fetch(url, fetchInit);
+}
+
 let cachedFreeModels = null;
 let cachedFreeModelsTimestamp = 0;
 const MODELS_CACHE_TTL_MS = 3600 * 1000; // 1小时缓存
@@ -34,6 +231,10 @@ export class OpenCodeProvider {
     this.env = env;
     this.config = config.config || {};
 
+    // 代理池支持：解析环境变量或配置中的代理列表
+    this.proxyList = parseProxyList(this.env?.OPENCODE_PROXY_URLS || this.config.proxyUrls || this.env?.PROXY_URL || "");
+    this.currentProxyIndex = 0;
+
     // 实例初始化时异步预热拉取官方最新免费模型
     this.fetchOfficialFreeModels().catch(() => {});
   }
@@ -41,6 +242,29 @@ export class OpenCodeProvider {
   get baseUrl() {
     let url = this.config.baseUrl || "https://opencode.ai/zen/v1";
     return url.replace(/\/$/, "");
+  }
+
+  getEffectiveProxy() {
+    if (this.proxyList.length === 0) return null;
+    return this.proxyList[this.currentProxyIndex % this.proxyList.length];
+  }
+
+  rotateProxy() {
+    if (this.proxyList.length > 0) {
+      this.currentProxyIndex = (this.currentProxyIndex + 1) % this.proxyList.length;
+    }
+  }
+
+  sortModelsByHealth(models) {
+    return globalOpenCodeHealthTracker.sortModels(models);
+  }
+
+  isModelCooling(model) {
+    return globalOpenCodeHealthTracker.isCooling(model);
+  }
+
+  getModelHealth(model) {
+    return globalOpenCodeHealthTracker.getOrCreate(model);
   }
 
   async fetchOfficialFreeModels(forceRefresh = false) {
@@ -65,13 +289,14 @@ export class OpenCodeProvider {
     }
 
     try {
-      const resp = await fetch(`${this.baseUrl}/models`, {
+      const resp = await executeFetchWithProxy(`${this.baseUrl}/models`, {
         headers: {
           "User-Agent": "opencode/1.18.30",
           "x-opencode-client": "cli"
         },
         signal: AbortSignal.timeout(6000)
-      });
+      }, this.getEffectiveProxy());
+
       if (resp.ok) {
         const json = await resp.json();
         const models = (json.data || [])
@@ -150,65 +375,113 @@ export class OpenCodeProvider {
       return this.callResponsesApi(adaptedPayload, options);
     }
 
+    const fingerprint = await deriveSessionAndFingerprint(payload, options);
     const url = `${this.baseUrl}/chat/completions`;
-    const sessionId = options.sessionId || crypto.randomUUID();
-    const requestId = crypto.randomUUID();
 
-    const headers = {
+    const baseHeaders = {
       "Content-Type": "application/json",
-      "User-Agent": "opencode/1.18.30",
-      "x-opencode-session": sessionId,
-      "x-opencode-request": requestId,
+      "User-Agent": fingerprint.userAgent,
+      "x-opencode-version": fingerprint.version,
+      "x-opencode-session": fingerprint.sessionId,
+      "x-opencode-request": fingerprint.requestId,
       "x-opencode-client": "cli",
       "Accept": payload.stream !== false ? "text/event-stream, application/json" : "application/json",
       "Connection": "keep-alive",
       ...(this.config.defaultHeaders || {})
     };
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: headers,
-      body: JSON.stringify(adaptedPayload),
-      signal: options.signal,
-      keepalive: true
-    });
+    const maxAttempts = Math.max(1, Math.min(this.proxyList.length, 3));
+    let lastResp = null;
+    let activePayload = adaptedPayload;
+    let toolPolyfilled = false;
 
-    if (resp.ok) {
-      return new Response(resp.body, {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const currentProxy = this.getEffectiveProxy();
+      const startTime = Date.now();
+
+      const resp = await executeFetchWithProxy(url, {
+        method: "POST",
+        headers: { ...baseHeaders, "x-opencode-request": crypto.randomUUID() },
+        body: JSON.stringify(activePayload),
+        signal: options.signal,
+        keepalive: true
+      }, currentProxy);
+
+      const elapsed = Date.now() - startTime;
+
+      if (resp.ok) {
+        globalOpenCodeHealthTracker.recordSuccess(targetModel, elapsed);
+        return new Response(resp.body, {
+          status: resp.status,
+          statusText: resp.statusText,
+          headers: buildResponseHeaders(resp.headers, {
+            "X-Gateway-Account": "opencode-zen",
+            "X-Gateway-Account-Id": "opencode-zen",
+            "X-Gateway-Latency": `${elapsed}ms`,
+            ...(currentProxy ? { "X-Gateway-Proxy": "true" } : {})
+          })
+        });
+      }
+
+      const errText = await resp.text();
+      const lowerErr = errText.toLowerCase();
+      const isRateLimit = resp.status === 429 || lowerErr.includes("freeusagelimiterror") || lowerErr.includes("rate limit");
+
+      if (isRateLimit) {
+        globalOpenCodeHealthTracker.recordFailure(targetModel, resp.status, true);
+        if (this.proxyList.length > 1 && attempt < maxAttempts - 1) {
+          console.warn(`[OpenCode Proxy] IP rate limit hit on proxy ${currentProxy || "direct"}, rotating to next proxy...`);
+          this.rotateProxy();
+          continue;
+        }
+      } else {
+        globalOpenCodeHealthTracker.recordFailure(targetModel, resp.status, false);
+      }
+
+      // Tool Use 兼容性降级补丁：若上游对原生 tools 报错 400，自动将 tools 转为 System Prompt 指令
+      if (resp.status === 400 && !toolPolyfilled && activePayload.tools && (lowerErr.includes("tools") || lowerErr.includes("parameter"))) {
+        console.warn(`[OpenCode Tools Polyfill] Model "${targetModel}" does not accept native tools, falling back to Prompt-based polyfill...`);
+        toolPolyfilled = true;
+        const toolPrompt = convertToolsToSystemPrompt(activePayload.tools);
+        const polyfillMessages = [...(activePayload.messages || [])];
+        if (polyfillMessages.length > 0 && polyfillMessages[0].role === "system") {
+          polyfillMessages[0] = { ...polyfillMessages[0], content: polyfillMessages[0].content + toolPrompt };
+        } else {
+          polyfillMessages.unshift({ role: "system", content: toolPrompt });
+        }
+        const { tools, tool_choice, ...rest } = activePayload;
+        activePayload = { ...rest, messages: polyfillMessages };
+        continue;
+      }
+
+      lastResp = new Response(errText, {
         status: resp.status,
-        statusText: resp.statusText,
         headers: buildResponseHeaders(resp.headers, {
+          "Content-Type": "application/json",
           "X-Gateway-Account": "opencode-zen",
           "X-Gateway-Account-Id": "opencode-zen"
         })
       });
+      break;
     }
 
-    const errText = await resp.text();
-    return new Response(errText, {
-      status: resp.status,
-      headers: buildResponseHeaders(resp.headers, {
-        "Content-Type": "application/json",
-        "X-Gateway-Account": "opencode-zen",
-        "X-Gateway-Account-Id": "opencode-zen"
-      })
-    });
+    return lastResp;
   }
 
   async callResponsesApi(payload, options = {}) {
     const url = `${this.baseUrl}/responses`;
-    const sessionId = options.sessionId || crypto.randomUUID();
-    const requestId = crypto.randomUUID();
+    const fingerprint = await deriveSessionAndFingerprint(payload, options);
 
     let targetModel = payload.model;
     if (targetModel === "muse-spark-1.3") targetModel = "muse-spark-1.3-contributor-free";
     if (targetModel === "muse-spark-1.2") targetModel = "muse-spark-1.2-contributor-free";
 
-    const headers = {
+    const baseHeaders = {
       "Content-Type": "application/json",
-      "User-Agent": "opencode/1.18.30",
-      "x-opencode-session": sessionId,
-      "x-opencode-request": requestId,
+      "User-Agent": fingerprint.userAgent,
+      "x-opencode-version": fingerprint.version,
+      "x-opencode-session": fingerprint.sessionId,
+      "x-opencode-request": fingerprint.requestId,
       "x-opencode-client": "cli",
       "Accept": payload.stream !== false ? "text/event-stream, application/json" : "application/json",
       "Connection": "keep-alive",
@@ -227,13 +500,57 @@ export class OpenCodeProvider {
       responsesPayload.max_output_tokens = Math.max(payload.max_tokens, 1024);
     }
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: headers,
-      body: JSON.stringify(responsesPayload),
-      signal: options.signal,
-      keepalive: true
-    });
+    // Claude Code Tool Calling 深度支持：透传 tools 与 tool_choice 到 Responses API
+    if (Array.isArray(payload.tools) && payload.tools.length > 0) {
+      responsesPayload.tools = payload.tools.map(t => {
+        if (t.type === "function" && t.function) {
+          return {
+            type: "function",
+            name: t.function.name,
+            description: t.function.description || "",
+            parameters: t.function.parameters || {}
+          };
+        }
+        return t;
+      });
+      if (payload.tool_choice) {
+        responsesPayload.tool_choice = payload.tool_choice;
+      }
+    }
+
+    const maxAttempts = Math.max(1, Math.min(this.proxyList.length, 3));
+    let resp = null;
+    let currentProxy = null;
+    let elapsed = 0;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      currentProxy = this.getEffectiveProxy();
+      const startTime = Date.now();
+
+      resp = await executeFetchWithProxy(url, {
+        method: "POST",
+        headers: { ...baseHeaders, "x-opencode-request": crypto.randomUUID() },
+        body: JSON.stringify(responsesPayload),
+        signal: options.signal,
+        keepalive: true
+      }, currentProxy);
+
+      elapsed = Date.now() - startTime;
+
+      if (resp.ok) {
+        globalOpenCodeHealthTracker.recordSuccess(targetModel, elapsed);
+        break;
+      }
+
+      const isRateLimit = resp.status === 429;
+      globalOpenCodeHealthTracker.recordFailure(targetModel, resp.status, isRateLimit);
+      if (isRateLimit && this.proxyList.length > 1 && attempt < maxAttempts - 1) {
+        console.warn(`[OpenCode Proxy] IP rate limit hit on proxy ${currentProxy || "direct"}, rotating to next proxy...`);
+        this.rotateProxy();
+        continue;
+      }
+      break;
+    }
 
     if (!resp.ok) {
       const errText = await resp.text();
@@ -250,6 +567,8 @@ export class OpenCodeProvider {
     if (!isStream) {
       const json = await resp.json();
       let text = "";
+      const toolCalls = [];
+
       for (const item of (json.output || [])) {
         if (item.type === "message" && Array.isArray(item.content)) {
           for (const part of item.content) {
@@ -257,7 +576,21 @@ export class OpenCodeProvider {
               text += part.text;
             }
           }
+        } else if (item.type === "function_call" || item.type === "tool_call") {
+          toolCalls.push({
+            id: item.call_id || item.id || `call_${crypto.randomUUID().slice(0, 8)}`,
+            type: "function",
+            function: {
+              name: item.name || item.function?.name,
+              arguments: typeof item.arguments === "string" ? item.arguments : JSON.stringify(item.arguments || {})
+            }
+          });
         }
+      }
+
+      const openaiMessage = { role: "assistant", content: text || null };
+      if (toolCalls.length > 0) {
+        openaiMessage.tool_calls = toolCalls;
       }
 
       const openaiJson = {
@@ -268,11 +601,8 @@ export class OpenCodeProvider {
         choices: [
           {
             index: 0,
-            message: {
-              role: "assistant",
-              content: text
-            },
-            finish_reason: "stop"
+            message: openaiMessage,
+            finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop"
           }
         ],
         usage: {
@@ -287,12 +617,13 @@ export class OpenCodeProvider {
         headers: buildResponseHeaders(resp.headers, {
           "Content-Type": "application/json; charset=utf-8",
           "X-Gateway-Account": "opencode-zen",
-          "X-Gateway-Account-Id": "opencode-zen"
+          "X-Gateway-Account-Id": "opencode-zen",
+          "X-Gateway-Latency": `${elapsed}ms`
         })
       });
     }
 
-    // 将 Responses API 的 SSE 流实时转译为标准 OpenAI SSE 流
+    // 将 Responses API 的 SSE 流实时转译为标准 OpenAI SSE 流（支持 text 和 tool_calls）
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
     const encoder = new TextEncoder();
@@ -301,6 +632,8 @@ export class OpenCodeProvider {
     (async () => {
       const reader = resp.body.getReader();
       let buffer = "";
+      let hasToolCalls = false;
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -326,8 +659,50 @@ export class OpenCodeProvider {
                   ]
                 };
                 await writer.write(encoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
+              } else if (parsed.type === "response.output_item.added" && parsed.item?.type === "function_call") {
+                hasToolCalls = true;
+                const chunk = {
+                  choices: [
+                    {
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: parsed.output_index || 0,
+                            id: parsed.item.id || `call_${crypto.randomUUID().slice(0, 8)}`,
+                            type: "function",
+                            function: {
+                              name: parsed.item.name || "tool",
+                              arguments: ""
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                };
+                await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+              } else if (parsed.type === "response.function_call_arguments.delta") {
+                hasToolCalls = true;
+                const chunk = {
+                  choices: [
+                    {
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: parsed.output_index || 0,
+                            function: {
+                              arguments: parsed.delta || ""
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                };
+                await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
               } else if (parsed.type === "response.completed") {
-                await writer.write(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })}\n\n`));
+                const finishReason = hasToolCalls ? "tool_calls" : "stop";
+                await writer.write(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }] })}\n\n`));
               }
             } catch (e) {}
           }
@@ -348,7 +723,8 @@ export class OpenCodeProvider {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Gateway-Account": "opencode-zen",
-        "X-Gateway-Account-Id": "opencode-zen"
+        "X-Gateway-Account-Id": "opencode-zen",
+        "X-Gateway-Latency": `${elapsed}ms`
       })
     });
   }
@@ -360,7 +736,10 @@ export class OpenCodeProvider {
       total: "∞",
       unit: "次",
       accounts_count: 1,
-      extra: "OpenCode Zen (Free Models: mimo-v2.5-free, ling-3.0-flash-fin-free, big-pickle, etc.)"
+      proxies_count: this.proxyList.length,
+      current_proxy: this.getEffectiveProxy() ? "(configured)" : "direct",
+      health_status: globalOpenCodeHealthTracker.getSummary(),
+      extra: "OpenCode Zen (Auto-Synced Free Models with Health-Scored Dynamic Routing & Proxy Cycling)"
     };
   }
 
