@@ -151,6 +151,11 @@ export function getDefaultConfig(env) {
         { provider: "opencode", model: "mimo-v2.5-free" },
         { provider: "opencode", model: "ling-3.0-flash-fin-free" }
       ],
+      "nemotron-3.5-lightning-free": [
+        { provider: "opencode", model: "nemotron-3.5-lightning-free" },
+        { provider: "opencode", model: "mimo-v2.5-free" },
+        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+      ],
       "muse-spark-1.3": [
         { provider: "opencode", model: "muse-spark-1.3-contributor-free" },
         { provider: "opencode", model: "mimo-v2.5-free" },

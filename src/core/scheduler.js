@@ -124,6 +124,25 @@ export function classify(status, bodyText = "", resJson = null) {
   return "fatal";
 }
 
+// 纯函数：上游是否在说“这个模型不存在/不可用”（模型身份级错误）。
+// 与配额/限流不同：换一个模型（不同 candidate）可能成功，所以 dispatch 允许它
+// 在“后面还有不同模型的候选”时故障转移。注意边界：
+//   - 只认身份信号（unavailable / not found / does not exist / invalid model），
+//     不认 access/permission（密钥级，全局无解，转移无意义）
+//   - workbuddy 账号循环不使用它（同一模型换账号试同一身份错误纯属浪费）。
+export function isModelLevelError(bodyText = "") {
+  const text = (bodyText || "").toLowerCase();
+  return (
+    text.includes("model is unavailable") ||
+    text.includes("model not found") ||
+    text.includes("no such model") ||
+    text.includes("does not exist") ||
+    text.includes("invalid model") ||
+    text.includes("unknown model") ||
+    text.includes("model_not_found")
+  );
+}
+
 // 纯函数：判断腾讯在 200 状态里返回的业务错误码是否应触发退避。
 // 返回 0 表示无业务错误；否则返回业务错误码。
 export function businessErrorCode(resJson) {

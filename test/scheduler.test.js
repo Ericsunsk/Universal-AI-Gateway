@@ -5,7 +5,8 @@ import {
   orderAccounts,
   computeCooldown,
   classify,
-  businessErrorCode
+  businessErrorCode,
+  isModelLevelError
 } from "../src/core/scheduler.js";
 
 // ---- 退避时长：1 -> 2 -> 4 -> 8（封顶） ----
@@ -107,6 +108,17 @@ test("classify: other errors → fatal", () => {
   assert.equal(classify(400), "fatal");
   assert.equal(classify(404), "fatal");
   assert.equal(classify(200, "some normal message"), "fatal");
+});
+
+test("isModelLevelError detects model-identity errors only", () => {
+  assert.equal(isModelLevelError("Model is unavailable"), true);
+  assert.equal(isModelLevelError("model_not_found"), true);
+  assert.equal(isModelLevelError("No such model: foo"), true);
+  assert.equal(isModelLevelError("Invalid model"), true);
+  assert.equal(isModelLevelError("insufficient quota"), false);
+  assert.equal(isModelLevelError("access denied"), false);
+  assert.equal(isModelLevelError(""), false);
+  assert.equal(isModelLevelError(null), false);
 });
 
 test("classify: structured business code takes priority over text", () => {

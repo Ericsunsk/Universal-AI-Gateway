@@ -427,3 +427,54 @@ test("dispatchExchange returns 400 (not 502) for image input", async () => {
   const json = await res.json();
   assert.ok(json.error.message.includes("Image content blocks"));
 });
+
+test("dispatchExchange fails over when upstream says model unavailable (different model next)", async () => {
+  const calls = [];
+  const fakeFleet = {
+    getProvider: (name) => ({
+      type: "openai",
+      callChat: async (payload) => {
+        calls.push(name);
+        if (name === "first") {
+          return new Response(JSON.stringify({ error: { message: "Model is unavailable" } }), { status: 400 });
+        }
+        return new Response(JSON.stringify({ choices: [{ message: { content: "backup ok" } }] }), { status: 200 });
+      }
+    })
+  };
+  const res = await dispatchExchange({
+    protocol: "openai",
+    request: new Request("http://localhost/v1/chat/completions", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: "hi" }] },
+    model: "m",
+    config: { routes: { m: [{ provider: "first", model: "gone-model" }, { provider: "second", model: "backup-model" }] } },
+    fleet: fakeFleet
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls, ["first", "second"]);
+  const json = await res.json();
+  assert.equal(json.choices[0].message.content, "backup ok");
+});
+
+test("dispatchExchange does not fail over model errors onto the same model", async () => {
+  const calls = [];
+  const fakeFleet = {
+    getProvider: (name) => ({
+      type: "openai",
+      callChat: async () => {
+        calls.push(name);
+        return new Response(JSON.stringify({ error: { message: "Model is unavailable" } }), { status: 400 });
+      }
+    })
+  };
+  const res = await dispatchExchange({
+    protocol: "openai",
+    request: new Request("http://localhost/v1/chat/completions", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: "hi" }] },
+    model: "m",
+    config: { routes: { m: [{ provider: "first", model: "same-model" }, { provider: "second", model: "same-model" }] } },
+    fleet: fakeFleet
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(calls, ["first"], "same model next → fail fast, no pointless retry");
+});

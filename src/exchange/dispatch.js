@@ -2,6 +2,7 @@
 // 转译细节在 ./transform.js 与 ./stream.js，本模块只做编排。
 import { corsHeaders } from "../http/headers.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
+import { isModelLevelError } from "../core/scheduler.js";
 import { hasCallChat, hasCallMessages, wantsStreamedChat } from "../core/contract.js";
 import { runFailover } from "../core/failover.js";
 import { transformAnthropicToOpenAI } from "./transform.js";
@@ -142,10 +143,19 @@ export async function dispatchExchange({
         // 尝试解析 JSON 以进行结构化错误码判定；分类本身由驱动器经 classify 完成
         let parsedErrJson = null;
         try { parsedErrJson = JSON.parse(errText); } catch (e) {}
+        // 模型身份级错误（上游说“此模型不可用”）且后面还有不同模型的候选：
+        // 对当前模型判 fatal 没有意义，强制切换，让备用模型接管。
+        const laterModelsDiffer = (status === 400 || status === 404) &&
+          isModelLevelError(errText) &&
+          candidates.slice(candidateIndex + 1).some(c => c.model !== candidate.model);
+        if (laterModelsDiffer) {
+          console.warn(`[Fallback] Provider "${candidate.provider}" model "${candidate.model}" unavailable, failing over to a different model...`);
+        }
         return { fail: {
           status,
           text: errText,
           json: parsedErrJson,
+          ...(laterModelsDiffer ? { force: "retry" } : {}),
           response: new Response(errText, {
             status: status,
             headers: { "Content-Type": "application/json", ...corsHeaders }
