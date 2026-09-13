@@ -3,10 +3,10 @@ import { buildResponseHeaders } from "../http/headers.js";
 import {
   orderAccounts,
   computeCooldown,
-  classify,
   businessErrorCode,
   backoffMinutesForStreak
 } from "./scheduler.js";
+import { runFailover } from "../failover.js";
 
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
@@ -65,22 +65,34 @@ async function persistCooldown(env, accountId, record) {
   }
 }
 
-function markAccountRateLimited(account, env) {
+async function markAccountRateLimited(account, env) {
   const record = computeCooldown(account.id, accountCooldownRecord);
   accountCooldownRecord.set(account.id, record);
-  // 异步写入 KV，让其他 isolate 也能看到这次冷却
-  persistCooldown(env, account.id, record);
+  // 可靠落盘 KV 冷却记录（await 确保写入完成），跨 isolate 立即可见
+  await persistCooldown(env, account.id, record);
   console.warn(`[WorkBuddy] Account "${account.name || account.id}" 429/rate-limited (streak ${record.streak}), cooling down for ${backoffMinutesForStreak(record.streak)}m...`);
 }
 
-function clearAccountCooldown(account, env) {
+async function clearAccountCooldown(account, env) {
   accountCooldownRecord.delete(account.id);
   // 同步清除 KV 中的冷却记录，避免其他 isolate 继续按旧记录跳过该账号
   const kv = getKv(env);
   if (kv) {
-    kv.delete(`${COOLDOWN_KV_PREFIX}${account.id}`).catch(e => {
+    try {
+      await kv.delete(`${COOLDOWN_KV_PREFIX}${account.id}`);
+    } catch (e) {
       console.error(`Failed to clear cooldown for ${account.id}:`, e);
-    });
+    }
+  }
+}
+
+// 冷却状态唯一写入口：调用方只传动作，不直接碰 Map / KV。
+// action "cooldown" = 惩罚性退避并落盘；"clear" = 清除惩罚标记。
+async function setAccountCooldown(account, env, action) {
+  if (action === "cooldown") {
+    await markAccountRateLimited(account, env);
+  } else {
+    await clearAccountCooldown(account, env);
   }
 }
 
@@ -91,6 +103,9 @@ export class WorkBuddyProvider {
     this.type = "workbuddy";
     this.env = env;
     this.config = config.config || {};
+    // 能力声明：上游非流式 JSON 可能是 200 业务错误包，调用方须强制 stream=true。
+    // dispatch 经 contract.wantsStreamedChat 探针读取，不 switch type。
+    this.forceStream = true;
   }
 
   get kv() {
@@ -223,159 +238,184 @@ export class WorkBuddyProvider {
     }
 
     const serializedPayload = JSON.stringify(payload);
-    let lastErrorResponse = null;
 
-    for (const account of accounts) {
-      let token = await this.getActiveToken(account);
-      const userId = account.userId;
-      if (!token || !userId) continue;
+    // 账号级故障转移收敛到 runFailover（见 src/failover.js）：循环、分类、耗尽收尾
+    // 由驱动器统一处理；单个账号的“试一次”（401 刷新、抖动重试、业务码检测）见 attemptAccount。
+    return await runFailover(accounts, {
+      isAbort: (err) => err?.name === "AbortError",
+      onRetryable: async (account, action, fail) => {
+        const label = account.name || account.id;
+        if (action === "retry") {
+          // 5xx 服务端瞬时故障：切换下一账号，不惩罚当前账号
+          console.warn(`[WorkBuddy] Account "${label}" returned ${fail.status}, auto-switching to next account...`);
+          return;
+        }
+        // 429 / 403 / 额度 / 风控：惩罚性退避后切换下一账号
+        console.warn(`[WorkBuddy] Account "${label}" quota/safety filter triggered (${fail.status}: ${String(fail.text).substring(0, 80)}), cooling down and auto-switching to next account...`);
+        await setAccountCooldown(account, this.env, "cooldown");
+      },
+      renderExhausted: () => new Response(JSON.stringify({ error: { message: "All WorkBuddy accounts in pool failed" } }), { status: 502, headers: { "Content-Type": "application/json" } }),
+      attempt: (account) => this.attemptAccount(account, payload, serializedPayload, options),
+    });
+  }
 
-      const makeRequest = async (tk) => {
-        const headers = {
-          "Content-Type": "application/json",
-          "Accept": "application/json, text/plain, */*",
-          "Connection": "keep-alive",
-          "X-Requested-With": "XMLHttpRequest",
-          "Origin": "https://www.codebuddy.cn",
-          "Referer": "https://www.codebuddy.cn/",
-          "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
-          "Authorization": `Bearer ${tk}`,
-          "X-User-Id": userId,
-          "X-Product": "SaaS"
-        };
-        return await fetch("https://copilot.tencent.com/v2/chat/completions", {
-          method: "POST",
-          headers: headers,
-          body: serializedPayload,
-          signal: options.signal,
-          keepalive: true
-        });
+  // 对单个账号试一次（runFailover 的 attempt）：{ done } 命中即返；
+  // { fail } 由驱动器分类后 fatal 即返 / cooldown-retry 切换；null 跳过该账号。
+  async attemptAccount(account, payload, serializedPayload, options) {
+    let token = await this.getActiveToken(account);
+    const userId = account.userId;
+    if (!token || !userId) return null;
+
+    const makeRequest = async (tk) => {
+      const headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Connection": "keep-alive",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin": "https://www.codebuddy.cn",
+        "Referer": "https://www.codebuddy.cn/",
+        "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
+        "Authorization": `Bearer ${tk}`,
+        "X-User-Id": userId,
+        "X-Product": "SaaS"
       };
+      return await fetch("https://copilot.tencent.com/v2/chat/completions", {
+        method: "POST",
+        headers: headers,
+        body: serializedPayload,
+        signal: options.signal,
+        keepalive: true
+      });
+    };
 
-      try {
-        let resp = await makeRequest(token);
-        if (resp.status === 401) {
-          memoryTokenCache.delete(`${this.id}_${account.id}`);
-          const refreshed = await this.refreshAccessToken(account);
-          if (refreshed) {
-            token = refreshed;
-            resp = await makeRequest(token);
-          }
+    try {
+      let resp = await makeRequest(token);
+      if (resp.status === 401) {
+        memoryTokenCache.delete(`${this.id}_${account.id}`);
+        const refreshed = await this.refreshAccessToken(account);
+        if (refreshed) {
+          token = refreshed;
+          resp = await makeRequest(token);
+        } else {
+          // 刷新失败：直接切换下一账号（不计入冷却 streak，401 通常是 token 过期而非额度问题）
+          console.warn(`[WorkBuddy] Account "${account.name || account.id}" 401 token refresh failed, switching to next account...`);
+          return null;
         }
+      }
 
-        // 遇到 502 / 503 / 504 服务端瞬时抖动，毫秒级原地快速重试一次（避开上游偶发拥塞）
-        if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
-          console.warn(`[WorkBuddy] Account "${account.name || account.id}" hit ${resp.status}, retrying in 600ms...`);
-          await new Promise(r => setTimeout(r, 600));
-          if (options.signal?.aborted) {
-            throw new DOMException("The operation was aborted", "AbortError");
-          }
-          const retryResp = await makeRequest(token);
-          if (retryResp.ok) {
-            clearAccountCooldown(account, this.env);
-            return new Response(retryResp.body, {
-              status: retryResp.status,
-              statusText: retryResp.statusText,
-              headers: buildResponseHeaders(retryResp.headers, {
-                "X-Gateway-Account": account.id || "primary",
-                "X-Gateway-Account-Id": account.id || "primary"
-              })
-            });
-          }
-          resp = retryResp;
+      // 遇到 502 / 503 / 504 服务端瞬时抖动，毫秒级原地快速重试一次（避开上游偶发拥塞）
+      if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
+        console.warn(`[WorkBuddy] Account "${account.name || account.id}" hit ${resp.status}, retrying in 600ms...`);
+        await new Promise(r => setTimeout(r, 600));
+        if (options.signal?.aborted) {
+          throw new DOMException("The operation was aborted", "AbortError");
         }
+        const retryResp = await makeRequest(token);
+        if (retryResp.ok) {
+          await setAccountCooldown(account, this.env, "clear");
+          return { done: new Response(retryResp.body, {
+            status: retryResp.status,
+            statusText: retryResp.statusText,
+            headers: buildResponseHeaders(retryResp.headers, {
+              "X-Gateway-Account": account.id || "primary",
+              "X-Gateway-Account-Id": account.id || "primary"
+            })
+          }) };
+        }
+        resp = retryResp;
+      }
 
-        // 成功响应直接返回（若请求 stream 但返回 application/json，检测是否为腾讯 200 业务错误码）
-        if (resp.ok) {
-          const contentType = resp.headers.get("content-type") || "";
-          if (payload.stream && contentType.includes("application/json")) {
-            const clone = resp.clone();
-            try {
-              const resJson = await clone.json();
-              if (businessErrorCode(resJson) !== 0) {
-                console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned JSON error code ${resJson.code}: ${resJson.msg || resJson.message}, backoff cooling down and auto-switching...`);
-                markAccountRateLimited(account, this.env);
-                lastErrorResponse = new Response(JSON.stringify(resJson), {
+      // 成功响应直接返回（若请求 stream 但返回 application/json，检测是否为腾讯 200 业务错误码）
+      if (resp.ok) {
+        const contentType = resp.headers.get("content-type") || "";
+        if (payload.stream && contentType.includes("application/json")) {
+          const clone = resp.clone();
+          try {
+            const resJson = await clone.json();
+            if (businessErrorCode(resJson) !== 0) {
+              // 200 包业务错误码：交驱动器分类（已知码 cooldown 惩罚并由 onRetryable 落盘，
+              // 未知码 retry 只切换不惩罚）；预渲染响应在 fatal/耗尽时直接返回。
+              return { fail: {
+                status: 200,
+                text: resJson.msg || resJson.message || JSON.stringify(resJson),
+                json: resJson,
+                response: new Response(JSON.stringify(resJson), {
                   status: 200,
                   headers: buildResponseHeaders(resp.headers, {
                     "Content-Type": "application/json",
                     "X-Gateway-Account": account.id || "primary",
                     "X-Gateway-Account-Id": account.id || "primary"
                   })
-                });
-                continue;
-              }
-            } catch (e) {}
-          }
-          // 请求成功，清除冷却与连续惩罚标记
-          clearAccountCooldown(account, this.env);
-          return new Response(resp.body, {
-            status: resp.status,
-            statusText: resp.statusText,
-            headers: buildResponseHeaders(resp.headers, {
-              "X-Gateway-Account": account.id || "primary",
-              "X-Gateway-Account-Id": account.id || "primary"
-            })
-          });
+                })
+              } };
+            }
+          } catch (e) {}
         }
+        // 请求成功，清除冷却与连续惩罚标记
+        await setAccountCooldown(account, this.env, "clear");
+        return { done: new Response(resp.body, {
+          status: resp.status,
+          statusText: resp.statusText,
+          headers: buildResponseHeaders(resp.headers, {
+            "X-Gateway-Account": account.id || "primary",
+            "X-Gateway-Account-Id": account.id || "primary"
+          })
+        }) };
+      }
 
-        const status = resp.status;
+      const status = resp.status;
 
-        // 触发账号切换条件：429 限流 / 5xx 服务异常 / 403 风控合规拦截 / 额度耗尽
-        const errText = await resp.text();
-        lastErrorResponse = new Response(errText, {
+      // 失败收口：429 / 5xx / 403 / 额度耗尽等统一交驱动器分类
+      //（fatal 即返预渲染响应，cooldown/retry 经 onRetryable 切换）。
+      const errText = await resp.text();
+      // 尝试解析 JSON 以进行结构化错误码判定
+      let parsedJson = null;
+      try { parsedJson = JSON.parse(errText); } catch (e) {}
+      return { fail: {
+        status,
+        text: errText,
+        json: parsedJson,
+        response: new Response(errText, {
           status: status,
           headers: buildResponseHeaders(resp.headers, {
             "Content-Type": "application/json",
             "X-Gateway-Account": account.id || "primary",
             "X-Gateway-Account-Id": account.id || "primary"
           })
-        });
-
-        const action = classify(status, errText);
-
-        if (action === "retry") {
-          // 5xx 服务端瞬时故障：切换下一账号，不惩罚当前账号
-          console.warn(`[WorkBuddy] Account "${account.name || account.id}" returned ${status}, auto-switching to next account...`);
-          continue;
-        }
-
-        if (action === "cooldown") {
-          // 429 / 403 / 额度 / 风控：惩罚性退避后切换下一账号
-          console.warn(`[WorkBuddy] Account "${account.name || account.id}" quota/safety filter triggered (${status}: ${errText.substring(0, 80)}), cooling down and auto-switching to next account...`);
-          markAccountRateLimited(account, this.env);
-          continue;
-        }
-
-        // 其他不可恢复客户端错误直接返回
-        return lastErrorResponse;
-      } catch (err) {
-        if (err.name === "AbortError") {
-          throw err; // 客户端主动中断取消，直接抛出终止
-        }
-        console.warn(`[WorkBuddy] Account "${account.name || account.id}" network error: ${err.message}, retrying in 600ms...`);
-        try {
-          await new Promise(r => setTimeout(r, 600));
-          if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
-          const retryResp = await makeRequest(token);
-          if (retryResp.ok) return retryResp;
-          const retryErrText = await retryResp.text();
-          lastErrorResponse = new Response(retryErrText, {
+        })
+      } };
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw err; // 客户端主动中断取消，直接抛出终止
+      }
+      console.warn(`[WorkBuddy] Account "${account.name || account.id}" network error: ${err.message}, retrying in 600ms...`);
+      try {
+        await new Promise(r => setTimeout(r, 600));
+        if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+        const retryResp = await makeRequest(token);
+        if (retryResp.ok) return { done: retryResp };
+        const retryErrText = await retryResp.text();
+        let retryJson = null;
+        try { retryJson = JSON.parse(retryErrText); } catch (e) {}
+        return { fail: {
+          status: retryResp.status,
+          text: retryErrText,
+          json: retryJson,
+          response: new Response(retryErrText, {
             status: retryResp.status,
             headers: buildResponseHeaders(retryResp.headers, {
               "Content-Type": "application/json",
               "X-Gateway-Account": account.id || "primary",
               "X-Gateway-Account-Id": account.id || "primary"
             })
-          });
-        } catch (retryErr) {
-          if (retryErr.name === "AbortError") throw retryErr;
-          console.warn(`[WorkBuddy] Account "${account.name || account.id}" retry failed: ${retryErr.message}, switching next...`);
-        }
+          })
+        } };
+      } catch (retryErr) {
+        if (retryErr.name === "AbortError") throw retryErr;
+        console.warn(`[WorkBuddy] Account "${account.name || account.id}" retry failed: ${retryErr.message}, switching next...`);
+        return null;
       }
     }
-
-    return lastErrorResponse || new Response(JSON.stringify({ error: { message: "All WorkBuddy accounts in pool failed" } }), { status: 502, headers: { "Content-Type": "application/json" } });
   }
 
   // 余额 / 积分查询：并发聚合账号池所有账号积分

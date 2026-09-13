@@ -3,9 +3,23 @@ import assert from "node:assert/strict";
 import {
   parseReasoningIntent,
   applyReasoningToPayload,
+  matchOpenCodeFamily,
   budgetToEffortLevel,
   effortLevelToBudget
 } from "../src/exchange/reasoning.js";
+
+test("matchOpenCodeFamily is the single model-name knowledge", () => {
+  assert.equal(matchOpenCodeFamily("muse-spark-1.3-contributor-free"), "muse-spark");
+  assert.equal(matchOpenCodeFamily("ling-3.0-flash-fin-free"), "ling");
+  assert.equal(matchOpenCodeFamily("deepseek/deepseek-chat"), "deepseek");
+  assert.equal(matchOpenCodeFamily("deepseek-v4-flash-free"), "deepseek");
+  assert.equal(matchOpenCodeFamily("big-pickle"), "generic");
+  assert.equal(matchOpenCodeFamily("nemotron-3-ultra-free"), "generic");
+  assert.equal(matchOpenCodeFamily("claude-3-7-sonnet-20250219"), null);
+  assert.equal(matchOpenCodeFamily("gpt-4o"), null);
+  assert.equal(matchOpenCodeFamily(null), null);
+  assert.equal(matchOpenCodeFamily(""), null);
+});
 
 test("budgetToEffortLevel and effortLevelToBudget convert accurately", () => {
   assert.equal(budgetToEffortLevel(1024), "minimal");

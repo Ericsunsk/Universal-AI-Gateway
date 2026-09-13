@@ -63,33 +63,93 @@ function createKvAdapter(env) {
   };
 }
 
+// 网关只读取白名单内的环境变量/密钥，其余进程环境变量不可达
+// 防止意外泄露或读取未声明的机密字段
+const ENV_ALLOWLIST = new Set([
+  "API_KEY", "MASTER_KEY", "CRON_SECRET",
+  "USER_ID", "ACCESS_TOKEN", "REFRESH_TOKEN",
+  "MAX_CONTEXT_TURNS",
+  "GATEWAY_KV", "WORKBUDDY_KV",
+  "KV_REST_API_URL", "KV_REST_API_TOKEN",
+  "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN",
+  "REDIS_REST_API_URL", "REDIS_REST_API_TOKEN",
+  "OPENCODE_PROXY_URLS", "PROXY_URL",
+  "VERCEL", "NODE_ENV", "VERCEL_URL", "VERCEL_PROJECT_DOMAINS",
+  "PORT",
+]);
+
 function getEnvContext() {
-  const env = { ...process.env };
+  // 只复制白名单内的环境变量，不泄露未声明的机密
+  const env = {};
+  for (const key of ENV_ALLOWLIST) {
+    if (process.env[key] !== undefined) {
+      env[key] = process.env[key];
+    }
+  }
   const kv = createKvAdapter(env);
   env.GATEWAY_KV = kv;
   env.WORKBUDDY_KV = kv;
   return env;
 }
 
-function resolveUrl(req) {
-  const protocol = req.headers["x-forwarded-proto"] || "https";
-  const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost";
+// 白名单域名（生产环境由 VERCEL_URL / VERCEL_PROJECT_DOMAINS 注入，本地开发回退到 localhost）
+// 进程内缓存：环境变量运行时不变，每请求重建 Set + JSON.parse 是无谓开销
+let cachedTrustedHosts = null;
+let cachedTrustedHostsKey = "";
+function getTrustedHosts() {
+  const key = `${process.env.VERCEL_URL || ""}\n${process.env.VERCEL_PROJECT_DOMAINS || ""}`;
+  if (cachedTrustedHosts && cachedTrustedHostsKey === key) return cachedTrustedHosts;
+  const hosts = new Set();
+  if (process.env.VERCEL_URL) {
+    hosts.add(process.env.VERCEL_URL.replace(/^https?:\/\//, ""));
+  }
+  if (process.env.VERCEL_PROJECT_DOMAINS) {
+    try {
+      const domains = JSON.parse(process.env.VERCEL_PROJECT_DOMAINS);
+      domains.forEach(d => hosts.add(d));
+    } catch (e) {}
+  }
+  hosts.add("localhost");
+  hosts.add("127.0.0.1");
+  cachedTrustedHosts = hosts;
+  cachedTrustedHostsKey = key;
+  return hosts;
+}
 
-  // Vercel 重写时，若 req.url 为 /api，优先从 x-matched-path 或 x-invoke-path 读取实际路径
+function resolveUrl(req) {
+  const trustedHosts = getTrustedHosts();
+  const actualHost = req.headers.host || "localhost";
+
+  // 安全：x-forwarded-host 只有在等于实际 host 或白名单域名时才被信任，否则忽略，防止伪造
+  const forwardedHost = req.headers["x-forwarded-host"];
+  const host = (forwardedHost && trustedHosts.has(forwardedHost)) ? forwardedHost : actualHost;
+
+  // 安全：x-forwarded-proto 只接受 http/https，其余回退 https，防止头部伪造降级
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const protocol = (forwardedProto && (forwardedProto === "https" || forwardedProto === "http")) ? forwardedProto : "https";
+
+  // Vercel 重写时，若 req.url 为 /api，优先从 x-matched-path 读取实际路径
+  // 仅在 host 头与白名单匹配时才信任 x-matched-path，防止路径伪造
   let path = req.url || "/";
-  if ((path === "/api" || path === "/api/" || path.startsWith("/api?")) && req.headers["x-matched-path"]) {
+  if ((path === "/api" || path === "/api/" || path.startsWith("/api?")) && req.headers["x-matched-path"] && trustedHosts.has(actualHost)) {
     path = req.headers["x-matched-path"];
   }
   return new URL(path, `${protocol}://${host}`);
 }
 
-async function handleWebRequest(request) {
+// Web / Node 双入口共享的请求上下文：白名单 env + KV 适配 + waitUntil
+function makeRequestContext() {
   const env = getEnvContext();
   const ctx = {
     waitUntil: (p) => {
       p?.catch?.((err) => console.error("[Vercel waitUntil error]", err));
     },
   };
+  return { env, ctx };
+}
+
+async function handleWebRequest(request) {
+  const { env, ctx } = makeRequestContext();
   return await worker.fetch(request, env, ctx);
 }
 
@@ -123,12 +183,7 @@ async function handleNodeRequest(req, res) {
       duplex: "half",
     });
 
-    const env = getEnvContext();
-    const ctx = {
-      waitUntil: (p) => {
-        p?.catch?.((err) => console.error("[Vercel waitUntil error]", err));
-      },
-    };
+    const { env, ctx } = makeRequestContext();
 
     const webResponse = await worker.fetch(webRequest, env, ctx);
 

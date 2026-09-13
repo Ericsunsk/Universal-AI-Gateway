@@ -89,8 +89,14 @@ test("classify: 403 and quota/safety keywords → cooldown", () => {
   assert.equal(classify(200, "error 11140"), "cooldown");
   assert.equal(classify(200, "error 11128"), "cooldown");
   assert.equal(classify(200, "error 6004"), "cooldown");
+  assert.equal(classify(200, "error 14018"), "cooldown");
   assert.equal(classify(200, "insufficient quota"), "cooldown");
   assert.equal(classify(200, "rate limit exceeded"), "cooldown");
+  assert.equal(classify(200, "too many requests"), "cooldown");
+  assert.equal(classify(200, "service overloaded"), "cooldown");
+  assert.equal(classify(200, "service unavailable"), "cooldown");
+  assert.equal(classify(200, "endpoint is unavailable"), "cooldown");
+  assert.equal(classify(200, "FreeUsageLimitError"), "cooldown");
   assert.equal(classify(200, "触发频率限制"), "cooldown");
   assert.equal(classify(200, "账户欠费"), "cooldown");
   assert.equal(classify(200, "余额不足"), "cooldown");
@@ -101,6 +107,18 @@ test("classify: other errors → fatal", () => {
   assert.equal(classify(400), "fatal");
   assert.equal(classify(404), "fatal");
   assert.equal(classify(200, "some normal message"), "fatal");
+});
+
+test("classify: structured business code takes priority over text", () => {
+  // 已知惩罚码 → cooldown
+  assert.equal(classify(200, "", { code: 11140 }), "cooldown");
+  assert.equal(classify(200, "", { code: 11128 }), "cooldown");
+  assert.equal(classify(200, "", { code: 6004 }), "cooldown");
+  // 未知非零业务码 → retry（切换但不惩罚；惩罚只给已知码）
+  assert.equal(classify(200, "", { code: 99999 }), "retry");
+  // code 0 = 无业务错误，回退到状态码/文本判定
+  assert.equal(classify(200, "some normal message", { code: 0 }), "fatal");
+  assert.equal(classify(200, "insufficient quota", { code: 0 }), "cooldown");
 });
 
 test("businessErrorCode extracts Tencent code from 200 JSON", () => {

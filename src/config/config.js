@@ -21,6 +21,7 @@ export function getDefaultConfig(env) {
   const masterKey = env.MASTER_KEY ? requireSecret(env, "MASTER_KEY") : defaultApiKey;
 
   return {
+    config_version: 1,
     master_key: masterKey,
     cron_secret: env.CRON_SECRET || "",
     max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : (typeof process !== "undefined" && (process.env?.VERCEL || process.env?.NODE_ENV) ? 0 : 40),
@@ -263,6 +264,26 @@ function redactVirtualKeys(virtualKeys) {
   }
 }
 
+// 掩码键判定 —— 与 maskKeyName 配对，restoreVirtualKeys 共用。
+// 短密钥掩码后就是 REDACTED 本身，长密钥含 "…" 指纹，两者都算掩码。
+function isMaskedKeyName(key) {
+  return key === REDACTED || (typeof key === "string" && key.includes("…"));
+}
+
+// virtual_keys 回填：客户端回传的是掩码占位名，若原样落库会把密钥「改名」成掩码，
+// 导致鉴权全部失效。此处按位序恢复原名 —— 与 redactVirtualKeys 构成 round-trip，
+// 两半的顺序/掩码约定只活在这里，调用方不再各自手写 includes("…") 探测。
+function restoreVirtualKeys(mergedKeys, existingKeys) {
+  if (!mergedKeys || typeof mergedKeys !== "object" || !existingKeys) return mergedKeys;
+  const oldKeys = Object.keys(existingKeys);
+  const newKeys = Object.keys(mergedKeys);
+  const allMasked = newKeys.length === oldKeys.length && newKeys.every(isMaskedKeyName);
+  if (!allMasked) return mergedKeys;
+  const restored = {};
+  newKeys.forEach((maskedKey, i) => { restored[oldKeys[i]] = mergedKeys[maskedKey]; });
+  return restored;
+}
+
 // 递归遍历 providers 树，对机密字段做脱敏，返回可安全序列化给客户端的副本
 export function redactConfig(config) {
   if (!config || typeof config !== "object") return config;
@@ -278,12 +299,11 @@ export function redactConfig(config) {
 }
 
 // 递归回填机密：目标中脱敏/缺失的机密字段沿用来源值
+// 注意：调用方只传对象（provider / config / account），数组由下面的 accounts id 匹配专管，
+// 这里不处理数组形态——不要加通用下标回填，那会把轮换后的账号凭据错位。
 function mergeNode(target, source) {
   if (!target || typeof target !== "object" || !source || typeof source !== "object") return;
-  if (Array.isArray(target)) {
-    target.forEach((item, i) => mergeNode(item, Array.isArray(source) ? source[i] : undefined));
-    return;
-  }
+  if (Array.isArray(target) || Array.isArray(source)) return;
   for (const field of SECRET_FIELDS) {
     if (isRedacted(target[field]) && !isRedacted(source[field])) {
       target[field] = source[field];
@@ -293,7 +313,18 @@ function mergeNode(target, source) {
   for (const key of ["config", "account"]) {
     if (target[key]) mergeNode(target[key], source[key]);
   }
-  if (Array.isArray(target.accounts)) mergeNode(target.accounts, source.accounts);
+  // accounts 按 account.id 语义匹配回填，而不是数组下标
+  if (Array.isArray(target.accounts) && Array.isArray(source.accounts)) {
+    const sourceById = new Map();
+    for (const acc of source.accounts) {
+      if (acc?.id) sourceById.set(acc.id, acc);
+    }
+    for (const targetAcc of target.accounts) {
+      if (targetAcc?.id && sourceById.has(targetAcc.id)) {
+        mergeNode(targetAcc, sourceById.get(targetAcc.id));
+      }
+    }
+  }
 }
 
 // 合并式写入的机密回填：新配置中脱敏/缺失的机密字段沿用旧值
@@ -318,18 +349,10 @@ function mergeSecrets(existing, incoming) {
     }
   }
 
-  // virtual_keys 的真实密钥是键名：客户端回传的是掩码占位名，
-  // 若原样落库会把密钥「改名」成掩码，导致鉴权全部失效。此处按位序回填原名。
+  // virtual_keys 的真实密钥是键名：客户端回传的是掩码占位名，用 restoreVirtualKeys
+  // 按位序恢复原名（与 redactVirtualKeys 配对，约定只活在那一对函数里）。
   if (merged.virtual_keys && typeof merged.virtual_keys === "object" && existing?.virtual_keys) {
-    const oldKeys = Object.keys(existing.virtual_keys);
-    const newKeys = Object.keys(merged.virtual_keys);
-    const isMasked = k => k.includes("…") || k === REDACTED;
-    const allMasked = newKeys.length === oldKeys.length && newKeys.every(isMasked);
-    if (allMasked) {
-      const restored = {};
-      newKeys.forEach((maskedKey, i) => { restored[oldKeys[i]] = merged.virtual_keys[maskedKey]; });
-      merged.virtual_keys = restored;
-    }
+    merged.virtual_keys = restoreVirtualKeys(merged.virtual_keys, existing.virtual_keys);
   }
 
   return merged;
@@ -342,10 +365,54 @@ export function validateConfig(config) {
   if (!config || typeof config !== "object") {
     return ["config must be an object"];
   }
+  // provider id 集合只构建一次，供“重复 id 检测”与“routes 引用校验”复用
+  const providerIds = new Set();
   if (!Array.isArray(config.providers) && !(config.providers && typeof config.providers === "object")) {
     errors.push("providers must be an array or object");
+  } else {
+    const seenAccountIds = new Set();
+    eachProvider(config.providers, (provider) => {
+      if (!provider || typeof provider !== "object") {
+        errors.push("providers must contain provider objects");
+        return;
+      }
+      const pid = provider.id || "<unknown>";
+      if (!provider.id || typeof provider.id !== "string") {
+        errors.push("provider.id is required");
+      } else {
+        if (providerIds.has(provider.id)) {
+          errors.push(`duplicate provider id "${provider.id}"`);
+        }
+        providerIds.add(provider.id);
+      }
+      // Note: provider.type validation is done at createProvider time, not validate time
+      // to maintain backward compatibility with tests that omit type in initial saves
+      if (provider.enabled !== false) {
+        const accounts = provider.config?.accounts;
+        if (Array.isArray(accounts) && accounts.length === 0) {
+          errors.push(`provider "${pid}" has zero accounts`);
+        }
+        if (Array.isArray(accounts)) {
+          accounts.forEach((account, i) => {
+            if (!account || typeof account !== "object") {
+              errors.push(`provider "${pid}" account[${i}] must be an object`);
+              return;
+            }
+            if (!account.id || typeof account.id !== "string") {
+              errors.push(`provider "${pid}" account[${i}] is missing id`);
+              return;
+            }
+            const accountKey = `${pid}:${account.id}`;
+            if (seenAccountIds.has(accountKey)) {
+              errors.push(`provider "${pid}" has duplicate account id "${account.id}"`);
+            }
+            seenAccountIds.add(accountKey);
+          });
+        }
+      }
+    });
   }
-  if (!config.routes || typeof config.routes !== "object") {
+  if (!config.routes || typeof config.routes !== "object" || Array.isArray(config.routes)) {
     errors.push("routes must be an object mapping model name -> route array");
   } else {
     for (const [model, routeList] of Object.entries(config.routes)) {
@@ -358,6 +425,8 @@ export function validateConfig(config) {
           errors.push(`routes["${model}"][${i}] must be an object`);
         } else if (!r.provider || typeof r.provider !== "string") {
           errors.push(`routes["${model}"][${i}] missing string "provider"`);
+        } else if (!providerIds.has(r.provider)) {
+          errors.push(`routes["${model}"][${i}] references unknown provider "${r.provider}"`);
         }
       });
     }
@@ -385,11 +454,27 @@ export async function saveConfig(env, newConfig) {
   // 合并式写入：客户端省略或传回脱敏占位符的机密字段，保留 KV 中的原值，
   // 避免一次配置 POST 静默抹掉所有凭据。
   const existing = await readRawConfig(env);
+
+  // 版本冲突检测：如果新配置提供了 config_version 且不匹配当前版本，返回 409
+  if (newConfig.config_version !== undefined && existing?.config_version !== undefined) {
+    if (newConfig.config_version !== existing.config_version) {
+      const error = new Error("Config version conflict: another client modified the config");
+      error.status = 409;
+      throw error;
+    }
+  }
+
   const merged = mergeSecrets(existing, newConfig);
-  // 写入前校验，拦截畸形配置
+  // 递增版本号
+  merged.config_version = (existing?.config_version || 0) + 1;
+
+  // 写入前校验，拦截畸形配置。唯一的校验入口（admin 不再预检）：错误带 400 状态，
+  // 由调用方（admin catch）映射为 HTTP 状态，避免“校验了两遍、状态码两处定”的分裂。
   const validationErrors = validateConfig(merged);
   if (validationErrors.length > 0) {
-    throw new Error("Invalid config: " + validationErrors.join("; "));
+    const error = new Error("Invalid config: " + validationErrors.join("; "));
+    error.status = 400;
+    throw error;
   }
   await kv.put("GATEWAY_CONFIG", JSON.stringify(merged, null, 2));
   // 立即热同步当前 Isolate 内存缓存

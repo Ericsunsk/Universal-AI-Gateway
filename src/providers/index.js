@@ -3,6 +3,8 @@ import { OpenAIStandardProvider } from "./openai_standard.js";
 import { AnthropicStandardProvider } from "./anthropic_standard.js";
 import { OpenCodeProvider } from "./opencode.js";
 
+const SUPPORTED_PROVIDER_TYPES = ["workbuddy", "opencode", "openai", "anthropic"];
+
 export function createProvider(providerConfig, env) {
   if (!providerConfig) return null;
   switch (providerConfig.type) {
@@ -15,7 +17,9 @@ export function createProvider(providerConfig, env) {
     case "anthropic":
       return new AnthropicStandardProvider(providerConfig, env);
     default:
-      console.warn("Unknown provider type:", providerConfig.type);
-      return new OpenAIStandardProvider(providerConfig, env);
+      throw new Error(
+        `Unknown provider type "${providerConfig.type}". ` +
+        `Supported types: ${SUPPORTED_PROVIDER_TYPES.join(", ")}`
+      );
   }
 }

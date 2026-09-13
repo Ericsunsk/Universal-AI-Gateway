@@ -64,23 +64,55 @@ export function computeCooldown(accountId, cooldownMap, now = Date.now()) {
 }
 
 // 纯函数：将 HTTP 状态码 + 响应体分类为调度动作。
-//   "cooldown" —— 惩罚性退避（429 / 403 / 额度 / 风控 / 腾讯业务错误码）
+//   "cooldown" —— 惩罚性退避（429 / 403 / 结构化业务错误码 / 额度耗尽 / 风控）
 //   "retry"    —— 切换下一账号但不惩罚（5xx 服务端瞬时故障）
 //   "fatal"    —— 不可恢复的客户端错误，直接返回
-export function classify(status, bodyText = "") {
+//
+// 优先使用结构化业务错误码判定（如腾讯 11140/11128/6004），
+// 仅在 code 字段不存在时，才回退到文本关键词匹配。
+// 这防止普通对话内容（如 "my quota is low"）误判为账号冷却。
+export function classify(status, bodyText = "", resJson = null) {
   const text = (bodyText || "").toLowerCase();
 
+  // 1. 结构化错误码优先：从 200 JSON 响应中读取业务 code（通过 businessErrorCode）
+  //    这样可以避免在 200 响应体里的自由文本里误匹配 "quota"/"rate limit" 等关键词
+  if (resJson) {
+    const bizCode = businessErrorCode(resJson);
+    if (bizCode !== 0) {
+      // 已知惩罚性业务码 → cooldown（额度/风控/限流）
+      if (bizCode === 11140 || bizCode === 11128 || bizCode === 6004) {
+        return "cooldown";
+      }
+      if (bizCode === 429 || bizCode === 403) {
+        return "cooldown";
+      }
+      // 未知业务码 → retry（切换下一账号，但不惩罚）。
+      // previously 一律 cooldown 会把客户端参数错误等计入惩罚 streak，污染退避状态；
+      // 但直接 fatal 又会在码实为账号级额度时丢掉可用性。未知 = 不惩罚 + 照常切换。
+      return "retry";
+    }
+  }
+
+  // 2. 状态码直接判定
   if (status === 429) return "cooldown";
   if (status >= 500) return "retry";
 
-  // 403 或腾讯风控/额度相关错误码 → 惩罚性退避
+  // 3. 仅在没有结构化码时，才使用文本关键词兜底
+  // 关键词表是全网关唯一的“可故障转移”定义（workbuddy 账号切换与 exchange 路由切换共用），
+  // 新增上游错误特征只改这里，不要在调用方另起一份内联表。
   if (
     status === 403 ||
     text.includes("11140") ||
     text.includes("11128") ||
+    text.includes("14018") ||
     text.includes("6004") ||
     text.includes("quota") ||
     text.includes("rate limit") ||
+    text.includes("too many requests") ||
+    text.includes("overloaded") ||
+    text.includes("service unavailable") ||
+    text.includes("endpoint is unavailable") ||
+    text.includes("freeusagelimiterror") ||
     text.includes("频率限制") ||
     text.includes("欠费") ||
     text.includes("余额不足") ||

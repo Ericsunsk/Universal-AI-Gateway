@@ -1,4 +1,5 @@
 import { buildResponseHeaders } from "../http/headers.js";
+import { matchOpenCodeFamily } from "../exchange/reasoning.js";
 
 export const DEFAULT_FREE_MODELS = [
   "mimo-v2.5-free",
@@ -371,7 +372,8 @@ export class OpenCodeProvider {
     const adaptedPayload = { ...payload, model: targetModel };
 
     // 自动适配：muse-spark 在 OpenCode Zen 后端仅部署于 /zen/v1/responses 端点
-    if (targetModel.includes("muse-spark")) {
+    // 家族判定收敛到 reasoning.matchOpenCodeFamily，不在本文件另写 includes。
+    if (matchOpenCodeFamily(targetModel) === "muse-spark") {
       return this.callResponsesApi(adaptedPayload, options);
     }
 
@@ -472,9 +474,8 @@ export class OpenCodeProvider {
     const url = `${this.baseUrl}/responses`;
     const fingerprint = await deriveSessionAndFingerprint(payload, options);
 
-    let targetModel = payload.model;
-    if (targetModel === "muse-spark-1.3") targetModel = "muse-spark-1.3-contributor-free";
-    if (targetModel === "muse-spark-1.2") targetModel = "muse-spark-1.2-contributor-free";
+    // 别名归一收敛到 resolveModel（与 callChat 同一份映射），不另写 if 链。
+    const targetModel = this.resolveModel(payload.model);
 
     const baseHeaders = {
       "Content-Type": "application/json",

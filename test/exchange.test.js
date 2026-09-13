@@ -4,8 +4,10 @@ import {
   transformAnthropicToOpenAI,
   normalizeOpenAIMessages,
   transformToolsToOpenAI,
+  finishReasonToAnthropic,
   dispatchExchange
 } from "../src/exchange/exchange.js";
+import { parseReasoningIntent } from "../src/exchange/reasoning.js";
 
 // ---- 工具定义转译：Anthropic input_schema -> OpenAI function ----
 test("transformToolsToOpenAI maps Anthropic tools to OpenAI functions", () => {
@@ -327,4 +329,61 @@ test("dispatchExchange preserves upstream error without body consumption crash",
   assert.equal(res.status, 429);
   const text = await res.text();
   assert.ok(text.includes("额度已用尽"));
+});
+
+test("finishReasonToAnthropic maps OpenAI reasons correctly", () => {
+  assert.equal(finishReasonToAnthropic("length"), "max_tokens");
+  assert.equal(finishReasonToAnthropic("tool_calls"), "tool_use");
+  assert.equal(finishReasonToAnthropic("function_call"), "tool_use");
+  assert.equal(finishReasonToAnthropic("content_filter"), "end_turn");
+  assert.equal(finishReasonToAnthropic("stop"), "end_turn");
+  assert.equal(finishReasonToAnthropic(null), "end_turn");
+});
+
+test("transformAnthropicToOpenAI accepts a pre-parsed intent (parse once)", () => {
+  const body = {
+    model: "deepseek-v4-flash[high]",
+    messages: [{ role: "user", content: "hi" }]
+  };
+  const intent = parseReasoningIntent({ model: body.model, body });
+  const withIntent = transformAnthropicToOpenAI(body, "m", {}, intent);
+  const withoutIntent = transformAnthropicToOpenAI(body, "m", {});
+  assert.deepEqual(withIntent, withoutIntent);
+  assert.equal(withIntent.reasoning_effort, "high");
+});
+
+test("transformAnthropicToOpenAI rejects image blocks with 400", () => {
+  const body = {
+    model: "m",
+    messages: [{ role: "user", content: [{ type: "image", source: {} }] }]
+  };
+  try {
+    transformAnthropicToOpenAI(body, "m", {});
+    assert.fail("should throw for image blocks");
+  } catch (err) {
+    assert.equal(err.status, 400);
+    assert.ok(err.message.includes("Image content blocks"));
+  }
+});
+
+test("transformAnthropicToOpenAI validates system array with 400", () => {
+  assert.throws(
+    () => transformAnthropicToOpenAI({ model: "m", system: [{ text: 123 }], messages: [] }, "m", {}),
+    (err) => err.status === 400 && err.message.includes("system[0].text")
+  );
+});
+
+test("dispatchExchange returns 400 (not 502) for image input", async () => {
+  const fakeFleet = { getProvider: () => ({ type: "openai", callChat: async () => { throw new Error("must not reach upstream"); } }) };
+  const res = await dispatchExchange({
+    protocol: "anthropic",
+    request: new Request("http://localhost/v1/messages", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: [{ type: "image" }] }] },
+    model: "m",
+    config: { routes: { m: [{ provider: "fake", model: "m" }] } },
+    fleet: fakeFleet
+  });
+  assert.equal(res.status, 400);
+  const json = await res.json();
+  assert.ok(json.error.message.includes("Image content blocks"));
 });

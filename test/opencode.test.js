@@ -32,6 +32,10 @@ test("createProvider factory supports opencode type", () => {
   assert.ok(provider instanceof OpenCodeProvider);
 });
 
+test("createProvider throws on unknown provider type", () => {
+  assert.throws(() => createProvider({ type: "nope" }, {}), /Unknown provider type "nope"/);
+});
+
 test("OpenCodeProvider injects required session headers on callChat", async () => {
   const originalFetch = globalThis.fetch;
   let capturedHeaders = null;
@@ -352,7 +356,7 @@ test("fetchOfficialFreeModels pulls from upstream and filters out non-free model
   }
 });
 
-test("dispatchExchange dynamically routes unconfigured free models to opencode", async () => {
+test("dispatchExchange returns 404 when model has no explicit route (issue #04)", async () => {
   const fakeFleet = {
     getProvider: (name) => {
       if (name === "opencode") {
@@ -394,10 +398,10 @@ test("dispatchExchange dynamically routes unconfigured free models to opencode",
       format: "openai"
     });
 
-    assert.equal(res.status, 200);
-    assert.equal(capturedModel, "nemotron-3-ultra-free");
+    // 新行为：未显式配置路由时返回 404
+    assert.equal(res.status, 404);
     const json = await res.json();
-    assert.equal(json.choices[0].message.content, "Dynamic discovery success!");
+    assert.equal(json.error.message, "No route configured for model \"nemotron-3-ultra-free\". Available models: (none). To use this model, please add an explicit route in the configuration.");
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -12,7 +12,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 
-- **provider contract** — the documented shape of what a provider adapter may implement (`src/providers/contract.js`). Capability predicates (`hasGetBalance`/`hasOnSchedule`/`hasDailyCheckin`) replace hand-written `typeof` probes in `fleet.js`. `callChat`/`callMessages` dispatch is by `provider.type`, *not* capability probing.
+- **provider contract** — the documented shape of what a provider adapter may implement (`src/providers/contract.js`). Capability predicates (`hasGetBalance`/`hasOnSchedule`/`hasDailyCheckin`/`hasCallChat`/`hasCallMessages`/`wantsStreamedChat`/`hasTokenRefresh`) replace hand-written `typeof` probes and `provider.type` switches. Dispatch probes capabilities, never the tag; `callChat` vs `callMessages` is decided by `hasCallMessages`, forced streaming by the adapter-declared `forceStream` flag.
 
 - **account** — one WorkBuddy credential inside a provider's `accounts` pool (`{ id, userId, accessToken, refreshToken }`). Multi-account round-robin happens at the account level, *below* the provider level.
 
@@ -20,9 +20,11 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **cooldown** — a per-account exponential-backoff record (`{ expiresAt, streak }`). `streak` increments on each punishable failure; backoff = `2^(streak-1)` minutes, capped at 8. A cooled-down account is skipped until `expiresAt` passes.
 
-- **failover** — the retry loop in `workbuddy.js` `callChat`: try accounts in scheduler order, classify each failure, switch account (or cool down + switch), and only return the error to the client when it's `fatal`.
+- **failover** — the shared attempt loop (`src/failover.js` `runFailover`): try items in order, classify each failure, switch item (cooling down the account on punishable failures), and only return the error when it's `fatal` or the pool is exhausted. Both the workbuddy account loop and the dispatch candidate loop leverage it; per-item behavior lives in the caller's `attempt`, retryable side effects in `onRetryable`.
 
-## Protocol translation (`src/exchange/exchange.js`)
+## Protocol translation (`src/exchange/`)
+
+Module layout: `transform.js` (request-side: transform / normalize / prune), `stream.js` (response-side: reduce / shared extractors / streaming + non-streaming translators), `dispatch.js` (route resolution and failover). `exchange.js` is a re-export facade; import from it to stay decoupled from the layout.
 
 - **exchange / dispatch** — the layer that translates between the client-facing protocol (Anthropic or OpenAI) and the upstream protocol, in both directions.
 
@@ -34,7 +36,9 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **reduce** — the pure per-chunk classifier (`reduceOpenAIChunk`) that maps one parsed OpenAI SSE chunk → a typed emission (`error` / `thinking` / `text` / `tool_use`). The streaming state machine (`streamOpenAIToAnthropic`) consumes it, but the error-classification branch is the only part wired through the reducer today; text/thinking/tool-call emission remains inline.
 
-- **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/exchange.js`).
+- **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/stream.js`).
+
+- **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and hands the intent to transform; **OpenCode family** (`matchOpenCodeFamily`: muse-spark / ling / deepseek / generic) is the single home of model-name knowledge shared by effort-level mapping and the opencode adapter's endpoint routing.
 
 ## Classification vocabulary (in the scheduler)
 

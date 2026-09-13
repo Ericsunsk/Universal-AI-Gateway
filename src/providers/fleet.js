@@ -1,5 +1,5 @@
 import { createProvider } from "./index.js";
-import { hasGetBalance, hasOnSchedule, hasDailyCheckin } from "./contract.js";
+import { hasGetBalance, hasOnSchedule, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
 
 let cachedFleet = null;
 let cachedFleetConfigRef = null;
@@ -86,7 +86,7 @@ export class ProviderFleet {
   async refreshAllTokens() {
     const results = [];
     for (const provider of this.getAllActive()) {
-      if (typeof provider.refreshAccessToken === "function") {
+      if (hasTokenRefresh(provider)) {
         try {
           const res = await provider.refreshAccessToken();
           const refreshed = Array.isArray(res) ? res.length > 0 : !!res;

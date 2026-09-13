@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import handler from "../src/index.js";
+import { getConfig } from "../src/config/config.js";
 
 // 一个最小 env：满足 getConfig 需要的密钥 + 一个内存 KV mock。
 // getBalance 会遍历 provider，但这里 provider 列表为空，不会触发真实 fetch。
@@ -43,4 +44,15 @@ test("/healthz also stays harmless", async () => {
   const body = await resp.json();
   assert.equal(body.status, "ok");
   assert.equal("balance" in body, false);
+});
+
+test("/healthz degrades to 503 when zero providers/routes configured", async () => {
+  const env = makeEnv();
+  await env.GATEWAY_KV.put("GATEWAY_CONFIG", JSON.stringify({ providers: [], routes: {} }));
+  // getConfig 有进程级缓存，强制刷新到当前 env 的空配置，否则沿用上一个测试的默认配置
+  await getConfig(env, true);
+  const resp = await handler.fetch(new Request("https://x/healthz"), env, {});
+  const body = await resp.json();
+  assert.equal(resp.status, 503);
+  assert.equal(body.status, "degraded");
 });

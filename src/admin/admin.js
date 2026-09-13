@@ -1,4 +1,4 @@
-import { getConfig, saveConfig, redactConfig, validateConfig, VERSION } from "../config/config.js";
+import { getConfig, saveConfig, redactConfig, VERSION } from "../config/config.js";
 import { corsHeaders } from "../http/headers.js";
 
 export async function handleAdminRequest(request, env, authResult, fleet) {
@@ -77,23 +77,12 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
   }
 
   // 2. POST /admin/api/config
+  // 校验只有一处：saveConfig 内的 validateConfig（状态码由抛出的 error.status 携带，
+  // 这里只映射）。预检 raw 再检 merged 的双重校验已删除 —— merge 只回填机密、不改形状，
+  // 同一份 schema 检两遍除了漂移（曾经 409 在这里被吞成 500）没有收益。
   if (path === "/admin/api/config" && request.method === "POST") {
     try {
       const newConfig = await request.json();
-      if (!newConfig.providers || !newConfig.routes) {
-        return new Response(JSON.stringify({ error: { message: "Invalid config schema: providers and routes required" } }), {
-          status: 400,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      }
-      // 详细 schema 校验：在写入前拦截缺失 provider / 畸形 routes 的配置
-      const validationErrors = validateConfig(newConfig);
-      if (validationErrors.length > 0) {
-        return new Response(JSON.stringify({ error: { message: "Invalid config: " + validationErrors.join("; ") } }), {
-          status: 400,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      }
       await saveConfig(env, newConfig);
       return new Response(JSON.stringify({ success: true, message: "Configuration saved to KV successfully" }), {
         status: 200,
@@ -101,7 +90,7 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
       });
     } catch (e) {
       return new Response(JSON.stringify({ error: { message: e.message } }), {
-        status: 500,
+        status: e.status || 500,
         headers: { "Content-Type": "application/json", ...corsHeaders }
       });
     }

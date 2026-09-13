@@ -16,7 +16,7 @@ export function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
-export function authenticateAccess(request, config, { model = null, requireMaster = false } = {}) {
+export function authenticateAccess(request, config, { model = null, requireMaster = false, allowCron = false } = {}) {
   const authHeader = request.headers.get("Authorization") || "";
   const xApiKey = request.headers.get("x-api-key") || "";
 
@@ -44,11 +44,14 @@ export function authenticateAccess(request, config, { model = null, requireMaste
     return { ok: true, principal: { isMaster: true, role: "admin", name: "Master Admin" } };
   }
 
-  // 1.1 验证 Cron Secret (用于 Vercel Cron 定时任务鉴权)
-  if (config.cron_secret && timingSafeEqual(token, config.cron_secret)) {
-    return { ok: true, principal: { isMaster: true, role: "cron", name: "Cron Trigger" } };
+  // 1.1 验证 Cron Secret (仅在 allowCron=true 时启用)
+  // 顺序必须在 requireMaster 之前：/checkin 用 {requireMaster:true, allowCron:true}
+  // 同时接受 master 与 cron（cron 降权 isMaster:false）；其他 admin 接口 allowCron=false，cron 落到下面的 requireMaster 被拒
+  if (config.cron_secret && timingSafeEqual(token, config.cron_secret) && allowCron) {
+    return { ok: true, principal: { isMaster: false, role: "cron", name: "Cron Trigger" } };
   }
 
+  // 1.2 当 requireMaster 时：仅 Master Key 可访问（cron 已在上一步按 allowCron 处理）
   if (requireMaster) {
     return {
       ok: false,

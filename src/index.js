@@ -37,16 +37,20 @@ export default {
     }
 
     // 2. 健康检查（公开）
+    // 当零可用 provider 或零路由时标记 degraded，避免永远 ok
     if (path === "/" || path === "/healthz") {
+      const hasProviders = fleet.activeCount > 0;
+      const hasRoutes = Object.keys(config.routes || {}).length > 0;
+      const status = (hasProviders && hasRoutes) ? "ok" : "degraded";
       return new Response(JSON.stringify({
-        status: "ok",
+        status,
         service: "universal-ai-gateway",
         version: VERSION,
         providers_active: fleet.activeCount,
         models_available: Object.keys(config.routes || {}).length,
         time: new Date().toISOString()
       }), {
-        status: 200,
+        status: status === "ok" ? 200 : 503,
         headers: { "Content-Type": "application/json", ...corsHeaders }
       });
     }
@@ -87,8 +91,9 @@ export default {
 
     // 5. 手动签到接口 (/checkin)
     // 需要 Master Key 或 Cron Secret：此接口会触发上游真实签到，不能对普通虚拟密钥开放
+    // Cron secret 只能触发定时任务，无法调用 Admin API（因 isMaster: false 袹_admin 网关拦截）
     if (path === "/checkin") {
-      const auth = authenticateAccess(request, config, { requireMaster: true });
+      const auth = authenticateAccess(request, config, { requireMaster: true, allowCron: true });
       if (!auth.ok) return auth.response;
 
       const results = await fleet.runDailyCheckins();
