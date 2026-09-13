@@ -31,11 +31,12 @@ let traeRoundRobinCounter = 0;
 let traeLastHydrateTimestamp = 0;
 const TRAE_HYDRATE_THROTTLE_MS = 5 * 1000;
 
-// 活客户端确认的生产标识（来自 ckg Go 服务日志，权威）。
-// 注意：旧 bundle 曾暴露 agent appId = a4c6c500-6846-45b6-94f6-1b231eb53742，
-// 但实际运行客户端用的是 app_id = 677332（数字）。
-export const TRAE_APP_ID = "677332";
+// 活客户端确认的生产标识（权威，来自真实请求头日志）。
+// 注意：代码补全（super_completion）的 X-App-Id 是 UUID，不是 ckg 服务的数字 app_id=677332。
+export const TRAE_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8";
 export const TRAE_CLIENT_ID = "ono9krqynydwx5";
+// 鉴权 scheme：不是标准 Bearer，而是 Trae 私有的 "Cloud-IDE-JWT"。
+export const TRAE_AUTH_SCHEME = "Cloud-IDE-JWT";
 
 // 网关默认值（活客户端日志确认，国际版 *.traeapi.us）。region 可由 config 覆盖。
 const DEFAULT_CHAT_HOST = "https://core-normal.traeapi.us"; // 核心 AI（super_completion 等）
@@ -46,7 +47,9 @@ const DEVICE_HEADERS = {
   "User-Agent": "TTNetwork PC",
   "X-Device-Type": "mac",
   "X-Device-Cpu": "Apple",
-  "X-Os-Version": "macOS 15.7.8"
+  "X-Os-Version": "macOS 15.7.8",
+  "x-plugin-channel": "icube-ai",
+  "x-ide-version-code": "20260212"
 };
 
 function getKv(env) {
@@ -111,13 +114,14 @@ export class TraeProvider {
     ];
   }
 
-  // 构造发给上游的请求头：OAuth Bearer + appId + 设备指纹 + 客户端 UA。
+  // 构造发给上游的请求头：Cloud-IDE-JWT 鉴权 + X-App-Id + 设备指纹 + 客户端 UA。
   buildHeaders(token, account = {}) {
     const headers = {
       ...DEVICE_HEADERS,
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${token}`,
-      "xAppId": this.appId,
+      "Authorization": `${TRAE_AUTH_SCHEME} ${token}`,
+      "X-App-Id": this.appId,
+      "x-ide-token": token,
       "Accept": "text/event-stream"
     };
     if (account.deviceId || this.config.deviceId) {
@@ -297,14 +301,14 @@ export class TraeProvider {
         continue;
       }
 
-      const headers = this.buildHeaders(token, account);
+      const reqHeaders = this.buildHeaders(token, account);
       const upstreamPayload = this.buildPayload(payload);
 
       try {
         // super_completion 本身即 SSE 流式端点（httpTimeoutConfig.sse=25），无需 ?stream= 标志。
         const resp = await fetch(`${this.chatHost}${this.chatPath}`, {
           method: "POST",
-          headers,
+          headers: reqHeaders,
           body: JSON.stringify(upstreamPayload)
         });
 
@@ -338,19 +342,19 @@ export class TraeProvider {
 
         // 成功：清除冷却，注入诊断头后返回流式响应。
         this.clearAccountCooldown(account.id);
-        const headers = buildResponseHeaders(resp.headers, {
+        const responseHeaders = buildResponseHeaders(resp.headers, {
           "X-Gateway-Account": account.id || "primary",
           "X-Gateway-Account-Id": account.id || "primary",
           "X-Gateway-Model": options.model || payload.model || "",
           "X-Gateway-Fallback": tried.length > 0 ? "true" : "false"
         });
-        if (!headers.has("Content-Type")) {
-          headers.set("Content-Type", resp.headers.get("Content-Type") || "text/event-stream");
+        if (!responseHeaders.has("Content-Type")) {
+          responseHeaders.set("Content-Type", resp.headers.get("Content-Type") || "text/event-stream");
         }
         return new Response(resp.body, {
           status: resp.status,
           statusText: resp.statusText,
-          headers
+          headers: responseHeaders
         });
       } catch (e) {
         console.error(`[Trae:${account.name || account.id}] Request error:`, e);
