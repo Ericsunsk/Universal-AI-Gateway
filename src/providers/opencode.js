@@ -93,7 +93,9 @@ export class OpenCodeProvider {
     };
     if (payload.temperature !== undefined) responsesPayload.temperature = payload.temperature;
     if (payload.top_p !== undefined) responsesPayload.top_p = payload.top_p;
-    if (payload.max_tokens !== undefined) responsesPayload.max_output_tokens = payload.max_tokens;
+    if (payload.max_tokens !== undefined) {
+      responsesPayload.max_output_tokens = Math.max(payload.max_tokens, 1024);
+    }
 
     const resp = await fetch(url, {
       method: "POST",
