@@ -132,3 +132,15 @@ test("provider rejects empty turns with 400", async () => {
   const res = await p.callChat({ model: "m", messages: [] }, { fetch: async () => { throw new Error("must not fetch"); } });
   assert.equal(res.status, 400);
 });
+
+test("truncateHistory keeps system and most recent turns", async () => {
+  const { truncateHistory, QWENWEB_MAX_TURNS } = await import("../src/providers/qwenweb/protocol.js");
+  const turns = Array.from({ length: 25 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `t${i}` }));
+  const out = truncateHistory("SYS", turns);
+  assert.equal(out.systemPrefix, "SYS");
+  assert.equal(out.turns.length, QWENWEB_MAX_TURNS);
+  assert.equal(out.turns[0].content, "t5");
+  assert.equal(out.turns[out.turns.length - 1].content, "t24");
+  const short = truncateHistory("SYS", turns.slice(0, 3));
+  assert.equal(short.turns.length, 3, "short history untouched");
+});

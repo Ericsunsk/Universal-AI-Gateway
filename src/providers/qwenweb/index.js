@@ -11,6 +11,7 @@ import {
   QWENWEB_DEFAULT_BASE_URL,
   parseChatNew,
   splitHistory,
+  truncateHistory,
   buildTurn,
   buildCompletionsBody,
   parseQwenSSEObject,
@@ -46,7 +47,9 @@ export class QwenWebProvider {
 
   async callChat(payload, options = {}) {
     const fetchImpl = options.fetch || globalThis.fetch;
-    const { systemPrefix, turns } = splitHistory(payload?.messages);
+    // T3 决议：system 全留 + 最近 20 轮，中部静默丢弃（保前缀稳定）
+    const split = splitHistory(payload?.messages);
+    const { systemPrefix, turns } = truncateHistory(split.systemPrefix, split.turns);
     if (turns.length === 0) {
       return new Response(JSON.stringify({ error: { message: "No user/assistant turns to send" } }), {
         status: 400, headers: { "Content-Type": "application/json" }

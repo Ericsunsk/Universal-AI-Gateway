@@ -75,6 +75,17 @@ export function splitHistory(messages) {
   return { systemPrefix: sys.join("\n"), turns };
 }
 
+// 历史截断规则（T3 决议）：system 全留 + 最近 MAX_TURNS 轮，中部直接丢弃不留 notice
+// （notice 会污染前缀；coding 会话 20 轮外的上下文基本无用）。返回新数组，不修改入参。
+export const QWENWEB_MAX_TURNS = 20;
+
+export function truncateHistory(systemPrefix, turns, maxTurns = QWENWEB_MAX_TURNS) {
+  if (!Array.isArray(turns) || turns.length <= maxTurns) {
+    return { systemPrefix: systemPrefix || "", turns: turns || [] };
+  }
+  return { systemPrefix: systemPrefix || "", turns: turns.slice(turns.length - maxTurns) };
+}
+
 // POST /api/v2/chat/completions?chat_id= 请求体（抓包字段全量，缺一可能被风控加权）
 export function buildCompletionsBody({ chatId, parentId, model, turn, timestamp = Date.now() }) {
   return {
