@@ -39,6 +39,41 @@ export function affinityKeyForCall(payload, options = {}) {
   return null;
 }
 
+// Region 端点表：CN 现状冻结；intl 格子待凭证实测后填（TODO-intl）。
+// provider 配置 config.region: "intl" 即切整组端点 + Origin/Referer；默认 "cn" 行为零变化。
+export function normalizeWorkbuddyRegion(value) {
+  return String(value || "").toLowerCase() === "intl" ? "intl" : "cn";
+}
+
+export function resolveWorkbuddyEndpoints(region) {
+  if (normalizeWorkbuddyRegion(region) === "intl") {
+    // 国际站域名候选：codebuddy.ai（ keys / 登录）、tokenhub-intl.tencentcloudmaas.com（token hub 示例）、
+    // workbuddy.ai（官方文档列为国际端点系）。确切 path 必须拿 intl 凭证实测，猜中域名但 path 错一样 404。
+    return {
+      region: "intl",
+      probed: false,
+      refresh: null,
+      chat: null,
+      billing: null,
+      checkin: null,
+      origin: null,
+      referer: null,
+      userAgent: "CLI/2.63.2 CodeBuddy/2.63.2"
+    };
+  }
+  return {
+    region: "cn",
+    probed: true,
+    refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
+    chat: "https://copilot.tencent.com/v2/chat/completions",
+    billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
+    checkin: "https://www.codebuddy.cn/v2/billing/meter/daily-checkin",
+    origin: "https://www.codebuddy.cn",
+    referer: "https://www.codebuddy.cn/",
+    userAgent: "CLI/2.63.2 CodeBuddy/2.63.2"
+  };
+}
+
 export class WorkBuddyProvider {
   constructor(config, env) {
     this.id = config.id || "workbuddy";
@@ -46,6 +81,10 @@ export class WorkBuddyProvider {
     this.type = "workbuddy";
     this.env = env;
     this.config = config.config || {};
+    // region 决定整组端点：默认 cn；配 config.region: "intl" 切国际站。
+    // 构造永不抛错：intl 未实测前首次实际调用才报缺端点，避免一条未就绪配置拖垮整个网关。
+    this.region = normalizeWorkbuddyRegion(this.config.region);
+    this.endpoints = resolveWorkbuddyEndpoints(this.region);
     // 能力声明：上游非流式 JSON 可能是 200 业务错误包，调用方须强制 stream=true。
     // dispatch 经 contract.wantsStreamedChat 探针读取，不 switch type。
     this.forceStream = true;
@@ -55,11 +94,24 @@ export class WorkBuddyProvider {
     return this.env.GATEWAY_KV || this.env.WORKBUDDY_KV;
   }
 
+  // 取可用端点表：intl 未实测时抛明确错误（而不是静默打错域名）。
+  ep() {
+    if (!this.endpoints?.probed) {
+      throw new Error(
+        `WorkBuddy provider "${this.id}" region "${this.region}" endpoints not probed yet — ` +
+        `fill resolveWorkbuddyEndpoints() with measured intl paths first`
+      );
+    }
+    return this.endpoints;
+  }
+
   // 获取所有启用的账号列表（支持单账号与账号池双重兼容）
   getAccounts() {
     if (Array.isArray(this.config.accounts) && this.config.accounts.length > 0) {
       return this.config.accounts.filter(acc => acc.enabled !== false);
     }
+    // intl 不得回退 env 凭证：env 里是 CN 账号，打到国际站必然鉴权失败，还会污染风控
+    if (this.region === "intl") return [];
     // 降级兼顾单一账号配置
     const defaultUserId = this.config.userId || this.env.USER_ID;
     const defaultAccess = this.config.accessToken || this.env.ACCESS_TOKEN;
@@ -119,16 +171,17 @@ export class WorkBuddyProvider {
     if (!refreshToken) return null;
 
     try {
-      const resp = await fetch("https://copilot.tencent.com/v2/plugin/auth/token/refresh", {
+      const ep = this.ep();
+      const resp = await fetch(ep.refresh, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json",
           "X-Refresh-Token": refreshToken,
           "X-Auth-Refresh-Source": "workbuddy",
-          "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
-          "Origin": "https://www.codebuddy.cn",
-          "Referer": "https://www.codebuddy.cn/"
+          "User-Agent": ep.userAgent,
+          "Origin": ep.origin,
+          "Referer": ep.referer
         }
       });
       const resJson = await resp.json();
@@ -215,19 +268,20 @@ export class WorkBuddyProvider {
     if (!token || !userId) return null;
 
     const makeRequest = async (tk) => {
+      const ep = this.ep();
       const headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
         "Connection": "keep-alive",
         "X-Requested-With": "XMLHttpRequest",
-        "Origin": "https://www.codebuddy.cn",
-        "Referer": "https://www.codebuddy.cn/",
-        "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
+        "Origin": ep.origin,
+        "Referer": ep.referer,
+        "User-Agent": ep.userAgent,
         "Authorization": `Bearer ${tk}`,
         "X-User-Id": userId,
         "X-Product": "SaaS"
       };
-      return await fetch("https://copilot.tencent.com/v2/chat/completions", {
+      return await fetch(ep.chat, {
         method: "POST",
         headers: headers,
         body: serializedPayload,
@@ -383,14 +437,15 @@ export class WorkBuddyProvider {
       if (!token || !userId) return { id: account.id, name: account.name, balance: 0, total: 0, success: false };
 
       try {
-        const resp = await fetch("https://www.codebuddy.cn/v2/billing/meter/get-user-resource", {
+        const ep = this.ep();
+        const resp = await fetch(ep.billing, {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${token}`,
             "X-User-Id": userId,
-            "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
-            "Origin": "https://www.codebuddy.cn",
-            "Referer": "https://www.codebuddy.cn/",
+            "User-Agent": ep.userAgent,
+            "Origin": ep.origin,
+            "Referer": ep.referer,
             "Content-Type": "application/json",
             "Accept": "application/json"
           },
@@ -463,7 +518,7 @@ export class WorkBuddyProvider {
       if (!token || !userId) return { id: account.id, name: account.name, success: false, msg: "missing credentials" };
 
       try {
-        const resp = await fetch("https://www.codebuddy.cn/v2/billing/meter/daily-checkin", {
+        const resp = await fetch(this.ep().checkin, {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${token}`,

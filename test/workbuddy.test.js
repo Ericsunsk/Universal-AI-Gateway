@@ -179,3 +179,22 @@ test("affinityKeyForCall prefers session header, falls back to system+tools fing
   assert.equal(affinityKeyForCall(payload, {}), k1, "same conversation maps to same key");
   assert.equal(affinityKeyForCall({ messages: [] }, {}), null, "no signal falls back to round-robin");
 });
+
+test("workbuddy region table: cn frozen, intl explicit-unprobed, env fallback cn-only", async () => {
+  const { WorkBuddyProvider, normalizeWorkbuddyRegion, resolveWorkbuddyEndpoints } =
+    await import("../src/providers/workbuddy/index.js");
+  assert.equal(normalizeWorkbuddyRegion(undefined), "cn");
+  assert.equal(normalizeWorkbuddyRegion("INTL"), "intl");
+  assert.equal(normalizeWorkbuddyRegion("xx"), "cn");
+  const cn = resolveWorkbuddyEndpoints("cn");
+  assert.equal(cn.probed, true);
+  assert.ok(cn.chat.includes("copilot.tencent.com"));
+  const intl = resolveWorkbuddyEndpoints("intl");
+  assert.equal(intl.probed, false, "intl paths must be measured before use");
+  const env = { USER_ID: "u", ACCESS_TOKEN: "a", REFRESH_TOKEN: "r" };
+  const cnProv = new WorkBuddyProvider({ id: "workbuddy", config: {} }, env);
+  assert.equal(cnProv.getAccounts().length, 1, "cn keeps env fallback");
+  const intlProv = new WorkBuddyProvider({ id: "workbuddy-intl", config: { region: "intl" } }, env);
+  assert.deepEqual(intlProv.getAccounts(), [], "intl must not reuse cn env credentials");
+  assert.throws(() => intlProv.ep(), /not probed yet/);
+});
