@@ -212,12 +212,23 @@ export function backfillMissingRoutes(stored, defaults) {
   return stored;
 }
 
+// 在途刷新去重（singleflight）：缓存过期瞬间的突发只触发一次 KV 读，
+// 其余并发等待同一 promise。forceRefresh 同样并入，避免测试与管理端并发刷新时重复打 KV。
+let inflightConfigRefresh = null;
+
 export async function getConfig(env, forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && cachedConfig && (now - cachedConfigTimestamp < CONFIG_CACHE_TTL_MS)) {
     return cachedConfig;
   }
+  if (!inflightConfigRefresh) {
+    inflightConfigRefresh = refreshConfig(env).finally(() => { inflightConfigRefresh = null; });
+  }
+  return inflightConfigRefresh;
+}
 
+async function refreshConfig(env) {
+  const now = Date.now();
   const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
   if (kv) {
     try {
