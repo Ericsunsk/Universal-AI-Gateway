@@ -19,7 +19,30 @@ import {
   isWAFBody
 } from "./protocol.js";
 import { buildQwenHeaders } from "./fingerprint.js";
+import { assembleRequestHeaders, generateDeviceId } from "./antiBot.js";
 import { buildResponseHeaders } from "../../http/headers.js";
+
+// bx-umidtoken 抓取缓存（对齐上游 100 次一换；进程级，失败则降级为不带该头）。
+let cachedMidtoken = null;
+let midtokenUses = 0;
+
+async function fetchMidtoken(fetchImpl) {
+  if (cachedMidtoken && midtokenUses < 100) {
+    midtokenUses += 1;
+    return cachedMidtoken;
+  }
+  try {
+    const res = await fetchImpl("https://sg-wum.alibaba.com/w/wu.json", { signal: AbortSignal.timeout(15000) });
+    const text = await res.text();
+    const m = text.match(/(?:umx\.wu|__fycb)\('([^']+)'\)/);
+    if (m) {
+      cachedMidtoken = m[1];
+      midtokenUses = 0;
+      return cachedMidtoken;
+    }
+  } catch (e) {}
+  return cachedMidtoken;
+}
 
 export class QwenWebProvider {
   constructor(config, env) {
@@ -30,6 +53,8 @@ export class QwenWebProvider {
     this.config = config.config || {};
     // 网页通道只走 SSE（与 workbuddy 同理，forceStream 让 dispatch 统一强制流式）
     this.forceStream = true;
+    // 设备身份稳定复用（一台“设备”长期用，符合真机行为；默认自动指纹见 callChat）
+    this.deviceId = this.config.deviceId || generateDeviceId();
   }
 
   get baseUrl() {
@@ -65,9 +90,21 @@ export class QwenWebProvider {
     const turn = buildTurn({ role: "user", content: squashed }, model, {});
 
     try {
-      // 1) 建 chat 取 chat_id
-      const headers = buildQwenHeaders({ fingerprint: { ...this.account.fingerprint, cookie: this.account.cookie } });
-      if (this.account.token) headers["Authorization"] = `Bearer ${this.account.token}`;
+      // 1) 建 chat 取 chat_id。指纹策略：账号存了浏览器抄录值则重放（最稳）；
+      // 否则本地生成全套（antiBot.js，T6 锁定的指纹移植），umidtoken 抓不到就降级省略。
+      const autoFp = this.config.autoFingerprint !== false;
+      let headers;
+      if (autoFp && !this.account.cookie) {
+        const mid = await fetchMidtoken(fetchImpl).catch(() => null);
+        headers = assembleRequestHeaders({
+          deviceId: this.deviceId,
+          token: this.account.token,
+          umidtoken: mid || undefined
+        }).headers;
+      } else {
+        headers = buildQwenHeaders({ fingerprint: { ...this.account.fingerprint, cookie: this.account.cookie } });
+        if (this.account.token) headers["Authorization"] = `Bearer ${this.account.token}`;
+      }
       const newChatRes = await fetchImpl(`${this.baseUrl}/api/v2/chats/new`, {
         method: "POST",
         headers,

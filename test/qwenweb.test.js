@@ -165,3 +165,74 @@ test("parseQwenSSEObject replays live fixture end to end", async () => {
   assert.ok(reasoning.includes("one hundred forty-four"), "thinking text from summary_thought");
   assert.ok(content.includes("144"), "answer text joined");
 });
+
+test("antiBot matches Python golden vectors bit-exactly", async () => {
+  const fs = await import("node:fs");
+  const { lzwCompress, customEncode, generateCookies, generateBxUa, generateFingerprint, CUSTOM_BASE64_CHARS } =
+    await import("../src/providers/qwenweb/antiBot.js");
+  const golden = JSON.parse(fs.readFileSync("test/fixtures/qwen-antibot-golden.json", "utf8"));
+  // LZW + 自定义 base64：固定输入必须逐字节一致
+  const charFunc = (i) => CUSTOM_BASE64_CHARS[i];
+  assert.equal(lzwCompress("hello world hello", 6, charFunc), golden.lzw1);
+  assert.equal(customEncode("ABAABAABAABAAB", true), golden.lzw2);
+  // cookies：用黄金 fp 输入 + 与 Python 同步的随机序列（fp 消耗前 6 个，cookies 从第 7 个起）
+  const cycle = [77, 88, 99, 123456789, 987654321, 42424242];
+  let pos = 0;
+  const randInt = (min, max) => cycle[pos++ % cycle.length] % (max - min + 1) + min;
+  const ck = generateCookies(golden.fp, { randInt, now: () => 1789000000000 });
+  assert.equal(ck.ssxmod_itna, golden.ck0);
+  assert.equal(ck.ssxmod_itna2, golden.ck1);
+  // bx-ua：同 fp + 同 timestamp + 同 rnd（Python 侧 7777777→2777），AES/sha256/md5 必须逐字节一致
+  assert.equal(generateBxUa(golden.fp, { timestamp: 1789000000000, rnd: 2777 }), golden.bx);
+  // 指纹结构：37 段 + 固定槽位
+  const parts = golden.fp.split("^");
+  assert.equal(parts.length, 37);
+  assert.equal(generateFingerprint({ deviceId: "x" }).split("^").length, 37);
+});
+
+test("assembleRequestHeaders builds complete anti-bot identity", async () => {
+  const { assembleRequestHeaders, uuid4 } = await import("../src/providers/qwenweb/antiBot.js");
+  assert.match(uuid4(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const { headers } = assembleRequestHeaders({ deviceId: "testdevice0000000001", token: "tok", umidtoken: "mid" });
+  assert.ok(headers["Cookie"].startsWith("ssxmod_itna=1-"));
+  assert.ok(headers["bx-ua"].startsWith("231!"));
+  assert.equal(headers["bx-umidtoken"], "mid");
+  assert.equal(headers["Authorization"], "Bearer tok");
+  assert.equal(headers["bx-v"], "2.5.37");
+  assert.equal(headers["source"], "web");
+  const bare = assembleRequestHeaders({ deviceId: "testdevice0000000001" }).headers;
+  assert.equal(bare["bx-umidtoken"], undefined);
+  assert.equal(bare["Authorization"], undefined);
+});
+
+test("provider auto-fingerprint path works without stored cookies", async () => {
+  const { QwenWebProvider } = await import("../src/providers/qwenweb/index.js");
+  let umidFetched = false;
+  const fetchImpl = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes("sg-wum.alibaba.com")) {
+      umidFetched = true;
+      return new Response("__fycb('MID123')");
+    }
+    if (u.includes("/api/v2/chats/new")) {
+      const auth = init.headers["Authorization"];
+      if (auth !== "Bearer tok123") throw new Error("token must be forwarded, got: " + auth);
+      if (!init.headers["bx-ua"]?.startsWith("231!")) throw new Error("bx-ua must be generated");
+      if (!init.headers["Cookie"]?.includes("ssxmod_itna=1-")) throw new Error("cookies must be generated");
+      if (init.headers["bx-umidtoken"] !== "MID123") throw new Error("umidtoken must be attached");
+      return new Response('{"chat_id":"c9"}', { headers: { "Content-Type": "application/json" } });
+    }
+    if (u.includes("/api/v2/chat/completions")) {
+      return new Response('data: {"type":"content","data":"AUTO-OK"}\n\ndata: {"type":"done"}\n\n', {
+        headers: { "Content-Type": "text/event-stream" }
+      });
+    }
+    throw new Error("unexpected: " + u);
+  };
+  const p = new QwenWebProvider({ id: "qw", config: { token: "tok123" } }, {});
+  const res = await p.callChat({ model: "m", messages: [{ role: "user", content: "hi" }] }, { fetch: fetchImpl });
+  assert.equal(res.status, 200);
+  assert.ok(umidFetched, "umidtoken fetched once");
+  const text = await res.text();
+  assert.ok(text.includes("AUTO-OK"));
+});
