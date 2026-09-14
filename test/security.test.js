@@ -206,3 +206,12 @@ test("backfillMissingRoutes skips routes referencing unknown providers", () => {
   assert.ok(stored.routes["nemotron-3.5-lightning-free"], "opencode-only route backfilled");
   assert.equal(stored.routes["deepseek-v4.1-flash"], undefined, "workbuddy-mixed route skipped");
 });
+
+test("defaults include disabled workbuddy-intl slot with zero runtime effect", () => {
+  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const intl = defaults.providers.find(p => p.id === "workbuddy-intl");
+  assert.ok(intl, "intl slot present");
+  assert.equal(intl.enabled, false);
+  assert.equal(intl.config.region, "intl");
+  assert.deepEqual(validateConfig(defaults), [], "defaults with disabled intl must validate clean");
+});

@@ -39,6 +39,19 @@ export function getDefaultConfig(env) {
         }
       },
       {
+        // 国际站槽位：默认关闭，填入 intl 账号后在管理端启用并配 routes。
+        // 启用前零运行时影响（fleet 跳过、校验跳过账号检查）。模型池见 CLI product.json：
+        // gpt-5.6-sol/terra/luna、gpt-5.5/5.4、gpt-5.3-codex、gemini-3.5-flash、glm-5.3/5.2、kimi-k3/k2.6、minimax-m3。
+        id: "workbuddy-intl",
+        name: "WorkBuddy Intl (codebuddy.ai)",
+        type: "workbuddy",
+        enabled: false,
+        config: {
+          region: "intl",
+          accounts: []
+        }
+      },
+      {
         id: "opencode",
         name: "OpenCode Zen (Free Tier)",
         type: "opencode",
