@@ -22,6 +22,8 @@ export function getDefaultConfig(env) {
   // 国际站凭证同样走 secrets（与 CN 的 USER_ID 三件套同模式）；缺失即保持 disabled
   const readEnv = (name) => env?.[name] || (typeof process !== "undefined" ? process.env?.[name] : undefined);
   const intlUserId = readEnv("INTL_USER_ID") || "";
+  // Qwen 网页版 token 同样走 secrets；有则启用（live 验证通道），无则保持 disabled
+  const qwenToken = readEnv("QWEN_TOKEN") || "";
 
   return {
     config_version: 1,
@@ -63,15 +65,15 @@ export function getDefaultConfig(env) {
         }
       },
       {
-        // Qwen 网页版槽位：默认关闭。启用需填 cookie + 指纹（浏览器登录态抄录，见 qwenweb/fingerprint.js），
-        // routes 等 adapter 经真账号 live 验证后再配。验证码/风控由 provider 判 429 进网关冷却。
+        // Qwen 网页版：QWEN_TOKEN secret 在即启用（自动指纹，无需抄录；见 qwenweb/antiBot.js）。
+        // 无 token 时保持 disabled，零运行时影响。验证码/风控由 provider 判 429 进网关冷却。
         id: "qwenweb",
         name: "Qwen Web (chat.qwen.ai)",
         type: "qwenweb",
-        enabled: false,
+        enabled: qwenToken !== "",
         config: {
           baseUrl: "https://chat.qwen.ai",
-          token: "",
+          token: qwenToken,
           cookie: "",
           fingerprint: {}
         }
@@ -180,6 +182,13 @@ export function getDefaultConfig(env) {
         { provider: "workbuddy-intl", model: "glm-5.2" },
         { provider: "opencode", model: "mimo-v2.5-free" }
       ],
+      // Qwen 网页版 live 验证通道：仅 QWEN_TOKEN 在时出现（X-Gateway-Model 头可验明哪家 serve）。
+      ...(qwenToken !== "" ? {
+        "qwen3.7-plus-test": [
+          { provider: "qwenweb", model: "qwen3.7-plus" },
+          { provider: "opencode", model: "mimo-v2.5-free" }
+        ]
+      } : {}),
       "ling-3.0-flash-fin-free": [
         { provider: "opencode", model: "ling-3.0-flash-fin-free" },
         { provider: "opencode", model: "big-pickle" },
