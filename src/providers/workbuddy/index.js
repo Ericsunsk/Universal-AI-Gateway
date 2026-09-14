@@ -1,6 +1,6 @@
 import { sanitizeMessages } from "../../exchange/sanitizer.js";
 import { buildResponseHeaders } from "../../http/headers.js";
-import { orderAccounts, businessErrorCode } from "../../core/scheduler.js";
+import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
 import { runFailover } from "../../core/failover.js";
 import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./cooldown.js";
 
@@ -16,6 +16,27 @@ export function retryDelayMs(env) {
   const raw = Number(env?.RETRY_BASE_MS);
   if (!Number.isFinite(raw) || raw < 0) return DEFAULT_RETRY_DELAY_MS;
   return Math.floor(raw);
+}
+
+// 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
+// （同一编码会话内稳定；跨会话碰撞只影响落点、不影响正确性）。
+// 取不到返回 null → orderAccounts 走纯轮询。只读不写。
+export function affinityKeyForCall(payload, options = {}) {
+  const headers = options?.request?.headers;
+  if (headers) {
+    const get = (k) => typeof headers.get === "function" ? headers.get(k) : headers[k];
+    const sid = get("x-session-id") || get("x-conversation-id") || get("session-id");
+    if (sid) return `sid:${sid}`;
+  }
+  try {
+    const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
+    const first = msgs.length > 0 && msgs[0]?.role === "system" ? msgs[0].content : "";
+    const sys = typeof first === "string" ? first : JSON.stringify(first ?? "");
+    const tools = JSON.stringify(payload?.tools ?? []);
+    const sig = sys + "\n" + tools;
+    if (sig.trim().length > 8) return `sig:${hashString32(sig)}`;
+  } catch (e) {}
+  return null;
 }
 
 export class WorkBuddyProvider {
@@ -141,7 +162,9 @@ export class WorkBuddyProvider {
     return null;
   }
 
-  // 核心 Chat 接口：支持多账号负载均衡（Round-Robin）与自动故障转移（Failover on 429 / Quota Error）
+  // 核心 Chat 接口：会话粘性 + 自动故障转移（Failover on 429 / Quota Error）。
+  // 同一会话固定打同一健康账号（上游按账号隔离的前缀缓存保持热，命中率不随账号数稀释）；
+  // 无会话标识时回退 round-robin；命中冷却/限流时 failover 照常漂移到下一健康账号。
   async callChat(payload, options = {}) {
     const allAccounts = this.getAccounts();
     if (allAccounts.length === 0) {
@@ -151,8 +174,11 @@ export class WorkBuddyProvider {
     // 先水合其他 isolate 写入的冷却记录，再做健康度筛选
     await hydrateCooldowns(this.env, allAccounts);
 
-    // 账号排序委托给纯函数调度器：健康账号按 round-robin 轮转，冷却账号按到期时间兜底
-    const accounts = orderAccounts(allAccounts, accountCooldownRecord, Date.now(), roundRobinCounter);
+    // 账号排序委托给纯函数调度器：有粘性键时固定落点，无键时 round-robin，冷却账号按到期时间兜底
+    const accounts = orderAccounts(
+      allAccounts, accountCooldownRecord, Date.now(), roundRobinCounter,
+      affinityKeyForCall(payload, options)
+    );
     roundRobinCounter += 1;
 
     if (payload.messages) {

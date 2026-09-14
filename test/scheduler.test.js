@@ -6,7 +6,9 @@ import {
   computeCooldown,
   classify,
   businessErrorCode,
-  isModelLevelError
+  isModelLevelError,
+  hashString32,
+  affinityStartIndex
 } from "../src/core/scheduler.js";
 
 // ---- 退避时长：1 -> 2 -> 4 -> 8（封顶） ----
@@ -138,4 +140,31 @@ test("businessErrorCode extracts Tencent code from 200 JSON", () => {
   assert.equal(businessErrorCode({ code: 11128 }), 11128);
   assert.equal(businessErrorCode({ code: undefined }), 0);
   assert.equal(businessErrorCode(null), 0);
+});
+
+test("hashString32 is deterministic with avalanche on different inputs", () => {
+  assert.equal(hashString32("sess-1"), hashString32("sess-1"));
+  assert.notEqual(hashString32("sess-1"), hashString32("sess-2"));
+  assert.equal(hashString32(""), 0x811c9dc5);
+});
+
+test("affinityStartIndex pins a key to one healthy account", () => {
+  assert.equal(affinityStartIndex("sid:abc", 3), affinityStartIndex("sid:abc", 3));
+  assert.ok(affinityStartIndex("sid:abc", 3) < 3);
+  assert.equal(affinityStartIndex(null, 3), 0);
+  assert.equal(affinityStartIndex("x", 0), 0);
+});
+
+test("orderAccounts with affinityKey sticks to one account and drifts on cooldown", () => {
+  const empty = new Map();
+  const first = orderAccounts(accts, empty, now, 999, "sid:s1")[0].id;
+  // 同一 key 多次调用落点一致（rrIndex 变化不影响）
+  assert.equal(orderAccounts(accts, empty, now, 0, "sid:s1")[0].id, first);
+  assert.equal(orderAccounts(accts, empty, now, 1, "sid:s1")[0].id, first);
+  // 首选账号被冷却 → 漂移到下一健康账号（上游缓存虽冷但请求不挂）
+  const cooled = new Map([[first, { expiresAt: now + 60_000, streak: 1 }]]);
+  const drifted = orderAccounts(accts, cooled, now, 0, "sid:s1")[0].id;
+  assert.notEqual(drifted, first);
+  // 无 key 时旧语义不变
+  assert.deepEqual(orderAccounts(accts, empty, now, 1).map(a => a.id), ["b", "c", "a"]);
 });

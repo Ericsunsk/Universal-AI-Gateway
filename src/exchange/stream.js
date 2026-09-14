@@ -1,6 +1,7 @@
 // 响应侧转译 —— OpenAI SSE/JSON → Anthropic SSE/JSON（reduce / extractors / stream）。
 // 流式与非流式共享 extractors，两处不再各自拼装；路由见 ./dispatch.js。
 import { corsHeaders } from "../http/headers.js";
+import { recordUpstreamCache } from "../core/cacheStats.js";
 
 // 模块级单例 Encoder / Decoder 与预编码静态 Buffer（零 GC 内存分配）
 const textEncoder = new TextEncoder();
@@ -39,6 +40,15 @@ export function extractUsage(parsed, current = { input: 20, output: 1 }) {
     input: u.prompt_tokens || current.input,
     output: u.completion_tokens || current.output
   };
+}
+
+// 纯函数：提取上游前缀缓存命中 token 数（OpenAI 形 cached_tokens / Anthropic 形
+// cache_read_input_tokens），缺失为 0。调用方取各 chunk 最大值记一次。
+export function extractCachedTokens(parsed) {
+  const u = parsed?.usage;
+  if (!u || typeof u !== "object") return 0;
+  const n = u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? 0;
+  return Number.isFinite(Number(n)) && Number(n) > 0 ? Number(n) : 0;
 }
 
 // OpenAI finish_reason -> Anthropic stop_reason 映射
@@ -187,6 +197,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     let currentToolId = null;
     let currentToolName = null;
     let finalStopReason = "end_turn";
+    // 本次响应见到的最大缓存命中 token 数（上游 usage 逐 chunk 到达，取最大记一次）
+    let maxCachedTokens = 0;
 
     const closeCurrentBlock = async () => {
       if (currentBlockType !== null && currentBlockIndex >= 0) {
@@ -216,6 +228,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 
           try {
             const parsed = JSON.parse(jsonStr);
+            const cached = extractCachedTokens(parsed);
+            if (cached > maxCachedTokens) maxCachedTokens = cached;
 
             // 检查上游是否嵌入了业务错误（如 Tencent code !== 0 或 error 字段）
             // 委托纯函数 reducer 判定与提取错误消息，避免此分支逻辑与 reducer 分叉
@@ -384,6 +398,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       } catch (e) {}
     } finally {
       clearInterval(pingInterval);
+      // 无论正常收尾还是异常断流都记一次：命中率 = cachedResponses / responses
+      try { recordUpstreamCache(maxCachedTokens); } catch (e) {}
       try { await writer.close(); } catch (e) {}
     }
   })().catch(err => {
@@ -409,6 +425,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   let inputTokens = 20;
   let outputTokens = 1;
   let accumulatedFinishReason = null;
+  let maxCachedTokens = 0;
 
   try {
     while (true) {
@@ -437,6 +454,8 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
           const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
           inputTokens = usage.input;
           outputTokens = usage.output;
+          const cached = extractCachedTokens(parsed);
+          if (cached > maxCachedTokens) maxCachedTokens = cached;
         } catch (e) {}
       }
       buffer = pos > 0 ? buffer.slice(pos) : buffer;
@@ -469,6 +488,8 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
         const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
         inputTokens = usage.input;
         outputTokens = usage.output;
+        const cachedTail = extractCachedTokens(parsed);
+        if (cachedTail > maxCachedTokens) maxCachedTokens = cachedTail;
         // 保存 finish_reason 用于正确映射 Anthropic stop_reason
         if (parsed.choices?.[0]) {
           accumulatedFinishReason = parsed.choices[0].finish_reason;
@@ -514,6 +535,8 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   }
 
   content.push({ type: "text", text: accumulated });
+
+  try { recordUpstreamCache(maxCachedTokens); } catch (e) {}
 
   return new Response(JSON.stringify({
     id: msgId,

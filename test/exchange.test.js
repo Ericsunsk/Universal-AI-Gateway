@@ -498,3 +498,58 @@ test("streamOpenAIToAnthropic closes stalled upstream instead of hanging", async
     .join("");
   assert.match(text, /stalled/);
 });
+
+test("transformAnthropicToOpenAI is byte-stable for identical input (prefix-cache invariant)", () => {
+  const body = {
+    model: "m",
+    system: [
+      { type: "text", text: "You are a coder.", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "Be concise." }
+    ],
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+      { role: "user", content: [{ type: "text", text: "again" }] }
+    ]
+  };
+  const once = JSON.stringify(transformAnthropicToOpenAI(body, "m", {}, null));
+  const twice = JSON.stringify(transformAnthropicToOpenAI(body, "m", {}, null));
+  assert.equal(once, twice, "same conversation must serialize to identical bytes or upstream prefix cache breaks");
+});
+
+test("transformAnthropicToOpenAI folds system blocks for OpenAI-shaped upstreams (no cache_control forwarding)", () => {
+  // OpenAI 形上游不认 cache_control，透传反而可能 400；原生 Anthropic 路径走 dispatch 直传不经过这里。
+  const out = transformAnthropicToOpenAI({
+    model: "m",
+    system: [{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: "hi" }]
+  }, "m", {}, null);
+  assert.deepEqual(out.messages[0], { role: "system", content: "sys" });
+});
+
+test("extractCachedTokens reads OpenAI and Anthropic cache fields", async () => {
+  const { extractCachedTokens } = await import("../src/exchange/exchange.js");
+  assert.equal(extractCachedTokens({ usage: { prompt_tokens_details: { cached_tokens: 80 } } }), 80);
+  assert.equal(extractCachedTokens({ usage: { cache_read_input_tokens: 120 } }), 120);
+  assert.equal(extractCachedTokens({ usage: { prompt_tokens: 10 } }), 0);
+  assert.equal(extractCachedTokens({}), 0);
+  assert.equal(extractCachedTokens(null), 0);
+});
+
+test("stream translator records upstream prefix-cache hits", async () => {
+  const { snapshotCacheStats, resetCacheStats } = await import("../src/core/cacheStats.js");
+  resetCacheStats();
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "hi" } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 80 } } }),
+    "data: [DONE]"
+  ]);
+  const resp = streamOpenAIToAnthropic(upstream, "m");
+  await readAnthropicEvents(resp);
+  const snap = snapshotCacheStats();
+  assert.equal(snap.responses, 1);
+  assert.equal(snap.cachedResponses, 1);
+  assert.equal(snap.cachedTokens, 80);
+  assert.equal(snap.hitRate, 100);
+  resetCacheStats();
+});

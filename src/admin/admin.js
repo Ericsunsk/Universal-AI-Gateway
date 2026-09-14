@@ -1,5 +1,6 @@
 import { getConfig, saveConfig, redactConfig, VERSION } from "../config/config.js";
 import { corsHeaders } from "../http/headers.js";
+import { snapshotCacheStats } from "../core/cacheStats.js";
 
 export async function handleAdminRequest(request, env, authResult, fleet) {
   const url = new URL(request.url);
@@ -124,7 +125,8 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
       last_checkin: lastCheckin,
       last_refresh: lastRefresh,
       providers_count: fleet.activeCount,
-      routes_count: Object.keys(config.routes || {}).length
+      routes_count: Object.keys(config.routes || {}).length,
+      cache: snapshotCacheStats()
     }, null, 2), {
       status: 200,
       headers: { "Content-Type": "application/json", ...corsHeaders }

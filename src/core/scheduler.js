@@ -20,10 +20,29 @@ export function backoffMinutesForStreak(streak) {
   return Math.min(Math.pow(2, safe - 1), BACKOFF_MAX_MINUTES);
 }
 
+// 纯函数：32 位 FNV-1a 哈希（会话粘性键 → 确定性下标；集中在此一处，避免各处手写哈希分叉）。
+export function hashString32(str) {
+  const s = String(str ?? "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+// 纯函数：会话粘性起始位 —— 同一 key 永远映射到同一健康账号下标，
+// 让上游按账号隔离的前缀缓存保持热。只在健康子集内取值，冷却账号不参与。
+export function affinityStartIndex(key, healthyCount) {
+  if (!key || !Number.isFinite(healthyCount) || healthyCount <= 0) return 0;
+  return hashString32(key) % healthyCount;
+}
+
 // 纯函数：给定账号与冷却状态，计算「下一次应尝试的账号」的有序数组。
-// 健康账号按 round-robin 轮转；无健康账号时按冷却到期时间升序兜底。
+// 有 affinityKey 时健康账号按会话粘性落点（同一会话固定账号，上游缓存保持热）；
+// 无 key 时按 round-robin 轮转（旧语义不变）。无健康账号时按冷却到期时间升序兜底。
 // 返回新数组，不修改入参。
-export function orderAccounts(accounts, cooldownMap, now = Date.now(), rrIndex = 0) {
+export function orderAccounts(accounts, cooldownMap, now = Date.now(), rrIndex = 0, affinityKey = null) {
   if (!Array.isArray(accounts) || accounts.length === 0) return [];
 
   const healthy = accounts.filter(acc => {
@@ -36,7 +55,9 @@ export function orderAccounts(accounts, cooldownMap, now = Date.now(), rrIndex =
   });
 
   if (healthy.length > 0) {
-    const startIdx = ((rrIndex % healthy.length) + healthy.length) % healthy.length;
+    const startIdx = affinityKey != null
+      ? affinityStartIndex(affinityKey, healthy.length)
+      : (((rrIndex % healthy.length) + healthy.length) % healthy.length);
     return [
       ...healthy.slice(startIdx),
       ...healthy.slice(0, startIdx),

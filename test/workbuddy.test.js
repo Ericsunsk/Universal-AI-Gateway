@@ -162,3 +162,20 @@ test("hydrateCooldowns handles both parsed objects and string JSON from KV", asy
   assert.equal(accountCooldownRecord.get("obj_acc")?.streak, 1);
   assert.equal(accountCooldownRecord.get("str_acc")?.streak, 2);
 });
+
+test("affinityKeyForCall prefers session header, falls back to system+tools fingerprint", async () => {
+  const { affinityKeyForCall } = await import("../src/providers/workbuddy/index.js");
+  const req = (h) => ({ headers: new Headers(h) });
+  assert.equal(
+    affinityKeyForCall({}, { request: req({ "x-session-id": "abc" }) }),
+    "sid:abc"
+  );
+  const payload = {
+    messages: [{ role: "system", content: "You are a coder." }],
+    tools: [{ type: "function", function: { name: "bash" } }]
+  };
+  const k1 = affinityKeyForCall(payload, {});
+  assert.ok(k1.startsWith("sig:"), "falls back to stable fingerprint");
+  assert.equal(affinityKeyForCall(payload, {}), k1, "same conversation maps to same key");
+  assert.equal(affinityKeyForCall({ messages: [] }, {}), null, "no signal falls back to round-robin");
+});
