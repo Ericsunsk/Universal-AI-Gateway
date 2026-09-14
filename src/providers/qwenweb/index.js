@@ -20,6 +20,7 @@ import {
 } from "./protocol.js";
 import { buildQwenHeaders } from "./fingerprint.js";
 import { headersFromParts, mintIdentity } from "./antiBot.js";
+import { createGate, withGate } from "../../core/mutex.js";
 import { createHash } from "node:crypto";
 
 // 身份有效期：ssxmod/bx-ua 约 15 分钟，提前到 10 分钟轮换（宁早勿晚，避开过期窗口被风控加权）
@@ -64,6 +65,9 @@ export class QwenWebProvider {
     // CF cron 刷新的身份缓存（内存 + KV 双层，跨 isolate 由 KV 兜底）
     this._identity = null;
     this._identityAt = 0;
+    // 单并发门：同一账号同时只放 1 个在途上游调用，Claude Code 式 burst 在网关侧排队，
+    // 不把并发行直接打给风控。客户端 abort 即摘除，不死锁。
+    this._gate = createGate();
   }
 
   get kv() {
@@ -145,6 +149,10 @@ export class QwenWebProvider {
     ].filter(Boolean).join("\n\n");
     const turn = buildTurn({ role: "user", content: squashed }, model, {});
 
+    if (this._gate.queued > 0) {
+      console.warn(`[QwenWeb] Account "${this.id}" busy, ${this._gate.queued} queued (serializing burst)`);
+    }
+    return withGate(this._gate, options.signal, async () => {
     try {
       // 1) 建 chat 取 chat_id。身份优先级：账号抄录重放（最稳）> cron/KV 身份 > 现场生成。
       // 现场生成走 ensureIdentity（自动写透 KV，下一次同 isolate 指纹一致）。
@@ -206,6 +214,7 @@ export class QwenWebProvider {
       if (err?.name === "AbortError") throw err;
       return this.fail(502, `QwenWeb upstream transport failed: ${err?.message || err}`);
     }
+    });
   }
 
   // 错误收口：WAF/验证码特征 → 429（网关冷却漂移）；其他 → 透状态码
