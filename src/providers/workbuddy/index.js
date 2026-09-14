@@ -47,17 +47,18 @@ export function normalizeWorkbuddyRegion(value) {
 
 export function resolveWorkbuddyEndpoints(region) {
   if (normalizeWorkbuddyRegion(region) === "intl") {
-    // 国际站域名候选：codebuddy.ai（ keys / 登录）、tokenhub-intl.tencentcloudmaas.com（token hub 示例）、
-    // workbuddy.ai（官方文档列为国际端点系）。确切 path 必须拿 intl 凭证实测，猜中域名但 path 错一样 404。
+    // 国际站（实测 2026-09-14）：CLI product.json 默认 endpoint 即 www.codebuddy.ai，
+    // 鉴权同为 cli-external-link + prefixPath /plugin；refresh 空 token 回业务码 10001（应用层已说话），
+    // chat/billing/checkin 同 path 在鉴权墙后（401）。与 CN 同构，唯 host 与 Origin 不同。
     return {
       region: "intl",
-      probed: false,
-      refresh: null,
-      chat: null,
-      billing: null,
-      checkin: null,
-      origin: null,
-      referer: null,
+      probed: true,
+      refresh: "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
+      chat: "https://www.codebuddy.ai/v2/chat/completions",
+      billing: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
+      checkin: "https://www.codebuddy.ai/v2/billing/meter/daily-checkin",
+      origin: "https://www.codebuddy.ai",
+      referer: "https://www.codebuddy.ai/",
       userAgent: "CLI/2.63.2 CodeBuddy/2.63.2"
     };
   }

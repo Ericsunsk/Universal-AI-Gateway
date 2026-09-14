@@ -190,11 +190,13 @@ test("workbuddy region table: cn frozen, intl explicit-unprobed, env fallback cn
   assert.equal(cn.probed, true);
   assert.ok(cn.chat.includes("copilot.tencent.com"));
   const intl = resolveWorkbuddyEndpoints("intl");
-  assert.equal(intl.probed, false, "intl paths must be measured before use");
+  assert.equal(intl.probed, true);
+  assert.ok(intl.chat.includes("www.codebuddy.ai"));
+  assert.ok(intl.refresh.includes("/plugin/auth/token/refresh"));
   const env = { USER_ID: "u", ACCESS_TOKEN: "a", REFRESH_TOKEN: "r" };
   const cnProv = new WorkBuddyProvider({ id: "workbuddy", config: {} }, env);
   assert.equal(cnProv.getAccounts().length, 1, "cn keeps env fallback");
   const intlProv = new WorkBuddyProvider({ id: "workbuddy-intl", config: { region: "intl" } }, env);
   assert.deepEqual(intlProv.getAccounts(), [], "intl must not reuse cn env credentials");
-  assert.throws(() => intlProv.ep(), /not probed yet/);
+  assert.equal(intlProv.ep().chat, "https://www.codebuddy.ai/v2/chat/completions");
 });
