@@ -63,6 +63,20 @@ export function getDefaultConfig(env) {
         }
       },
       {
+        // Qwen 网页版槽位：默认关闭。启用需填 cookie + 指纹（浏览器登录态抄录，见 qwenweb/fingerprint.js），
+        // routes 等 adapter 经真账号 live 验证后再配。验证码/风控由 provider 判 429 进网关冷却。
+        id: "qwenweb",
+        name: "Qwen Web (chat.qwen.ai)",
+        type: "qwenweb",
+        enabled: false,
+        config: {
+          baseUrl: "https://chat.qwen.ai",
+          token: "",
+          cookie: "",
+          fingerprint: {}
+        }
+      },
+      {
         id: "opencode",
         name: "OpenCode Zen (Free Tier)",
         type: "opencode",
