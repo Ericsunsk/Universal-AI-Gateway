@@ -215,3 +215,15 @@ test("defaults include disabled workbuddy-intl slot with zero runtime effect", (
   assert.equal(intl.config.region, "intl");
   assert.deepEqual(validateConfig(defaults), [], "defaults with disabled intl must validate clean");
 });
+
+test("defaults enable workbuddy-intl only when INTL_* secrets present", () => {
+  const withIntl = getDefaultConfig({ API_KEY: "k", INTL_USER_ID: "u", INTL_ACCESS_TOKEN: "a", INTL_REFRESH_TOKEN: "r" });
+  const intl = withIntl.providers.find(p => p.id === "workbuddy-intl");
+  assert.equal(intl.enabled, true);
+  assert.equal(intl.config.region, "intl");
+  assert.equal(intl.config.accounts[0].userId, "u");
+  assert.ok(withIntl.routes["glm-5.2-intl"], "intl route present");
+  assert.deepEqual(validateConfig(withIntl), [], "intl-enabled defaults must validate clean");
+  const without = getDefaultConfig({ API_KEY: "k" });
+  assert.equal(without.providers.find(p => p.id === "workbuddy-intl").enabled, false);
+});

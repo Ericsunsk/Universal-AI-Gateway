@@ -19,6 +19,9 @@ export function getDefaultConfig(env) {
   // 拒绝硬编码兜底：缺失即抛错，避免默认主密钥等于公开字面量
   const defaultApiKey = requireSecret(env, "API_KEY");
   const masterKey = env.MASTER_KEY ? requireSecret(env, "MASTER_KEY") : defaultApiKey;
+  // 国际站凭证同样走 secrets（与 CN 的 USER_ID 三件套同模式）；缺失即保持 disabled
+  const readEnv = (name) => env?.[name] || (typeof process !== "undefined" ? process.env?.[name] : undefined);
+  const intlUserId = readEnv("INTL_USER_ID") || "";
 
   return {
     config_version: 1,
@@ -39,16 +42,24 @@ export function getDefaultConfig(env) {
         }
       },
       {
-        // 国际站槽位：默认关闭，填入 intl 账号后在管理端启用并配 routes。
-        // 启用前零运行时影响（fleet 跳过、校验跳过账号检查）。模型池见 CLI product.json：
+        // 国际站：有 INTL_* 环境凭证即启用（与 CN 共用同一套 adapter，按 region 切端点）。
+        // 凭证走 secrets（wrangler secret / Vercel env），永不进代码库；无凭证时保持 disabled，零运行时影响。
+        // 已验证 serve：glm-5.2。模型池见 CLI product.json：
         // gpt-5.6-sol/terra/luna、gpt-5.5/5.4、gpt-5.3-codex、gemini-3.5-flash、glm-5.3/5.2、kimi-k3/k2.6、minimax-m3。
         id: "workbuddy-intl",
         name: "WorkBuddy Intl (codebuddy.ai)",
         type: "workbuddy",
-        enabled: false,
+        enabled: intlUserId !== "",
         config: {
           region: "intl",
-          accounts: []
+          accounts: intlUserId !== "" ? [{
+            id: "intl-1",
+            name: "intl primary",
+            enabled: true,
+            userId: intlUserId,
+            accessToken: readEnv("INTL_ACCESS_TOKEN") || "",
+            refreshToken: readEnv("INTL_REFRESH_TOKEN") || ""
+          }] : []
         }
       },
       {
@@ -148,6 +159,12 @@ export function getDefaultConfig(env) {
         { provider: "opencode", model: "mimo-v2.5-free" },
         { provider: "opencode", model: "ling-3.0-flash-fin-free" },
         { provider: "opencode", model: "big-pickle" }
+      ],
+      // 国际站已验证 serve 的路由（glm-5.2 实测 200）。intl provider 无凭证时保持 disabled，
+      // 存量 KV 因回填约束（引用 provider 必须存在）自动跳过本条，不影响现网。
+      "glm-5.2-intl": [
+        { provider: "workbuddy-intl", model: "glm-5.2" },
+        { provider: "opencode", model: "mimo-v2.5-free" }
       ],
       "ling-3.0-flash-fin-free": [
         { provider: "opencode", model: "ling-3.0-flash-fin-free" },
