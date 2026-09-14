@@ -19,7 +19,11 @@ import {
   isWAFBody
 } from "./protocol.js";
 import { buildQwenHeaders } from "./fingerprint.js";
-import { assembleRequestHeaders, generateDeviceId } from "./antiBot.js";
+import { headersFromParts, mintIdentity } from "./antiBot.js";
+import { createHash } from "node:crypto";
+
+// 身份有效期：ssxmod/bx-ua 约 15 分钟，提前到 10 分钟轮换（宁早勿晚，避开过期窗口被风控加权）
+const IDENTITY_TTL_MS = 10 * 60 * 1000;
 import { buildResponseHeaders } from "../../http/headers.js";
 
 // bx-umidtoken 抓取缓存（对齐上游 100 次一换；进程级，失败则降级为不带该头）。
@@ -53,8 +57,60 @@ export class QwenWebProvider {
     this.config = config.config || {};
     // 网页通道只走 SSE（与 workbuddy 同理，forceStream 让 dispatch 统一强制流式）
     this.forceStream = true;
-    // 设备身份稳定复用（一台“设备”长期用，符合真机行为；默认自动指纹见 callChat）
-    this.deviceId = this.config.deviceId || generateDeviceId();
+    // 设备身份稳定复用（一台“设备”长期用，符合真机行为；默认自动指纹见 callChat）。
+    // 无配置时按 provider id 确定性派生：重启不变、账号间不碰撞、无需持久化。
+    this.deviceId = this.config.deviceId ||
+      createHash("sha256").update(`qwenweb-device:${this.id}`, "utf8").digest("hex").slice(0, 20);
+    // CF cron 刷新的身份缓存（内存 + KV 双层，跨 isolate 由 KV 兜底）
+    this._identity = null;
+    this._identityAt = 0;
+  }
+
+  get kv() {
+    return this.env?.GATEWAY_KV || this.env?.WORKBUDDY_KV || null;
+  }
+
+  identityKey() {
+    return `QWEN_FP_${this.id}`;
+  }
+
+  // 取可用身份：内存 → KV → 现场 mint（mint 后写透 KV 供其他 isolate）。
+  // 调用方（callChat 定时任务）只认“10 分钟内”的身份，过期即换。
+  async ensureIdentity(fetchImpl) {
+    const now = Date.now();
+    if (this._identity && now - this._identityAt < IDENTITY_TTL_MS) return this._identity;
+    const kv = this.kv;
+    if (kv) {
+      try {
+        const raw = await kv.get(this.identityKey(), "json");
+        const stored = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (stored && stored.cookie && stored.bxua && now - (stored.mintedAt || 0) < IDENTITY_TTL_MS) {
+          this._identity = stored;
+          this._identityAt = now;
+          return stored;
+        }
+      } catch (e) {}
+    }
+    const minted = mintIdentity({ deviceId: this.deviceId });
+    const identity = { ...minted, umidtoken: null };
+    try {
+      const mid = await fetchMidtoken(fetchImpl).catch(() => null);
+      if (mid) identity.umidtoken = mid;
+    } catch (e) {}
+    this._identity = identity;
+    this._identityAt = now;
+    if (kv) {
+      try { await kv.put(this.identityKey(), JSON.stringify(identity)); } catch (e) {}
+    }
+    return identity;
+  }
+
+  // 定时保活（fleet cron 调用）：身份过期才 mint，无 token 配置时直接跳过。
+  // workbuddy 签到是每天；指纹 10 分钟一换由 TTL 门控，cron 频率变化不影响行为。
+  async onSchedule() {
+    if (!this.account.token) return { success: false, extra: "no token configured, skip" };
+    const identity = await this.ensureIdentity(globalThis.fetch);
+    return { success: true, mintedAt: identity.mintedAt };
   }
 
   get baseUrl() {
@@ -90,19 +146,23 @@ export class QwenWebProvider {
     const turn = buildTurn({ role: "user", content: squashed }, model, {});
 
     try {
-      // 1) 建 chat 取 chat_id。指纹策略：账号存了浏览器抄录值则重放（最稳）；
-      // 否则本地生成全套（antiBot.js，T6 锁定的指纹移植），umidtoken 抓不到就降级省略。
+      // 1) 建 chat 取 chat_id。身份优先级：账号抄录重放（最稳）> cron/KV 身份 > 现场生成。
+      // 现场生成走 ensureIdentity（自动写透 KV，下一次同 isolate 指纹一致）。
       const autoFp = this.config.autoFingerprint !== false;
       let headers;
-      if (autoFp && !this.account.cookie) {
-        const mid = await fetchMidtoken(fetchImpl).catch(() => null);
-        headers = assembleRequestHeaders({
-          deviceId: this.deviceId,
-          token: this.account.token,
-          umidtoken: mid || undefined
-        }).headers;
-      } else {
+      if (this.account.cookie) {
         headers = buildQwenHeaders({ fingerprint: { ...this.account.fingerprint, cookie: this.account.cookie } });
+        if (this.account.token) headers["Authorization"] = `Bearer ${this.account.token}`;
+      } else if (autoFp) {
+        const identity = await this.ensureIdentity(fetchImpl);
+        headers = headersFromParts({
+          cookie: identity.cookie,
+          bxua: identity.bxua,
+          umidtoken: identity.umidtoken || undefined,
+          token: this.account.token
+        });
+      } else {
+        headers = buildQwenHeaders({ fingerprint: {} });
         if (this.account.token) headers["Authorization"] = `Bearer ${this.account.token}`;
       }
       const newChatRes = await fetchImpl(`${this.baseUrl}/api/v2/chats/new`, {
@@ -128,7 +188,9 @@ export class QwenWebProvider {
         { method: "POST", headers, body: JSON.stringify(body), signal: options.signal }
       );
       const ctype = upstreamRes.headers.get("content-type") || "";
-      if (!upstreamRes.ok || (!ctype.includes("text/event-stream") && !ctype.includes("application/json"))) {
+      if (!upstreamRes.ok || !ctype.includes("text/event-stream")) {
+        // 非 SSE（含 application/json 业务错误包，如 FAIL_SYS_USER_VALIDATE）一律走错误收口，
+        // 绝不把 JSON 当 SSE 空转成 200 空流（live 抓到的真实坑）。
         const errText = await upstreamRes.text().catch(() => "");
         return this.wafOrError(upstreamRes.status, errText);
       }

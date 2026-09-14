@@ -236,3 +236,59 @@ test("provider auto-fingerprint path works without stored cookies", async () => 
   const text = await res.text();
   assert.ok(text.includes("AUTO-OK"));
 });
+
+test("provider maps JSON business-error body to WAF 429 instead of empty 200", async () => {
+  const { QwenWebProvider } = await import("../src/providers/qwenweb/index.js");
+  const fetchImpl = async (url) => {
+    if (String(url).includes("/api/v2/chats/new")) {
+      return new Response('{"chat_id":"c1"}', { headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(
+      '{"ret":["FAIL_SYS_USER_VALIDATE","RGV587_ERROR::SM::busy"],"data":{"url":"https://x/_____tmd_____/punish?x5secdata=1"}}',
+      { status: 200, headers: { "Content-Type": "application/json;charset=UTF-8" } }
+    );
+  };
+  const p = new QwenWebProvider({ id: "qw", config: { token: "t" } }, {});
+  const res = await p.callChat({ model: "m", messages: [{ role: "user", content: "hi" }] }, { fetch: fetchImpl });
+  assert.equal(res.status, 429, "challenge JSON must cool down, never stream empty 200");
+});
+
+test("provider deviceId is deterministic per provider id", async () => {
+  const { QwenWebProvider } = await import("../src/providers/qwenweb/index.js");
+  const a = new QwenWebProvider({ id: "qw-same", config: {} }, {});
+  const b = new QwenWebProvider({ id: "qw-same", config: {} }, {});
+  const c = new QwenWebProvider({ id: "qw-other", config: {} }, {});
+  assert.equal(a.deviceId, b.deviceId, "stable across restarts");
+  assert.notEqual(a.deviceId, c.deviceId, "distinct per account");
+  assert.match(a.deviceId, /^[0-9a-f]{20}$/);
+});
+
+test("ensureIdentity reuses fresh KV identity and mints when stale", async () => {
+  const { QwenWebProvider } = await import("../src/providers/qwenweb/index.js");
+  const store = new Map();
+  const kv = {
+    get: async (k) => store.get(k) ?? null,
+    put: async (k, v) => store.set(k, v),
+    delete: async (k) => { store.delete(k); }
+  };
+  const env = { GATEWAY_KV: kv };
+  const p = new QwenWebProvider({ id: "qw-ident", config: { token: "t" } }, env);
+  const neverFetch = async () => { throw new Error("no network expected"); };
+  const fresh = { cookie: "c=1", bxua: "231!x", umidtoken: null, deviceId: "d", mintedAt: Date.now() };
+  store.set("QWEN_FP_qw-ident", JSON.stringify(fresh));
+  const hit = await p.ensureIdentity(neverFetch);
+  assert.equal(hit.cookie, "c=1", "fresh KV identity reused without minting");
+  store.set("QWEN_FP_qw-ident", JSON.stringify({ ...fresh, mintedAt: Date.now() - 20 * 60 * 1000 }));
+  const p2 = new QwenWebProvider({ id: "qw-ident", config: { token: "t" } }, env);
+  const minted = await p2.ensureIdentity(neverFetch);
+  assert.ok(minted.cookie.startsWith("ssxmod_itna=1-"), "stale identity reminted locally");
+  assert.ok(minted.bxua.startsWith("231!"));
+  assert.ok(JSON.parse(store.get("QWEN_FP_qw-ident")).cookie.startsWith("ssxmod_itna=1-"), "remint written through to KV");
+});
+
+test("onSchedule skips without token and mints with token", async () => {
+  const { QwenWebProvider } = await import("../src/providers/qwenweb/index.js");
+  const env = {};
+  const skip = await new QwenWebProvider({ id: "qw-naked", config: {} }, env).onSchedule();
+  assert.equal(skip.success, false);
+});

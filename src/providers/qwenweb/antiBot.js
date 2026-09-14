@@ -300,11 +300,9 @@ export function uuid4(randInt = null) {
   });
 }
 
-export function assembleRequestHeaders({ deviceId, token = "", umidtoken = "", userAgent = null, randInt, now } = {}) {
-  const ts = now?.() ?? Date.now();
-  const fp = generateFingerprint({ deviceId, randInt, now: () => ts });
-  const ck = generateCookies(fp, { randInt, now: () => ts });
+export function headersFromParts({ cookie, bxua, umidtoken = "", token = "", userAgent = null, randInt } = {}) {
   const headers = {
+
     "Content-Type": "application/json",
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.5",
@@ -315,17 +313,48 @@ export function assembleRequestHeaders({ deviceId, token = "", umidtoken = "", u
     "Sec-Fetch-Site": "same-origin",
     "Connection": "keep-alive",
     "X-Requested-With": "XMLHttpRequest",
+    "Sec-CH-UA": '"Not?A_Brand";v="24", "Chromium";v="152"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"macOS"',
     "source": "web",
     "Version": "0.2.84",
     "X-Accel-Buffering": "no",
     "User-Agent": userAgent ||
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-    "Cookie": `ssxmod_itna=${ck.ssxmod_itna};ssxmod_itna2=${ck.ssxmod_itna2}`,
+    "Cookie": cookie,
     "bx-v": "2.5.37",
     "X-Request-Id": uuid4(randInt),
-    "bx-ua": generateBxUa(fp, { timestamp: ts })
+    "bx-ua": bxua
   };
   if (umidtoken) headers["bx-umidtoken"] = umidtoken;
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  return { headers, fingerprint: fp };
+  return headers;
+}
+
+export function assembleRequestHeaders({ deviceId, token = "", umidtoken = "", userAgent = null, randInt, now } = {}) {
+  const identity = mintIdentity({ deviceId, randInt, now });
+  return {
+    headers: headersFromParts({
+      cookie: identity.cookie,
+      bxua: identity.bxua,
+      umidtoken, token, userAgent, randInt
+    }),
+    fingerprint: identity.fingerprint
+  };
+}
+
+// 身份包：一次 mint 产出请求所需的全部合成身份（cookie 对 + bx-ua + 指纹串）。
+// deviceId 由调用方稳定持有；umidtoken 需调用方另行抓取传入（100 次一换见 provider）。
+// timestamp 统一，保證 cookie/签名时间一致（真浏览器行为）。
+export function mintIdentity({ deviceId, randInt, now } = {}) {
+  const ts = now?.() ?? Date.now();
+  const fp = generateFingerprint({ deviceId, randInt, now: () => ts });
+  const ck = generateCookies(fp, { randInt, now: () => ts });
+  return {
+    deviceId: fp.split("^", 1)[0],
+    fingerprint: fp,
+    cookie: `ssxmod_itna=${ck.ssxmod_itna};ssxmod_itna2=${ck.ssxmod_itna2}`,
+    bxua: generateBxUa(fp, { timestamp: ts }),
+    mintedAt: ts
+  };
 }
