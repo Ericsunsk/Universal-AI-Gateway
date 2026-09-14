@@ -125,9 +125,28 @@ export function isWAFBody(text = "") {
 
 // qwen SSE chunk → { kind, text, responseId } 宽容解析。
 // kind: reasoning | content | usage | tool_calls | done | notice | unknown
+// 顺序是活的（T5 原型验出）：真实形态 choices/delta/phase 优先；usage 附着在数据事件上，
+// 绝不能先判 usage 吞掉正文；空 tick（content "" + typing）判 unknown 由调用方跳过。
 export function parseQwenSSEObject(obj) {
   if (!obj || typeof obj !== "object") return { kind: "unknown" };
   const responseId = obj.response_id || obj.responseId || obj.id || null;
+  if (obj["response.created"]) return { kind: "unknown", responseId: obj["response.created"].response_id || responseId };
+  // 真实形态（live 样本）：choices[0].delta.phase ∈ thinking_summary | answer，结束靠 status finished
+  const ph = obj.choices?.[0]?.delta;
+  if (ph && typeof ph === "object") {
+    if (ph.phase === "thinking_summary" || ph.phase === "thinking" || ph.phase === "think") {
+      const extra = ph.extra || {};
+      const raw = extra.summary_thought?.content ?? extra.thinking?.content ?? null;
+      const text = Array.isArray(raw) ? raw.join("") : String(raw ?? ph.content ?? "");
+      if (text) return { kind: "reasoning", text, responseId };
+      return { kind: "unknown", responseId };
+    }
+    if (ph.phase === "answer") {
+      if (ph.content) return { kind: "content", text: String(ph.content), responseId };
+      if (ph.status === "finished") return { kind: "done", responseId };
+      return { kind: "unknown", responseId };
+    }
+  }
   // qwen-reverse 文档形：{type, data} + phase
   const t = obj.type || obj.event;
   if (t === "reasoning" || obj.phase === "think") {

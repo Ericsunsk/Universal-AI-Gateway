@@ -144,3 +144,24 @@ test("truncateHistory keeps system and most recent turns", async () => {
   const short = truncateHistory("SYS", turns.slice(0, 3));
   assert.equal(short.turns.length, 3, "short history untouched");
 });
+
+test("parseQwenSSEObject replays live fixture end to end", async () => {
+  const fs = await import("node:fs");
+  const { parseQwenSSEObject } = await import("../src/providers/qwenweb/protocol.js");
+  const raw = fs.readFileSync("test/fixtures/qwen-sse-answer.txt", "utf8");
+  const kinds = [];
+  let reasoning = "", content = "";
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("data:")) continue;
+    const body = t.slice(5).trim();
+    if (!body || body === "[DONE]") continue;
+    const ev = parseQwenSSEObject(JSON.parse(body));
+    kinds.push(ev.kind);
+    if (ev.kind === "reasoning") reasoning += ev.text || "";
+    if (ev.kind === "content") content += ev.text || "";
+  }
+  assert.deepEqual(kinds, ["unknown", "reasoning", "unknown", "content", "content", "unknown", "unknown", "done"]);
+  assert.ok(reasoning.includes("one hundred forty-four"), "thinking text from summary_thought");
+  assert.ok(content.includes("144"), "answer text joined");
+});
