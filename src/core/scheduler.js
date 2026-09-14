@@ -84,8 +84,30 @@ export function computeCooldown(accountId, cooldownMap, now = Date.now()) {
   return { expiresAt, streak };
 }
 
+// WAF / 滑块验证码特征（T6 决议，T2 画像）：命中即惩罚性退避。
+// 与普通关键词不同——这些签名只出现在风控挑战页里，不会出现在正常对话内容中，
+// 所以放在最前：即使状态码是 400/404（挑战页常套正常码）也必须冷却漂移，不能当 fatal 直接返回。
+const WAF_BODY_MARKERS = [
+  "fail_sys_user_validate",
+  "rgv587_error",
+  "_____tmd_____/punish",
+  "x5secdata",
+  "aliyun_waf",
+  "nc-no-captcha",
+  "滑块",
+  "真人验证",
+  "访问验证"
+];
+
+// 纯函数：响应体是否为 WAF / 验证码挑战（非真实业务响应）。
+export function isWAFChallenge(bodyText = "") {
+  const text = String(bodyText || "").toLowerCase();
+  if (!text) return false;
+  return WAF_BODY_MARKERS.some(m => text.includes(m));
+}
+
 // 纯函数：将 HTTP 状态码 + 响应体分类为调度动作。
-//   "cooldown" —— 惩罚性退避（429 / 403 / 结构化业务错误码 / 额度耗尽 / 风控）
+//   "cooldown" —— 惩罚性退避（429 / 403 / 结构化业务错误码 / 额度耗尽 / 风控 / WAF 挑战）
 //   "retry"    —— 切换下一账号但不惩罚（5xx 服务端瞬时故障）
 //   "fatal"    —— 不可恢复的客户端错误，直接返回
 //
@@ -94,6 +116,9 @@ export function computeCooldown(accountId, cooldownMap, now = Date.now()) {
 // 这防止普通对话内容（如 "my quota is low"）误判为账号冷却。
 export function classify(status, bodyText = "", resJson = null) {
   const text = (bodyText || "").toLowerCase();
+
+  // 0. WAF 挑战优先：签名只出现在风控页，不可能误伤正常对话
+  if (isWAFChallenge(bodyText)) return "cooldown";
 
   // 1. 结构化错误码优先：从 200 JSON 响应中读取业务 code（通过 businessErrorCode）
   //    这样可以避免在 200 响应体里的自由文本里误匹配 "quota"/"rate limit" 等关键词

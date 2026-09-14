@@ -7,6 +7,7 @@ import {
   classify,
   businessErrorCode,
   isModelLevelError,
+  isWAFChallenge,
   hashString32,
   affinityStartIndex
 } from "../src/core/scheduler.js";
@@ -167,4 +168,21 @@ test("orderAccounts with affinityKey sticks to one account and drifts on cooldow
   assert.notEqual(drifted, first);
   // 无 key 时旧语义不变
   assert.deepEqual(orderAccounts(accts, empty, now, 1).map(a => a.id), ["b", "c", "a"]);
+});
+
+test("isWAFChallenge detects captcha/WAF pages only", () => {
+  assert.equal(isWAFChallenge("<html>aliyun_waf challenge"), true);
+  assert.equal(isWAFChallenge('{"ret":["FAIL_SYS_USER_VALIDATE"]}'), true);
+  assert.equal(isWAFChallenge("请拖动滑块完成拼图"), true);
+  assert.equal(isWAFChallenge("天天中彩票"), false);
+  assert.equal(isWAFChallenge("my quota is low"), false);
+  assert.equal(isWAFChallenge(""), false);
+  assert.equal(isWAFChallenge(null), false);
+});
+
+test("classify: WAF challenge cools down even on misleading status", () => {
+  assert.equal(classify(403, "<html>aliyun_waf</html>"), "cooldown");
+  assert.equal(classify(302, "redirect to _____tmd_____/punish?x5secdata=1"), "cooldown");
+  assert.equal(classify(400, "<html>aliyun_waf</html>"), "cooldown");
+  assert.equal(classify(400, "bad request"), "fatal", "plain 400 stays fatal");
 });
