@@ -519,16 +519,41 @@ export class WorkBuddyProvider {
       if (!token || !userId) return { id: account.id, name: account.name, success: false, msg: "missing credentials" };
 
       try {
-        const resp = await fetch(this.ep().checkin, {
+        let currentToken = token;
+        const doReq = (tk) => fetch(this.ep().checkin, {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${token}`,
+            "Authorization": `Bearer ${tk}`,
             "X-User-Id": userId,
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "User-Agent": this.ep().userAgent,
+            "Origin": this.ep().origin,
+            "Referer": this.ep().referer
           },
           body: "{}"
         });
+
+        let resp = await doReq(currentToken);
+        if (resp.status === 401) {
+          const refreshed = await this.refreshAccessToken(account);
+          if (refreshed) {
+            currentToken = refreshed;
+            resp = await doReq(currentToken);
+          }
+        }
+
+        const contentType = resp.headers.get("content-type") || "";
+        if (!contentType.includes("application/json")) {
+          const text = await resp.text();
+          return {
+            id: account.id,
+            name: account.name || account.id,
+            success: false,
+            error: `Upstream HTTP ${resp.status}: ${text.slice(0, 120).trim()}`
+          };
+        }
+
         const data = await resp.json();
         return {
           id: account.id,
