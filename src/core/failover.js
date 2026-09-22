@@ -20,6 +20,8 @@ import { corsHeaders } from "../http/headers.js";
 export async function runFailover(items, { attempt, onRetryable, isAbort, renderExhausted }) {
   let lastError = null;
   let lastFail = null;
+  // 最近一次失败的类型：记录到达顺序，让耗尽收尾能用“最后发生的那次”作为权威错误。
+  let lastFailureKind = null; // "error" | "fail"
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
@@ -29,18 +31,23 @@ export async function runFailover(items, { attempt, onRetryable, isAbort, render
     } catch (err) {
       if (isAbort?.(err)) throw err;
       lastError = err;
+      lastFailureKind = "error";
       continue;
     }
     if (outcome?.done) return outcome.done;
     const fail = outcome?.fail;
     if (!fail) continue;
     lastFail = fail;
+    lastFailureKind = "fail";
     const action = classify(fail.status, fail.text, fail.json ?? null);
     if (action === "fatal" && fail.force !== "retry") return fail.response;
     if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, fail);
   }
 
-  if (lastFail?.response) return lastFail.response;
+  // 耗尽收尾：以“最后发生的那次失败”为权威。
+  // 最后一项是抛错（网络/传输失败）时，不能返回更早 fail 的预渲染响应，否则真实异常被掩盖。
+  const lastIsError = lastFailureKind === "error" && !!lastError;
+  if (lastFail?.response && !lastIsError) return lastFail.response;
   if (renderExhausted) return renderExhausted({ lastError, lastFail });
   return new Response(JSON.stringify({
     error: { message: `All candidates failed. Last error: ${lastError?.message || lastFail?.text || "none"}` }

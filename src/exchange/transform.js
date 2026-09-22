@@ -2,6 +2,10 @@
 // 纯数据变换，无 I/O；响应侧与路由见 ./stream.js 与 ./dispatch.js。
 import { optimizeToolOutput } from "./sanitizer.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
+import { parseMaxContextTurns } from "../config/config.js";
+
+// 回合数归一化统一走 config.js parseMaxContextTurns（KV 存量可能绕过 getDefaultConfig，
+// 消费侧必须用同一口径兜底；此前本地 normalizeTurns 用 Number，与 parseInt 语义分叉）。
 
 // 内部协议工具：Tools 转换
 export function transformToolsToOpenAI(tools) {
@@ -100,6 +104,59 @@ function pruneMessageContents(messages, isCompact) {
   });
 }
 
+/**
+ * OpenAI 协议路径的 compact 意图检测：与 Anthropic 路径同 markers（/compact 总结请求），
+ * 只是 shape 不同（system 在 messages[0]，lastText 在末条 user）。供 dispatch OpenAI 直传路径
+ * 调用，避免此前硬编码 false 导致 compact 截断分支永不生效。
+ */
+export function isCompactOpenAIRequest(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  const textOf = (m) => {
+    if (!m) return "";
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) return m.content.map(c => typeof c === "string" ? c : (c?.text || "")).join(" ");
+    return "";
+  };
+  const first = messages[0];
+  const sysText = first?.role === "system" ? textOf(first) : "";
+  const lastText = textOf(messages[messages.length - 1]);
+  return (sysText.includes("Respond with TEXT ONLY") ||
+    sysText.includes("<analysis>") ||
+    sysText.includes("<summary>")) || (
+    lastText.includes("Respond with TEXT ONLY") ||
+    lastText.includes("Do NOT use Read, Bash, Grep") ||
+    lastText.includes("<analysis>")
+  );
+}
+
+/**
+ * OpenAI 协议路径的工具输出优化：OpenAI 方言里工具结果就是 `{role:"tool", content:<string>}`，
+ * 与 Anthropic 的 tool_result 块语义一致。此前只有 Anthropic 路径经过 optimizeToolOutput，
+ * 走 /v1/chat/completions 的客户端完全没有 Token 优化。这里补齐：max_context_turns<=0（默认全量保真）
+ * 时仍执行无损清洗（ANSI/分隔符/空行），turnAge 有界，最新回合始终全保真，不改变历史裁剪语义。
+ */
+export function pruneOpenAIMessages(messages, isCompact = false) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+  const total = messages.length;
+  let anyModified = false;
+  const result = messages.map((msg, idx) => {
+    // 仅处理 OpenAI 工具结果消息，其余（user/assistant/system）一律原样保留
+    if (!msg || typeof msg !== "object" || msg.role !== "tool") return msg;
+    if (typeof msg.content !== "string") return msg;
+
+    // turnAge 与 pruneMessageContents 完全一致：越靠前的消息年龄越大
+    const turnAge = total - idx;
+    const optimized = optimizeToolOutput(msg.content, turnAge, isCompact);
+    // 无变化时保持对象同一性，避免下游无谓重建
+    if (optimized === msg.content) return msg;
+    anyModified = true;
+    return { ...msg, content: optimized };
+  });
+
+  return anyModified ? result : messages;
+}
+
 function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
@@ -156,11 +213,13 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   );
 
   // 动态上下文保留策略：Vercel / Node 环境下默认 0（完全不剪枝，长上下文全量保真）
-  const maxTurns = config?.max_context_turns !== undefined
-    ? config.max_context_turns
-    : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TURNS !== undefined
-        ? parseInt(process.env.MAX_CONTEXT_TURNS, 10)
-        : 0);
+  const maxTurns = parseMaxContextTurns(
+    config?.max_context_turns !== undefined
+      ? config.max_context_turns
+      : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TURNS !== undefined
+          ? process.env.MAX_CONTEXT_TURNS
+          : 0)
+  );
 
   const messages = pruneAnthropicMessages(rawMessages, isCompact, maxTurns);
 

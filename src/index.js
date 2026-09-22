@@ -83,6 +83,8 @@ export default {
     }
 
     // 5. 模型列表接口 (/v1/models 或 /models)
+    // 注意：透明直通下 routes 默认为空，此处返回空列表是预期行为；
+    // 未在 routes 声明的模型依然可直接调用（走 default_provider 直通）。
     if (path.endsWith("/models")) {
       const auth = authenticateAccess(request, config);
       if (!auth.ok) return auth.response;

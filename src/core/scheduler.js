@@ -141,26 +141,43 @@ export function classify(status, bodyText = "", resJson = null) {
   if (status === 429) return "cooldown";
   if (status >= 500) return "retry";
 
-  // 3. 仅在没有结构化码时，才使用文本关键词兜底
+  // 3. 仅在没有结构化码时，才使用文本关键词兜底。
   // 关键词表是全网关唯一的“可故障转移”定义（workbuddy 账号切换与 exchange 路由切换共用），
   // 新增上游错误特征只改这里，不要在调用方另起一份内联表。
-  if (
-    status === 403 ||
+  //
+  // 关键收紧（why）：4xx（除 402/403/429 外）是客户端错误，其响应体可能原样回显用户输入/代码片段
+  // （如 400 body 里的 "unknown field 'quota'"）。若对这些状态跑通用关键词表，会把客户端错误
+  // 误判成账号级额度/风控问题，进而对无辜账号做指数退避（streak++），污染冷却状态。
+  // 因此 4xx-non-402/403/429 只认「无歧义的显式腾讯业务码」这种上游信号；通用词一律不触发。
+  // 402 与 403 同等放行：402 Payment Required 几乎恒为余额/购卡问题（部分兼容上游用 402 报
+  // insufficient credits），与 403 一样无 body 也冷却，避免真实欠费被判 fatal 失去 failover。
+  // 5xx / status 0 / unknown 仍保留完整通用词表（上游瞬时故障，文本里的 quota/overloaded 是合理信号）。
+  const isClientErrorOtherThanQuota = status >= 400 && status < 500 && status !== 402 && status !== 403 && status !== 429;
+
+  // 显式腾讯业务码：即便被包在 4xx 里也属于明确的上游额度/风控信号，任何状态都认。
+  const hasExplicitUpstreamCode =
     text.includes("11140") ||
     text.includes("11128") ||
     text.includes("14018") ||
-    text.includes("6004") ||
-    text.includes("quota") ||
-    text.includes("rate limit") ||
-    text.includes("too many requests") ||
-    text.includes("overloaded") ||
-    text.includes("service unavailable") ||
-    text.includes("endpoint is unavailable") ||
-    text.includes("freeusagelimiterror") ||
-    text.includes("频率限制") ||
-    text.includes("欠费") ||
-    text.includes("余额不足") ||
-    text.includes("安全审核")
+    text.includes("6004");
+
+  if (
+    status === 403 ||
+    status === 402 ||
+    hasExplicitUpstreamCode ||
+    (!isClientErrorOtherThanQuota && (
+      text.includes("quota") ||
+      text.includes("rate limit") ||
+      text.includes("too many requests") ||
+      text.includes("overloaded") ||
+      text.includes("service unavailable") ||
+      text.includes("endpoint is unavailable") ||
+      text.includes("freeusagelimiterror") ||
+      text.includes("频率限制") ||
+      text.includes("欠费") ||
+      text.includes("余额不足") ||
+      text.includes("安全审核")
+    ))
   ) {
     return "cooldown";
   }

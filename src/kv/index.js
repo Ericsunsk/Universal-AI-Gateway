@@ -2,6 +2,7 @@
 //
 // Interface（调用方与测试穿越的是同一道 seam）：
 //   kv.get(key, type?) -> value | null  —— miss / 过期 / 远端失败一律回 null，永不抛错
+//   kv.getWithStatus(key, type?) -> { value, ok } —— 区分“键不存在”(ok=true) 与“远端读失败”(ok=false)
 //   kv.put(key, value, opts?) -> void    —— opts.expirationTtl 秒级 TTL；永不抛错
 //   kv.delete(key) -> void               —— 永不抛错
 //   - key 恒为 string；value 为 string 或可 JSON 序列化对象（写时统一转 string）。
@@ -55,6 +56,11 @@ export function createMemoryKv() {
       }
       return isJsonType(type) ? parseJsonSafe(entry.value) : entry.value;
     },
+    // 内存 adapter 永不发生“远端失败”，故 ok 恒为 true（与契约对齐）。
+    async getWithStatus(key, type) {
+      const value = await this.get(key, type);
+      return { value: value === undefined ? null : value, ok: true };
+    },
     async put(key, value, opts) {
       const valStr = toStoredString(value);
       if (!store.has(key) && store.size >= MEMORY_KV_MAX_ENTRIES) {
@@ -99,23 +105,46 @@ export function createUpstashKv({ url, token, timeoutMs = DEFAULT_REST_TIMEOUT_M
     body: JSON.stringify(command),
     signal: timeoutSignal(timeoutMs),
   });
+  // 内部：真正执行一次读，返回 { value, ok }。ok=false 表示“远端读失败且内存未命中”，
+  // 调用方据此区分“键不存在”与“读失败”。
+  async function readWithStatus(key) {
+    let val;
+    let remoteOk;
+    try {
+      const resp = await restCall(["GET", key]);
+      if (resp.ok) {
+        const data = await resp.json();
+        remoteOk = true;
+        val = data.result ?? null;
+      } else {
+        remoteOk = false;
+      }
+    } catch (e) {
+      remoteOk = false;
+      console.error(`[Upstash KV] GET ${key} failed:`, e?.message || e);
+    }
+    // 远端未命中/失败时读内存兜底（同 isolate 写后即读一致）
+    if (val === null || val === undefined) {
+      const memVal = await memory.get(key);
+      if (memVal !== null && memVal !== undefined) return { value: memVal, ok: true };
+      // 内存也没有：远端失败 → ok=false；远端成功但确实无此键 → ok=true
+      return { value: null, ok: remoteOk === true };
+    }
+    return { value: val, ok: true };
+  }
+
   return {
     async get(key, type) {
-      let val;
-      try {
-        // 标准 POST 命令数组，彻底规避 key 中的特殊字符与 URL 编码截断问题
-        const resp = await restCall(["GET", key]);
-        if (!resp.ok) val = await memory.get(key);
-        else {
-          const data = await resp.json();
-          val = data.result ?? (await memory.get(key));
-        }
-      } catch (e) {
-        console.error(`[Upstash KV] GET ${key} failed:`, e?.message || e);
-        val = await memory.get(key);
-      }
-      if (!val) return null;
-      return isJsonType(type) ? parseJsonSafe(val) : val;
+      const { value } = await readWithStatus(key);
+      if (value === null || value === undefined) return null;
+      return isJsonType(type) ? parseJsonSafe(value) : value;
+    },
+    // 显式读状态：{ value, ok }。ok=false 仅当“远端读失败且内存兜底未命中”。
+    // 供对“miss 与故障”敏感的场景（配置、冷却记录）区分二者，避免把瞬时抖动当删除。
+    async getWithStatus(key, type) {
+      const { value, ok } = await readWithStatus(key);
+      if (value === null || value === undefined) return { value: null, ok };
+      return { value: isJsonType(type) ? parseJsonSafe(value) : value, ok };
     },
     async put(key, value, opts) {
       // 内存先行：同 isolate 写后即读一致，不受远端延迟影响

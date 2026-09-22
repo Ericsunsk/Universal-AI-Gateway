@@ -5,7 +5,7 @@ import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { isModelLevelError } from "../core/scheduler.js";
 import { hasCallChat, hasCallMessages, wantsStreamedChat } from "../core/contract.js";
 import { runFailover } from "../core/failover.js";
-import { transformAnthropicToOpenAI } from "./transform.js";
+import { transformAnthropicToOpenAI, pruneOpenAIMessages, isCompactOpenAIRequest } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
 
 /**
@@ -107,7 +107,7 @@ export async function dispatchExchange({
           try {
             openaiPayload = isAnthropic
               ? transformAnthropicToOpenAI(body, candidate.model, config, reasoningIntent)
-              : { ...body, model: candidate.model };
+              : { ...body, model: candidate.model, messages: pruneOpenAIMessages(body.messages, isCompactOpenAIRequest(body.messages)) };
           } catch (err) {
             // 参数校验失败（400 / 404）：直接返回，不进行故障转移
             if (err.status === 400 || err.status === 404) {
@@ -173,6 +173,11 @@ export async function dispatchExchange({
         try { parsedErrJson = JSON.parse(errText); } catch (e) {}
         // 模型身份级错误（上游说“此模型不可用”）且后面还有不同模型的候选：
         // 对当前模型判 fatal 没有意义，强制切换，让备用模型接管。
+        // 可达性说明（审计 H3）：仅当上游返回 400/404 且正文命中 isModelLevelError 时生效。
+        // 真实 WorkBuddy 上游把模型不可用包成 200 业务码（经 callChat 的 200-业务错误路径
+        // 转成 fail），故此处对 workbuddy 几乎不触发；它主要服务 OpenAI/Anthropic 兼容上游
+        // （会真实返回 404 model_not_found）。保留是因为语义正确且对兼容上游生效，
+        // 若未来统一错误形态可移除此分支。
         const laterModelsDiffer = (status === 400 || status === 404) &&
           isModelLevelError(errText) &&
           candidates.slice(candidateIndex + 1).some(c => c.model !== candidate.model);

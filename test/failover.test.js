@@ -68,6 +68,31 @@ test("runFailover calls renderExhausted when no failure was recorded", async () 
   assert.equal(await res.text(), "exhausted: boom");
 });
 
+// ---- H1 回归：最后一项抛错时不得返回更早 fail 的预渲染响应 ----
+test("runFailover surfaces last transport error over an earlier fail", async () => {
+  const res = await runFailover(["a", "b"], {
+    attempt: async (item) => {
+      if (item === "a") return { fail: fail(429, "earlier-limited") };
+      throw new Error("socket hang up on b");
+    }
+  });
+  assert.equal(res.status, 502);
+  const body = await res.text();
+  assert.match(body, /socket hang up on b/, "the last (real) error must win");
+  assert.doesNotMatch(body, /earlier-limited/, "stale earlier failure must not be reported");
+});
+
+test("runFailover still returns last fail response when last failure is a fail", async () => {
+  const res = await runFailover(["a", "b"], {
+    attempt: async (item) => {
+      if (item === "a") throw new Error("socket hang up on a");
+      return { fail: fail(429, "later-limited") };
+    }
+  });
+  assert.equal(res.status, 429);
+  assert.equal(await res.text(), "later-limited");
+});
+
 test("runFailover rethrows when isAbort matches", async () => {
   const abort = new DOMException("aborted", "AbortError");
   await assert.rejects(

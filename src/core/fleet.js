@@ -9,6 +9,19 @@ let cachedFleetVersion = undefined;
 const balanceCache = new Map();
 const BALANCE_TTL_MS = 60 * 1000;
 const BALANCE_ERROR_TTL_MS = 10 * 1000;
+// 模块单例不随 fleet 重建清空，须自带上界防止换血/脏 providerId 无限膨胀；
+// 采用 Map 插入序做 LRU（与 src/kv/index.js createMemoryKv 同款），100 远超实际 provider 数。
+const BALANCE_CACHE_MAX_ENTRIES = 100;
+
+function cacheBalance(providerId, entry) {
+  if (!balanceCache.has(providerId) && balanceCache.size >= BALANCE_CACHE_MAX_ENTRIES) {
+    // Map 按插入有序，删最旧一条
+    balanceCache.delete(balanceCache.keys().next().value);
+  }
+  // 重复写入移到队尾，保持 LRU 语义
+  balanceCache.delete(providerId);
+  balanceCache.set(providerId, entry);
+}
 
 export class ProviderFleet {
   constructor(config, env) {
@@ -52,6 +65,9 @@ export class ProviderFleet {
     const now = Date.now();
     const hit = balanceCache.get(providerId);
     if (hit && now - hit.at < (hit.value.success ? BALANCE_TTL_MS : BALANCE_ERROR_TTL_MS)) {
+      // 命中刷新 LRU 位序：否则热 key 因插入早、会被新 ID 洪水逐出（真 LRU 语义）
+      balanceCache.delete(providerId);
+      balanceCache.set(providerId, hit);
       return hit.value;
     }
     const provider = this.getProvider(providerId);
@@ -68,11 +84,11 @@ export class ProviderFleet {
         accounts_count: res.accounts_count || 1,
         accounts: res.accounts || []
       };
-      balanceCache.set(providerId, { at: now, value });
+      cacheBalance(providerId, { at: now, value });
       return value;
     } catch (e) {
       const value = { success: false, balance: 0, total: 0, unit: "积分", error: e.message };
-      balanceCache.set(providerId, { at: now, value });
+      cacheBalance(providerId, { at: now, value });
       return value;
     }
   }

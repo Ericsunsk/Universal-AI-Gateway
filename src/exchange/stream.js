@@ -200,6 +200,10 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     let finalStopReason = "end_turn";
     // 本次响应见到的最大缓存命中 token 数（上游 usage 逐 chunk 到达，取最大记一次）
     let maxCachedTokens = 0;
+    // 真实输出 token 数：优先采信上游 usage.completion_tokens（终局 chunk 常带），
+    // 上游从不报 usage 时回退字符数/4 估算，取代此前的硬编码 60。
+    let reportedOutputTokens = 0;
+    let emittedChars = 0;
 
     const closeCurrentBlock = async () => {
       if (currentBlockType !== null && currentBlockIndex >= 0) {
@@ -232,6 +236,11 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             const cached = extractCachedTokens(parsed);
             if (cached > maxCachedTokens) maxCachedTokens = cached;
 
+            // 与非流式路径同源采信上游 usage（逐 chunk 覆盖，终局值胜出）；
+            // 缺失 usage 的 chunk 保留原值，最终由字符数估算兜底。
+            const chunkUsage = extractUsage(parsed, { input: 0, output: reportedOutputTokens });
+            reportedOutputTokens = chunkUsage.output;
+
             // 全部分类走 reducer seam：同一 chunk 的 thinking/text/tool/finish 按序发射，
             // 不再各写一遍字段读取（error 独占，与旧语义一致）。
             const emissions = reduceOpenAIChunkAll(parsed);
@@ -249,8 +258,11 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
                   content_block: { type: "text", text: "" }
                 })}\n\n`));
               }
+              // notice 文本同样计入 emittedChars，与正文增量同口径，避免 output_tokens 偏小
+              const noticeText = `\n[Upstream Notice: ${errMsg}]\n`;
+              emittedChars += noticeText.length;
               await writer.write(textEncoder.encode(
-                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(`\n[Upstream Notice: ${errMsg}]\n`)}}}\n\n`
+                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(noticeText)}}}\n\n`
               ));
               continue;
             }
@@ -262,6 +274,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             // 思维链
             if (emission.kind === "thinking") {
               const reasoningChunk = emission.text;
+              emittedChars += reasoningChunk.length;
               if (currentBlockType !== "thinking") {
                 await closeCurrentBlock();
                 currentBlockIndex++;
@@ -280,6 +293,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             // 正文内容
             else if (emission.kind === "text") {
               const textChunk = emission.text;
+              emittedChars += textChunk.length;
               if (currentBlockType !== "text") {
                 await closeCurrentBlock();
                 currentBlockIndex++;
@@ -343,6 +357,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
                        parsed.msg ||
                        (parsed.code ? `Upstream error ${parsed.code}` : buffer.trim());
           if (text) {
+            emittedChars += text.length;
             currentBlockIndex = 0;
             currentBlockType = "text";
             await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
@@ -363,8 +378,10 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         currentBlockIndex = 0;
         await writer.write(textEncoder.encode(`event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`));
         if (stalled) {
+          const stallText = `\n[Gateway Warning: Upstream stalled, no data for ${Math.round(stallMs / 1000)}s]\n`;
+          emittedChars += stallText.length;
           await writer.write(textEncoder.encode(
-            `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(`\n[Gateway Warning: Upstream stalled, no data for ${Math.round(stallMs / 1000)}s]\n`)}}}\n\n`
+            `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(stallText)}}}\n\n`
           ));
         }
         await writer.write(textEncoder.encode(`event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`));
@@ -372,10 +389,13 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         await closeCurrentBlock();
       }
 
+      // message_delta.usage.output_tokens 是 Anthropic 线协议字段，客户端会读；
+      // 取上游 usage 与字符估算的较大值（与非流式 formatOpenAIToAnthropicJson 口径一致）。
+      const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(emittedChars / 4));
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
         delta: { stop_reason: finalStopReason, stop_sequence: null },
-        usage: { output_tokens: 60 }
+        usage: { output_tokens: finalOutputTokens }
       })}\n\n`));
 
       await writer.write(EVENT_MSG_STOP_BYTES);
@@ -393,11 +413,19 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             content_block: { type: "text", text: "" }
           })}\n\n`));
         }
+        const interruptText = `\n[Gateway Warning: Upstream stream interrupted (${err.message || "EOF"})]\n`;
+        emittedChars += interruptText.length;
         await writer.write(textEncoder.encode(
-          `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(`\n[Gateway Warning: Upstream stream interrupted (${err.message || "EOF"})]\n`)}}}\n\n`
+          `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(interruptText)}}}\n\n`
         ));
         await closeCurrentBlock();
-        await writer.write(textEncoder.encode(`event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":10}}\n\n`));
+        // 错误路径同样发射真实计数（含警告文本），与正常闭环保持一致，避免硬编码漂移。
+        const errOutputTokens = Math.max(reportedOutputTokens, Math.ceil(emittedChars / 4));
+        await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: errOutputTokens }
+        })}\n\n`));
         await writer.write(EVENT_MSG_STOP_BYTES);
       } catch (e) {}
     } finally {

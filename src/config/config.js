@@ -4,6 +4,25 @@ let cachedConfig = null;
 let cachedConfigTimestamp = 0;
 const CONFIG_CACHE_TTL_MS = 60 * 1000; // 60 秒内存热缓存，彻底消除每请求访问 KV 的网络往返开销
 
+// 解析 MAX_CONTEXT_TURNS：非负整数才有效，其余（NaN、负数、空、尾随杂质、布尔）一律 0（不剪枝）。
+// 全网关唯一归一化口径（transform.js 复用此处，禁止另起 normalizeTurns 分叉）。
+export function parseMaxContextTurns(raw) {
+  if (raw === undefined || raw === null) return 0;
+  // number 直接取；string trim 后 Number（"40abc"→NaN→0，严格拒绝尾随杂质）；
+  // 其余类型（boolean/object/array）一律非法→0，避免 Number(true)===1 这类意外启用剪枝。
+  let n;
+  if (typeof raw === "number") {
+    n = raw;
+  } else if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t === "") return 0;
+    n = Number(t);
+  } else {
+    return 0;
+  }
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
 export function requireSecret(env, name) {
   const value = env?.[name] || (typeof process !== "undefined" ? process.env?.[name] : undefined);
   if (!value || typeof value !== "string" || !value.trim()) {
@@ -27,7 +46,9 @@ export function getDefaultConfig(env) {
     config_version: 1,
     master_key: masterKey,
     cron_secret: env.CRON_SECRET || "",
-    max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : 0,
+    // NaN 护栏：非法值（如 "abc"）回退 0（不剪枝）。否则 NaN 会绕过 `<= 0` 的
+    // “全量保真”分支、让 maxWindow/cutIdx 变成 NaN，静默裁掉整段历史。
+    max_context_turns: parseMaxContextTurns(env.MAX_CONTEXT_TURNS),
     usage_provider_id: "workbuddy",
     // 纯透明直通管道：未声明的模型直接透传默认 provider（workbuddy），零硬编码模型映射
     default_provider: "workbuddy",
@@ -122,9 +143,19 @@ export async function getConfig(env, forceRefresh = false) {
 async function refreshConfig(env) {
   const now = Date.now();
   const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+  // 区分“键不存在”与“远端读失败”的读状态；老 adapter / 测试无 getWithStatus 时降级为 get，
+  // 此时 readOk 保持 true（无法感知失败，行为与旧代码一致）。
+  let raw = null;
+  let readOk = true;
   if (kv) {
     try {
-      const raw = await kv.get("GATEWAY_CONFIG");
+      if (typeof kv.getWithStatus === "function") {
+        const r = await kv.getWithStatus("GATEWAY_CONFIG");
+        raw = r?.value ?? null;
+        readOk = r?.ok !== false;
+      } else {
+        raw = await kv.get("GATEWAY_CONFIG");
+      }
       if (raw) {
         const parsed = JSON.parse(raw);
         const defaults = getDefaultConfig(env);
@@ -147,11 +178,26 @@ async function refreshConfig(env) {
         return parsed;
       }
     } catch (e) {
+      // 读抛错（而非显式返回 ok=false）也必须视为“读失败”，否则 readOk 仍为 true，
+      // 会落到下方初始配置写入分支，用默认模板 clobber 远端真实存量配置。
+      readOk = false;
       console.error("Failed to read GATEWAY_CONFIG from KV:", e);
+    }
+
+    // 读失败（显式 ok=false，或上面 catch 里的抛错）：绝不能当作“无配置”，
+    // 否则会用默认模板覆盖远端真实存量配置（写放大即数据丢失）。此处只读不写。
+    if (!readOk) {
+      console.error("[Config] GATEWAY_CONFIG remote read failed; refusing to regenerate/write initial config");
+      // 有真实缓存则优先复用（陈旧但真实 > 默认值覆盖远端）；否则退默认但绝不写 KV。
+      const fallback = cachedConfig || getDefaultConfig(env);
+      // 更新时间戳，避免每个请求都重试打远端；缓存 TTL 到期后仍会重试以自愈。
+      cachedConfig = fallback;
+      cachedConfigTimestamp = now;
+      return fallback;
     }
   }
 
-  // 初始配置：从默认模板生成并初次写入 KV
+  // 初始配置：从默认模板生成并初次写入 KV（仅“确认真实首启”即 raw 缺失且读成功时）
   const initialConfig = getDefaultConfig(env);
   if (kv) {
     try {

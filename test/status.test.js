@@ -102,3 +102,37 @@ test("fleet.getBalance caches upstream balance briefly", async () => {
   assert.equal(second.balance, 7);
   assert.equal(first, second);
 });
+
+test("balanceCache keeps previous providers cached and evicts only the oldest (M5)", async () => {
+  const { ProviderFleet } = await import("../src/core/fleet.js");
+  const fleet = new ProviderFleet({ providers: [] }, {});
+  const BALANCE_CACHE_MAX_ENTRIES = 100;
+
+  // 每个 providerId 有独立上游计数，用于观测缓存命中 vs 重算
+  const upstreamCalls = new Map();
+  const balanceFor = (id, balance) => async () => {
+    upstreamCalls.set(id, (upstreamCalls.get(id) || 0) + 1);
+    return { success: true, balance, total: balance };
+  };
+  fleet.getProvider = (id) => ({ id, getBalance: balanceFor(id, 42) });
+
+  // 命中语义不变：第二次调用不再打上游
+  const first = await fleet.getBalance("keepme");
+  const second = await fleet.getBalance("keepme");
+  assert.equal(upstreamCalls.get("keepme"), 1, "cached value still returned");
+  assert.equal(first, second);
+
+  // 灌满上界之外的真实写路径键（每个 provider 都有 getBalance → 必定落缓存），逐出最旧的 keepme
+  for (let i = 0; i < BALANCE_CACHE_MAX_ENTRIES + 60; i++) {
+    await fleet.getBalance(`probe-${i}`);
+  }
+  assert.equal(upstreamCalls.get("keepme"), 1, "keepme still cached until overwritten");
+
+  // 重新查询 keepme：应已被逐出 → 再次命中上游（计数变 2）
+  await fleet.getBalance("keepme");
+  assert.equal(upstreamCalls.get("keepme"), 2, "oldest entry must have been evicted by the cap");
+
+  // 最近的键仍缓存：probe-159 第一次刚写，第二次不再重算 → 计数停在 1
+  await fleet.getBalance("probe-159");
+  assert.equal(upstreamCalls.get("probe-159"), 1, "recent entry still served from cache");
+});

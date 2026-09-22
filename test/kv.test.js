@@ -101,3 +101,44 @@ test("createKvFromEnv selects memory without credentials, composite with them", 
   assert.equal(await comp.get("k"), "remote");
   assert.deepEqual(commands[0], ["GET", "k"]);
 });
+
+// ---- H2：getWithStatus 区分“键不存在”与“远端读失败” ----
+test("getWithStatus: remote miss vs remote failure are distinguishable", async () => {
+  // 远端成功但无此键 → ok=true, value=null（真 miss）
+  scriptUpstash({ get: {} });
+  const kv = createUpstashKv({ url: "https://x", token: "t", fallback: createMemoryKv() });
+  assert.deepEqual(await kv.getWithStatus("absent"), { value: null, ok: true });
+
+  // 远端抛错且内存无兜底 → ok=false（读失败，不等于删除）
+  globalThis.fetch = async () => { throw new Error("network dead"); };
+  const kv2 = createUpstashKv({ url: "https://x", token: "t", fallback: createMemoryKv() });
+  assert.deepEqual(await kv2.getWithStatus("absent"), { value: null, ok: false });
+  // 传统 get 行为保持不变（兼容）
+  assert.equal(await kv2.get("absent"), null);
+});
+
+test("getWithStatus: memory fallback hit is ok=true even when remote failed", async () => {
+  globalThis.fetch = async () => { throw new Error("network dead"); };
+  const mem = createMemoryKv();
+  await mem.put("cfg", "v1");
+  const kv = createUpstashKv({ url: "https://x", token: "t", fallback: mem });
+  assert.deepEqual(await kv.getWithStatus("cfg"), { value: "v1", ok: true });
+});
+
+test("memory adapter exposes getWithStatus with ok=true", async () => {
+  const kv = createMemoryKv();
+  await kv.put("j", { a: 1 });
+  assert.deepEqual(await kv.getWithStatus("j", "json"), { value: { a: 1 }, ok: true });
+  assert.deepEqual(await kv.getWithStatus("missing"), { value: null, ok: true });
+});
+
+test("empty string is a value, not a miss (null only on miss/expire/failure)", async () => {
+  const kv = createMemoryKv();
+  await kv.put("e", "");
+  assert.equal(await kv.get("e"), "", "stored empty must roundtrip, not coerce to null");
+  assert.deepEqual(await kv.getWithStatus("e"), { value: "", ok: true });
+  scriptUpstash({ get: { e: "" } });
+  const kv2 = createUpstashKv({ url: "https://x", token: "t", fallback: createMemoryKv() });
+  assert.equal(await kv2.get("e"), "");
+  assert.deepEqual(await kv2.getWithStatus("e"), { value: "", ok: true });
+});

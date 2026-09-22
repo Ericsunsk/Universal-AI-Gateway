@@ -100,6 +100,29 @@ test("callChat cools the punished account and fails over to the next", async () 
   assert.equal(accountCooldownRecord.has("t7b"), false, "healthy account must not cool");
 });
 
+test("network-error retry success keeps X-Gateway-Account attribution header (L6)", async () => {
+  // 第一次 chat 抛网络错（触发 catch 内的抖动重试），第二次成功 → 返回必须走 accountResponse。
+  // 注意：本用例经 callChat 会推进模块级 roundRobinCounter，故置于其余 callChat 用例之后，
+  // 避免扰动更早用例的账号排序（测试文件本就依赖定义顺序）。
+  let calls = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/auth/token/refresh")) throw new Error("unexpected refresh call");
+    calls++;
+    if (calls === 1) throw new Error("socket hang up");
+    return new Response("recovered", { status: 200 });
+  };
+  const account = acc("t6b");
+  const p = new WorkBuddyProvider(
+    { id: "wb-t6b", config: { accounts: [account] } },
+    { RETRY_BASE_MS: "0" }
+  );
+  const res = await p.callChat({ messages: [] }, {});
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("X-Gateway-Account"), "t6b", "retry path must stamp attribution");
+  assert.equal(res.headers.get("X-Gateway-Account-Id"), "t6b");
+  assert.equal(await res.text(), "recovered");
+});
+
 test("retryDelayMs honors env override with safe fallback (Q6)", () => {
   assert.equal(DEFAULT_RETRY_DELAY_MS, 600);
   assert.equal(retryDelayMs({}), 600);

@@ -5,7 +5,8 @@ import {
   normalizeOpenAIMessages,
   transformToolsToOpenAI,
   finishReasonToAnthropic,
-  dispatchExchange
+  dispatchExchange,
+  pruneOpenAIMessages
 } from "../src/exchange/exchange.js";
 import { parseReasoningIntent } from "../src/exchange/reasoning.js";
 
@@ -88,6 +89,29 @@ test("transformAnthropicToOpenAI maps roles and content blocks", () => {
   assert.equal(payload.messages[1].content, "hi");
   assert.equal(payload.messages[2].role, "assistant");
   assert.equal(payload.messages[2].content, "hello");
+});
+
+// ---- H5 回归：非法 max_context_turns 不得静默裁掉历史 ----
+test("transformAnthropicToOpenAI keeps full history on invalid max_context_turns", () => {
+  const many = [];
+  for (let i = 0; i < 80; i++) {
+    many.push({ role: i % 2 === 0 ? "user" : "assistant", content: [{ type: "text", text: `m${i}` }] });
+  }
+  // config 携带 NaN（模拟 KV 存量配置绕过 getDefaultConfig 的情形）
+  const payload = transformAnthropicToOpenAI({ messages: many }, "m", { max_context_turns: NaN });
+  // 80 轮全部保留 + 无 bridge 占位提示
+  assert.equal(payload.messages.length, 80, "NaN must not prune history");
+  assert.equal(payload.messages.some(m => typeof m.content === "string" && m.content.includes("omitted")), false);
+});
+
+test("transformAnthropicToOpenAI still prunes when max_context_turns is a valid number", () => {
+  const many = [];
+  for (let i = 0; i < 80; i++) {
+    many.push({ role: i % 2 === 0 ? "user" : "assistant", content: [{ type: "text", text: `m${i}` }] });
+  }
+  const payload = transformAnthropicToOpenAI({ messages: many }, "m", { max_context_turns: 10 });
+  assert.ok(payload.messages.length < 80, "valid limit must prune");
+  assert.ok(payload.messages.some(m => typeof m.content === "string" && m.content.includes("omitted")), "bridge notice present");
 });
 
 test("transformAnthropicToOpenAI defaults model and preserves stream:false", () => {
@@ -557,6 +581,32 @@ test("streamOpenAIToAnthropic emits both thinking and text from one mixed chunk"
   assert.deepEqual(starts, ["thinking", "text"]);
 });
 
+test("streamOpenAIToAnthropic reports real output_tokens from upstream usage (L1)", async () => {
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "Hello" } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: { content: " world" } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 7 } }),
+    "data: [DONE]"
+  ]);
+  const events = await readAnthropicEvents(streamOpenAIToAnthropic(upstream, "m"));
+  const msgDelta = events.find(e => e.event === "message_delta");
+  assert.equal(msgDelta.data.usage.output_tokens, 7, "must use upstream completion_tokens, not hardcoded 60");
+  assert.notEqual(msgDelta.data.usage.output_tokens, 60);
+});
+
+test("streamOpenAIToAnthropic estimates output_tokens when upstream omits usage (L1)", async () => {
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "12345678" } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "abcdefgh" } }] }),
+    "data: [DONE]"
+  ]);
+  const events = await readAnthropicEvents(streamOpenAIToAnthropic(upstream, "m"));
+  const msgDelta = events.find(e => e.event === "message_delta");
+  // 16 字符 / 4 = 4，与 formatOpenAIToAnthropicJson 的估算口径一致
+  assert.equal(msgDelta.data.usage.output_tokens, 4, "char-based estimate must replace the 60 placeholder");
+  assert.notEqual(msgDelta.data.usage.output_tokens, 60);
+});
+
 test("formatOpenAIToAnthropicJson accumulates SSE tool_calls into tool_use blocks", async () => {
   const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
   const upstream = openAISseResponse([
@@ -616,6 +666,52 @@ test("dispatchExchange passes through unconfigured model to default provider wit
   assert.equal(requestedPayload.model, "future-deepseek-r1-2026", "unconfigured model should passthrough directly to upstream");
 });
 
+// M3 接线集成回归：OpenAI 协议路径下，role:"tool" 的噪声输出必须经
+// pruneOpenAIMessages 净化后才能到达上游（此前该路径完全不做优化）。
+// 若 dispatch.js 的接线被移除，requestedPayload 将保留原始 ANSI/空行，本用例失败。
+test("dispatchExchange OpenAI path prunes noisy role:tool output before upstream", async () => {
+  let requestedPayload = null;
+  const mockFleet = {
+    getAllActive: () => [{ id: "mock_oai" }],
+    getProvider: (id) => ({
+      id,
+      callChat: async (payload) => {
+        requestedPayload = payload;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    })
+  };
+
+  const noisy = "\u001b[31m==========\u001b[0m\n\n\n\ndone";
+  const res = await dispatchExchange({
+    request: new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    }),
+    body: {
+      model: "m",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "tool", tool_call_id: "c1", content: noisy }
+      ]
+    },
+    model: "m",
+    config: { routes: {} },
+    fleet: mockFleet,
+    protocol: "openai"
+  });
+
+  assert.equal(res.status, 200);
+  const sentTool = requestedPayload.messages.find(m => m.role === "tool");
+  assert.ok(sentTool, "tool message reaches upstream");
+  assert.equal(sentTool.content.includes("\u001b"), false, "ANSI escapes stripped on OpenAI path");
+  assert.equal(sentTool.content.includes("\n\n\n"), false, "excess newlines collapsed on OpenAI path");
+  assert.equal(sentTool.content, "==========\n\ndone");
+});
+
 test("dispatchExchange honors wildcard route routes['*'] when configured", async () => {
   let requestedPayload = null;
   const mockFleet = {
@@ -652,3 +748,65 @@ test("dispatchExchange honors wildcard route routes['*'] when configured", async
   assert.equal(requestedPayload.model, "any-custom-model");
 });
 
+
+// ---- M3: OpenAI 协议路径工具输出优化（此前仅 Anthropic 路径生效）----
+test("pruneOpenAIMessages cleans ANSI/separators on role:tool output", () => {
+  const noisy = "\u001b[32mtest\u001b[0m\n" + "=".repeat(20) + "\n" + "a".repeat(30) + "\n\n\n\nb";
+  const messages = [
+    { role: "user", content: "run tests" },
+    { role: "assistant", content: null, tool_calls: [{ id: "1", type: "function", function: { name: "x", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "1", content: noisy }
+  ];
+  const out = pruneOpenAIMessages(messages, false);
+  const toolMsg = out.find(m => m.role === "tool");
+  assert.ok(!toolMsg.content.includes("\u001b"), "ANSI should be stripped");
+  assert.ok(!toolMsg.content.includes("=".repeat(6)), "separators collapsed");
+  assert.ok(!toolMsg.content.includes("\n\n\n"), "excess newlines collapsed");
+});
+
+test("pruneOpenAIMessages preserves object identity when nothing changes", () => {
+  const messages = [
+    { role: "user", content: "hi" },
+    { role: "tool", tool_call_id: "1", content: "clean output" }
+  ];
+  const out = pruneOpenAIMessages(messages, false);
+  assert.equal(out, messages, "returns same array reference");
+  assert.equal(out[1], messages[1], "same message object reference");
+});
+
+test("pruneOpenAIMessages returns non-array input unchanged", () => {
+  assert.equal(pruneOpenAIMessages(null), null);
+  assert.equal(pruneOpenAIMessages(undefined), undefined);
+  assert.equal(pruneOpenAIMessages("x"), "x");
+  const notArray = { role: "tool", content: "x" };
+  assert.equal(pruneOpenAIMessages(notArray), notArray);
+});
+
+test("pruneOpenAIMessages reduces old huge tool output but keeps fresh one intact", () => {
+  const huge = "L".repeat(5000);
+  // 首轮（turnAge 大）与末轮（turnAge 小）各放一个巨大的 tool 结果
+  const messages = [
+    { role: "tool", tool_call_id: "old", content: huge },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "user", content: "u" },
+    { role: "tool", tool_call_id: "fresh", content: huge }
+  ];
+  const out = pruneOpenAIMessages(messages, false);
+  const oldMsg = out.find(m => m.tool_call_id === "old");
+  const freshMsg = out.find(m => m.tool_call_id === "fresh");
+  assert.ok(oldMsg.content.length < huge.length, "old huge output annealed");
+  assert.ok(oldMsg.content.includes("collapsed"), "anneal notice present");
+  assert.equal(freshMsg.content, huge, "fresh output stays full-fidelity");
+});

@@ -113,6 +113,31 @@ test("classify: other errors → fatal", () => {
   assert.equal(classify(200, "some normal message"), "fatal");
 });
 
+test("classify: generic keyword in a 4xx-non-402/403/429 body does NOT punish the account", () => {
+  // 4xx 是客户端错误，body 可能回显用户输入/代码片段；通用词不得触发账号退避（M4 回归）
+  // 例外：402 与 403 同等放行（Payment Required 恒为余额问题，无 body 也冷却）
+  assert.equal(classify(400, '{"message":"unknown field quota"}'), "fatal");
+  assert.equal(classify(400, "quota exceeded"), "fatal");
+  assert.equal(classify(422, "overloaded"), "fatal");
+  assert.equal(classify(401, "rate limit"), "fatal");
+  assert.equal(classify(402, "anything without quota words"), "cooldown", "402 always cools like 403");
+  assert.equal(classify(402, "余额不足"), "cooldown", "402 quota cools");
+});
+
+test("classify: explicit Tencent code still cools down even on a 4xx", () => {
+  // 显式腾讯业务码无歧义，即便被包在 400 里仍是上游额度/风控信号
+  assert.equal(classify(400, "bad request: 11128"), "cooldown");
+  assert.equal(classify(400, "error 11140"), "cooldown");
+  assert.equal(classify(400, "error 14018"), "cooldown");
+  assert.equal(classify(400, "error 6004"), "cooldown");
+});
+
+test("classify: 5xx semantics unchanged by the 4xx keyword narrowing", () => {
+  assert.equal(classify(429, "anything"), "cooldown");
+  assert.equal(classify(503, "service unavailable"), "retry");
+  assert.equal(classify(500, "insufficient quota"), "retry");
+});
+
 test("isModelLevelError detects model-identity errors only", () => {
   assert.equal(isModelLevelError("Model is unavailable"), true);
   assert.equal(isModelLevelError("model_not_found"), true);

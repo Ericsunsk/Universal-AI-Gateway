@@ -415,7 +415,12 @@ export class WorkBuddyProvider {
         await new Promise(r => setTimeout(r, retryDelayMs(this.env)));
         if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
         const retryResp = await makeRequest(token);
-        if (retryResp.ok) return { done: retryResp };
+        // 走 accountResponse seam：网络重试成功分支此前直返原始 Response，
+        // 会漏掉 X-Gateway-Account 归因头（与上方 5xx 原地重试分支收敛同一处）。
+        if (retryResp.ok) return { done: accountResponse(account, {
+          body: retryResp.body, status: retryResp.status,
+          statusText: retryResp.statusText, headers: retryResp.headers
+        }) };
         const retryErrText = await retryResp.text();
         let retryJson = null;
         try { retryJson = JSON.parse(retryErrText); } catch (e) {}

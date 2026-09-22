@@ -173,11 +173,8 @@ claude
 
 - **API 接口地址**：`https://your-gateway.vercel.app/v1`
 - **API Key**：`sk-workbuddy-deepseek`
-- **可用模型**：
-  - `deepseek-v4.1-flash`
-  - `deepseek-v4-pro`
-  - `claude-3-7-sonnet-20250219`
-  - `claude-3-5-sonnet-20241022`
+- **可用模型**：网关默认**透明直通**——不在 `routes` 中声明的模型名会直接透传给默认上游（`default_provider`，默认为 `workbuddy`），因此**上游支持的任意模型名均可直接调用**，无需预先配置。例如上游支持的 `deepseek-v4.1-flash`、`deepseek-v4-pro` 等。
+  > 透明直通意味着"新模型免配置即可用"，代价是已鉴权客户端的**未知模型名会真实打一次上游**（上游拒收回 502）。不要把不可信的模型名暴露给按次计费的上游；如需严格限制，可在 `GATEWAY_CONFIG.routes` 中显式声明白名单。
 
 ---
 
@@ -187,7 +184,7 @@ claude
 | :--- | :--- | :--- | :--- |
 | `/v1/messages` | `POST` | Virtual Key / Master Key | 标准 Anthropic Messages 接口（适配 Claude Code） |
 | `/v1/chat/completions` | `POST` | Virtual Key / Master Key | 标准 OpenAI 对话接口（适配 Cursor / NextChat） |
-| `/v1/models` | `GET` | Virtual Key / Master Key | 返回当前网关已配置的所有可用模型列表 |
+| `/v1/models` | `GET` | Virtual Key / Master Key | 返回 `routes` 中显式声明的模型列表（透明直通下默认为空；未声明的模型仍可直接调用） |
 | `/v1/usage` | `GET` | Virtual Key / Master Key | CC-Switch 专用的实时积分/额度查询接口 |
 | `/status` | `GET` | 公开 | 服务存活状态（仅 service/version，不含余额等敏感数据） |
 | `/checkin` | `POST/GET` | Master Key / Cron Secret | 执行每日签到领积分与 Token 自动保活 |
@@ -230,12 +227,12 @@ claude
 <details>
 <summary><b>Q: 如何配置备用模型（例如 DeepSeek 官方 API）？</b></summary>
 
-直接改 KV 中的 `GATEWAY_CONFIG`：在 **providers** 中新增一个 `type: "openai"` 的兼容上游并填入 API Key（记得同步 bump `config_version`），然后在 **模型路由** 中把 `deepseek-v4.1-flash` 的候选列表设置为：
+直接改 KV 中的 `GATEWAY_CONFIG`：在 **providers** 中新增一个 `type: "openai"` 的兼容上游并填入 API Key（记得同步 bump `config_version`），然后在 **routes** 中把 `deepseek-v4.1-flash` 的候选列表设置为：
 1. `workbuddy -> deepseek-v4.1-flash`
 2. `deepseek-official -> deepseek-chat`  
 保存后即时生效！一旦 WorkBuddy 额度耗尽或发生限流，请求会自动重试并降级到 DeepSeek 官方。
 
-> 未在路由中声明的模型不会 404：网关按“精确匹配 → `routes[\"*\"]` 通配 → `default_provider`（空即首个可用上游）”三级回退，新模型免配置即可用。注意未知模型名会真实打一次上游（拒收回 502），不要把不可信的模型名暴露给按次计费的上游。
+> 提示：**只有写进 `routes` 的模型才有候选队列（即多上游容灾）**。未声明的模型走三级回退：精确匹配 → `routes["*"]` 通配 → `default_provider`（默认 `workbuddy`）直通；因此未配置的模型**只打单个上游**，不会自动降级。要做容灾，务必为关键模型显式声明候选列表。未知模型名会真实打一次上游（拒收回 502），不要把不可信的模型名暴露给按次计费的上游。
 </details>
 
 ---

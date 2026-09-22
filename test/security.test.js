@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getDefaultConfig, backfillMissingRoutes } from "../src/config/config.js";
+import { getDefaultConfig, backfillMissingRoutes, parseMaxContextTurns } from "../src/config/config.js";
 import { timingSafeEqual, authenticateAccess } from "../src/auth/auth.js";
 import { buildResponseHeaders } from "../src/http/headers.js";
 
@@ -14,6 +14,31 @@ test("missing secrets throw instead of hardcoded default", () => {
 test("explicit MASTER_KEY honored, falls back to API_KEY otherwise", () => {
   assert.equal(getDefaultConfig({ API_KEY: "ak" }).master_key, "ak");
   assert.equal(getDefaultConfig({ API_KEY: "ak", MASTER_KEY: "mk" }).master_key, "mk");
+});
+
+// ---- H5：MAX_CONTEXT_TURNS 非法值不得变 NaN（NaN 会静默裁掉整段历史） ----
+test("parseMaxContextTurns coerces invalid values to 0 (no pruning)", () => {
+  assert.equal(parseMaxContextTurns(undefined), 0);
+  assert.equal(parseMaxContextTurns(null), 0);
+  assert.equal(parseMaxContextTurns(""), 0);
+  assert.equal(parseMaxContextTurns("   "), 0);
+  assert.equal(parseMaxContextTurns("abc"), 0, "non-numeric must not become NaN");
+  assert.equal(parseMaxContextTurns("40abc"), 0, "trailing junk rejected (Number semantics, not parseInt)");
+  assert.equal(parseMaxContextTurns("3.7"), 3, "float string floors");
+  assert.equal(parseMaxContextTurns(3.9), 3);
+  assert.equal(parseMaxContextTurns(true), 0, "boolean must not enable pruning via Number(true)===1");
+  assert.equal(parseMaxContextTurns(false), 0);
+  assert.equal(parseMaxContextTurns("-5"), 0, "negative disables pruning");
+  assert.equal(parseMaxContextTurns("0"), 0);
+  assert.equal(parseMaxContextTurns(" 40 "), 40, "surrounding whitespace tolerated");
+  assert.equal(parseMaxContextTurns("40"), 40);
+  assert.equal(parseMaxContextTurns(40), 40);
+});
+
+test("default config never carries a NaN max_context_turns", () => {
+  const cfg = getDefaultConfig({ API_KEY: "k", MAX_CONTEXT_TURNS: "not-a-number" });
+  assert.equal(Number.isNaN(cfg.max_context_turns), false);
+  assert.equal(cfg.max_context_turns, 0);
 });
 
 // ---- #3 常数时间比较 ----
