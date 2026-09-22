@@ -7,11 +7,6 @@
       "destination": "/api"
     }
   ],
-  "functions": {
-    "api/index.js": {
-      "maxDuration": 300
-    }
-  },
   "crons": [
     {
       "path": "/checkin",

@@ -10,9 +10,7 @@
 //   fatal        —— 不可恢复，直接返回错误给客户端
 
 // 指数退避上限（分钟）
-export const BACKOFF_MAX_MINUTES = 8;
-// 首次退避分钟数（streak 从 1 开始）
-export const BACKOFF_BASE_MINUTES = 1;
+const BACKOFF_MAX_MINUTES = 8;
 
 // 计算某 streak 下的退避时长（分钟）：1 -> 2 -> 4 -> 8（封顶）
 export function backoffMinutesForStreak(streak) {

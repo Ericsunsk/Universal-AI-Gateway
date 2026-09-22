@@ -20,7 +20,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 
-- **provider contract** — the documented shape of what a provider adapter may implement (`src/core/contract.js`). Capability predicates (`hasGetBalance`/`hasOnSchedule`/`hasDailyCheckin`/`hasCallChat`/`hasCallMessages`/`wantsStreamedChat`/`hasTokenRefresh`) replace hand-written `typeof` probes and `provider.type` switches. Dispatch probes capabilities, never the tag; `callChat` vs `callMessages` is decided by `hasCallMessages`, forced streaming by the adapter-declared `forceStream` flag.
+- **provider contract** — the documented shape of what a provider adapter may implement (`src/core/contract.js`). Capability predicates (`hasGetBalance`/`hasDailyCheckin`/`hasCallChat`/`hasCallMessages`/`wantsStreamedChat`/`hasTokenRefresh`) replace hand-written `typeof` probes and `provider.type` switches. Dispatch probes capabilities, never the tag; `callChat` vs `callMessages` is decided by `hasCallMessages`, forced streaming by the adapter-declared `forceStream` flag.
 
 - **account** — one WorkBuddy credential inside a provider's `accounts` pool (`{ id, userId, accessToken, refreshToken }`). Multi-account round-robin happens at the account level, *below* the provider level.
 

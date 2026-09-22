@@ -3,8 +3,8 @@
  * 跨协议、跨大模型厂商的统一思维链与推理强度调度器
  */
 
-export const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
-export const DISABLE_KEYWORDS = ["off", "nothink", "none", "disabled", "disable", "false"];
+const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const DISABLE_KEYWORDS = ["off", "nothink", "none", "disabled", "disable", "false"];
 
 /**
  * 从 token budget 转换为标准推理档位

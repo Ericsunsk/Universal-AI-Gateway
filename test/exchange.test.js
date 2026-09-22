@@ -528,22 +528,22 @@ test("extractCachedTokens reads OpenAI and Anthropic cache fields", async () => 
   assert.equal(extractCachedTokens(null), 0);
 });
 
-test("stream translator records upstream prefix-cache hits", async () => {
-  const { snapshotCacheStats, resetCacheStats } = await import("../src/core/cacheStats.js");
-  resetCacheStats();
-  const upstream = openAISseResponse([
-    "data: " + JSON.stringify({ choices: [{ delta: { content: "hi" } }] }),
-    "data: " + JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 80 } } }),
-    "data: [DONE]"
-  ]);
-  const resp = streamOpenAIToAnthropic(upstream, "m");
-  await readAnthropicEvents(resp);
-  const snap = snapshotCacheStats();
-  assert.equal(snap.responses, 1);
-  assert.equal(snap.cachedResponses, 1);
-  assert.equal(snap.cachedTokens, 80);
-  assert.equal(snap.hitRate, 100);
-  resetCacheStats();
+test("stream translator logs upstream prefix-cache hits", async () => {
+  const lines = [];
+  const origLog = console.log;
+  console.log = (...args) => { lines.push(args.join(" ")); };
+  try {
+    const upstream = openAISseResponse([
+      "data: " + JSON.stringify({ choices: [{ delta: { content: "hi" } }] }),
+      "data: " + JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 80 } } }),
+      "data: [DONE]"
+    ]);
+    const resp = streamOpenAIToAnthropic(upstream, "m");
+    await readAnthropicEvents(resp);
+  } finally {
+    console.log = origLog;
+  }
+  assert.ok(lines.some((l) => l.includes("prefix-cache hit") && l.includes("80")), "cache hit must be observable via logs");
 });
 
 test("streamOpenAIToAnthropic emits both thinking and text from one mixed chunk", async () => {

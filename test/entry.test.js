@@ -44,3 +44,31 @@ test("every env key consumed by src/api is allowlisted", () => {
   }
   assert.deepEqual([...missing].sort(), [], "allowlist must cover every consumed env key");
 });
+
+test("every allowlisted key is consumed somewhere (no dead entries)", () => {
+  const roots = [
+    new URL("../src", import.meta.url),
+    new URL("../api/index.js", import.meta.url),
+  ];
+  const files = [];
+  for (const r of roots) {
+    const p = new URL(r.pathname, import.meta.url).pathname;
+    files.push(...(fs.statSync(p).isDirectory() ? collectFiles(p) : [p]));
+  }
+  const patterns = [
+    /(?:env|process\.env)\?\.\s*([A-Z][A-Z0-9_]*)/g,
+    /(?<![A-Za-z_$.])(?:env|process\.env)\.([A-Z][A-Z0-9_]*)/g,
+    /requireSecret\(\s*env\s*,\s*"([^"]+)"\)/g,
+    /readEnv\("([^"]+)"\)/g,
+  ];
+  const consumed = new Set();
+  for (const file of files) {
+    // 白名单定义行只是 "KEY" 字符串字面量，不匹配 env.X 模式，无自引用问题，全量扫描
+    const text = fs.readFileSync(file, "utf8");
+    for (const re of patterns) {
+      for (const m of text.matchAll(re)) consumed.add(m[1]);
+    }
+  }
+  const dead = [...ENV_ALLOWLIST].filter((k) => !consumed.has(k)).sort();
+  assert.deepEqual(dead, [], "allowlist must not carry unread keys (forward drift lock)");
+});

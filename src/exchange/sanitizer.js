@@ -1,5 +1,5 @@
 // 剥离/改写 Claude Code 及相关客户端指纹，绕过上游（如腾讯 11128）关键字拦截
-export function sanitizeText(text) {
+function sanitizeText(text) {
   if (!text || typeof text !== "string") return text;
 
   // 极速快路径：99% 的用户代码与对话不包含拦截特征词，直接 O(1) 返回，避免长上下文（100k+ tokens）下的无谓正则扫描与内存复制
@@ -76,7 +76,7 @@ export function sanitizeMessages(messages) {
 // 高性能微秒级 ANSI 终端转义码与控制字符清洗（过滤终端颜色代码与覆盖刷新符，提升 Token 密度与纯度）
 const ANSI_REGEX = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d\/#&.:=?%_]+)*|[a-zA-Z\d]+(?:;[-a-zA-Z\d\/#&.:=?%_]+)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))/g;
 
-export function stripAnsi(text) {
+function stripAnsi(text) {
   if (!text || typeof text !== "string") return text;
   // O(1) 快速跳过：不含控制符直接返回，避免无效正则匹配
   if (!text.includes("\u001b") && !text.includes("\u009b") && !text.includes("\r")) {

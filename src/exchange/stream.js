@@ -113,7 +113,7 @@ export function reduceOpenAIChunkAll(parsed) {
 // 上游流停滞熔断：连续该时长收不到上游任何字节即判定上游卡死（如某些模型只回 200 头然后静默），
 // 主动收尾而不是让客户端挂到平台超时。只看“无字节”时长，持续吐 token 的慢模型不受影响。
 // options.stallMs 供测试注入小值；生产默认 180s（< Vercel 300s 上限，远大于实测最慢模型的 118s）。
-export const UPSTREAM_STALL_MS = 180 * 1000;
+const UPSTREAM_STALL_MS = 180 * 1000;
 
 export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
   const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
