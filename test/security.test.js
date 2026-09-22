@@ -85,40 +85,52 @@ test("buildResponseHeaders strips hop-by-hop headers", () => {
 
 // ---- #10 存量 KV 路由回填（只增不改） ----
 test("backfillMissingRoutes adds missing default routes without touching existing", () => {
-  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const defaults = {
+    providers: [{ id: "workbuddy", enabled: true }],
+    routes: {
+      "m-default": [{ provider: "workbuddy", model: "m-default" }],
+      "m-shared": [{ provider: "workbuddy", model: "m-shared" }]
+    }
+  };
   const stored = {
-    providers: JSON.parse(JSON.stringify(defaults.providers)),
-    routes: { "glm-5.2": JSON.parse(JSON.stringify(defaults.routes["glm-5.2"])) }
+    providers: [{ id: "workbuddy", enabled: true }],
+    routes: { "m-shared": [{ provider: "workbuddy", model: "m-shared" }] }
   };
   const custom = [{ provider: "workbuddy", model: "custom-model" }];
   stored.routes["my-custom"] = custom;
   const out = backfillMissingRoutes(stored, defaults);
-  assert.ok(out.routes["deepseek-v4.1-flash"], "missing default route backfilled");
+  assert.ok(out.routes["m-default"], "missing default route backfilled");
   assert.deepEqual(out.routes["my-custom"], custom, "custom route untouched");
-  assert.deepEqual(out.routes["glm-5.2"], defaults.routes["glm-5.2"]);
+  assert.deepEqual(out.routes["m-shared"], defaults.routes["m-shared"]);
 });
 
 test("backfillMissingRoutes keeps empty-provider config empty (degraded path)", () => {
-  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const defaults = { providers: [{ id: "p" }], routes: { m: [{ provider: "p" }] } };
   const stored = { providers: [], routes: {} };
   backfillMissingRoutes(stored, defaults);
   assert.deepEqual(stored.routes, {}, "no providers -> no backfill, stays degraded");
 });
 
 test("backfillMissingRoutes skips routes referencing unknown providers", () => {
-  const defaults = getDefaultConfig({ API_KEY: "k" });
+  const defaults = {
+    providers: [{ id: "workbuddy" }, { id: "workbuddy-intl" }],
+    routes: {
+      "route-wb": [{ provider: "workbuddy", model: "x" }],
+      "route-intl": [{ provider: "workbuddy-intl", model: "y" }]
+    }
+  };
   const stored = {
     providers: [{ id: "workbuddy", config: {} }],
     routes: {}
   };
   backfillMissingRoutes(stored, defaults);
-  assert.ok(stored.routes["glm-5.2"], "workbuddy-only route backfilled");
-  assert.equal(stored.routes["glm-5.2-intl"], undefined, "workbuddy-intl route skipped (unknown provider)");
+  assert.ok(stored.routes["route-wb"], "workbuddy-only route backfilled");
+  assert.equal(stored.routes["route-intl"], undefined, "workbuddy-intl route skipped (unknown provider)");
 });
 
 test("defaults include disabled workbuddy-intl slot with zero runtime effect", () => {
   const defaults = getDefaultConfig({ API_KEY: "k" });
-  const intl = defaults.providers.find(p => p.id === "workbuddy-intl");
+  const intl = defaults.providers.find((p) => p.id === "workbuddy-intl");
   assert.ok(intl, "intl slot present");
   assert.equal(intl.enabled, false);
   assert.equal(intl.config.region, "intl");
@@ -126,12 +138,11 @@ test("defaults include disabled workbuddy-intl slot with zero runtime effect", (
 
 test("defaults enable workbuddy-intl only when INTL_* secrets present", () => {
   const withIntl = getDefaultConfig({ API_KEY: "k", INTL_USER_ID: "u", INTL_ACCESS_TOKEN: "a", INTL_REFRESH_TOKEN: "r" });
-  const intl = withIntl.providers.find(p => p.id === "workbuddy-intl");
+  const intl = withIntl.providers.find((p) => p.id === "workbuddy-intl");
   assert.equal(intl.enabled, true);
   assert.equal(intl.config.region, "intl");
   assert.equal(intl.config.accounts[0].userId, "u");
-  assert.ok(withIntl.routes["glm-5.2-intl"], "intl route present");
   const without = getDefaultConfig({ API_KEY: "k" });
-  assert.equal(without.providers.find(p => p.id === "workbuddy-intl").enabled, false);
+  assert.equal(without.providers.find((p) => p.id === "workbuddy-intl").enabled, false);
 });
 

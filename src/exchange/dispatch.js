@@ -31,7 +31,7 @@ export async function dispatchExchange({
   const routes = config.routes || {};
   // 共享解析推理强度与干净模型名
   const reasoningIntent = parseReasoningIntent({ model, body });
-  const cleanModel = reasoningIntent.cleanModel || "deepseek-v4.1-flash";
+  const cleanModel = reasoningIntent.cleanModel || model || "default";
   let candidates = routes[model] || routes[cleanModel];
 
   // 1. 显式路由匹配（包括推理后缀剥离后的 cleanModel）

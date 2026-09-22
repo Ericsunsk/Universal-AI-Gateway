@@ -29,9 +29,8 @@ export function getDefaultConfig(env) {
     cron_secret: env.CRON_SECRET || "",
     max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : 0,
     usage_provider_id: "workbuddy",
-    // 未配置模型的默认上游：空串表示用首个 active provider；填 provider id 则固定走它；
-    // 删掉本键且无可用 provider 时，未知模型回 404。另见 routes["*"] 通配路由。
-    default_provider: "",
+    // 纯透明直通管道：未声明的模型直接透传默认 provider（workbuddy），零硬编码模型映射
+    default_provider: "workbuddy",
     providers: [
       {
         id: "workbuddy",
@@ -52,10 +51,6 @@ export function getDefaultConfig(env) {
         }
       },
       {
-        // 国际站：有 INTL_* 环境凭证即启用（与 CN 共用同一套 adapter，按 region 切端点）。
-        // 凭证走 Vercel 环境变量（Environment Variables），永不进代码库；无凭证时保持 disabled，零运行时影响。
-        // 已验证 serve：glm-5.2。模型池见 CLI product.json：
-        // gpt-5.6-sol/terra/luna、gpt-5.5/5.4、gpt-5.3-codex、gemini-3.5-flash、glm-5.3/5.2、kimi-k3/k2.6、minimax-m3。
         id: "workbuddy-intl",
         name: "WorkBuddy Intl (codebuddy.ai)",
         type: "workbuddy",
@@ -73,50 +68,7 @@ export function getDefaultConfig(env) {
         }
       },
     ],
-    routes: {
-      "deepseek-v4.1-flash": [
-        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
-        { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
-      ],
-      "deepseek-v4-flash": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
-      ],
-      "deepseek-v4-pro": [
-        { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4.1-flash" }
-      ],
-      "claude-3-7-sonnet-20250219": [
-        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
-        { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
-      ],
-      "claude-3-5-sonnet-20241022": [
-        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
-        { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
-      ],
-      "claude-3-5-haiku-20241022": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
-      ],
-      "claude-3-haiku-20240307": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" }
-      ],
-      "claude-3-opus-20240229": [
-        { provider: "workbuddy", model: "deepseek-v4-pro" }
-      ],
-      "glm-5.2": [
-        { provider: "workbuddy", model: "glm-5.2" }
-      ],
-      "kimi-k3-1": [
-        { provider: "workbuddy", model: "kimi-k3-1" }
-      ],
-      // 国际站已验证 serve 的路由（glm-5.2 实测 200）。intl provider 无凭证时保持 disabled，
-      // 存量 KV 因回填约束（引用 provider 必须存在）自动跳过本条，不影响现网。
-      "glm-5.2-intl": [
-        { provider: "workbuddy-intl", model: "glm-5.2" }
-      ]
-    },
+    routes: {},
     virtual_keys: {
       [defaultApiKey]: {
         name: "Default Client Key (CC-Switch / Claude Code)",
@@ -175,10 +127,21 @@ async function refreshConfig(env) {
       const raw = await kv.get("GATEWAY_CONFIG");
       if (raw) {
         const parsed = JSON.parse(raw);
+        const defaults = getDefaultConfig(env);
         // 存量 KV 可能落后于代码默认路由：内存中回填缺失项（不写 KV，无版本冲突）。
         try {
-          backfillMissingRoutes(parsed, getDefaultConfig(env));
+          backfillMissingRoutes(parsed, defaults);
         } catch (e) {}
+        // 环境变量兜底：master_key、cron_secret 与默认 API_KEY 永不因 KV 缺失或脱敏而失效
+        if (!parsed.master_key) parsed.master_key = defaults.master_key;
+        if (!parsed.cron_secret) parsed.cron_secret = defaults.cron_secret;
+        if (!parsed.virtual_keys || typeof parsed.virtual_keys !== "object" || Array.isArray(parsed.virtual_keys) || Object.keys(parsed.virtual_keys).length === 0) {
+          parsed.virtual_keys = defaults.virtual_keys;
+        } else if (defaults.virtual_keys) {
+          for (const [k, v] of Object.entries(defaults.virtual_keys)) {
+            if (!parsed.virtual_keys[k]) parsed.virtual_keys[k] = v;
+          }
+        }
         cachedConfig = parsed;
         cachedConfigTimestamp = now;
         return parsed;

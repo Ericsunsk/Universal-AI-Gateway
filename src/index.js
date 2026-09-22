@@ -17,11 +17,10 @@ export default {
     const fleet = getProviderFleet(config, env);
 
     // 1. 健康检查（公开）
-    // 当零可用 provider 或零路由时标记 degraded，避免永远 ok
+    // 零可用 provider 时标记 degraded
     if (path === "/" || path === "/healthz") {
       const hasProviders = fleet.activeCount > 0;
-      const hasRoutes = Object.keys(config.routes || {}).length > 0;
-      const status = (hasProviders && hasRoutes) ? "ok" : "degraded";
+      const status = hasProviders ? "ok" : "degraded";
       return new Response(JSON.stringify({
         status,
         service: "universal-ai-gateway",
