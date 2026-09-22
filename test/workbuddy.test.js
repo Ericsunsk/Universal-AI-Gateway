@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { WorkBuddyProvider, retryDelayMs, DEFAULT_RETRY_DELAY_MS } from "../src/providers/workbuddy/index.js";
+import { WorkBuddyProvider, retryDelayMs, DEFAULT_RETRY_DELAY_MS, resetSchedulingCounterForTests } from "../src/providers/workbuddy/index.js";
 import { accountCooldownRecord, hydrateCooldowns } from "../src/providers/workbuddy/cooldown.js";
 
 const originalFetch = globalThis.fetch;
@@ -36,9 +36,9 @@ test("attemptAccount returns done on first-try success", async () => {
   scriptFetch({ chat: [new Response("hello", { status: 200 })] });
   const p = provider("wb-t1", [acc("t1a")]);
   const out = await p.attemptAccount(acc("t1a"), {}, "{}", {});
-  assert.ok(out.done, "expected done");
-  assert.equal(out.done.status, 200);
-  assert.equal(await out.done.text(), "hello");
+  assert.equal(out.kind, "done");
+  assert.equal(out.response.status, 200);
+  assert.equal(await out.response.text(), "hello");
 });
 
 test("attemptAccount refreshes token after 401 and retries", async () => {
@@ -49,46 +49,63 @@ test("attemptAccount refreshes token after 401 and retries", async () => {
   const account = { ...acc("t2a"), refreshToken: "ref-t2a" };
   const p = provider("wb-t2", [account]);
   const out = await p.attemptAccount(account, {}, "{}", {});
-  assert.ok(out.done, "expected done after refresh");
-  assert.equal(await out.done.text(), "recovered");
+  assert.equal(out.kind, "done");
+  assert.equal(await out.response.text(), "recovered");
 });
 
-test("attemptAccount returns null when 401 refresh fails (no cooldown streak)", async () => {
+test("attemptAccount returns skip when 401 refresh fails (no cooldown streak)", async () => {
   scriptFetch({ chat: [new Response("expired", { status: 401 })] });
   const p = provider("wb-t3", [acc("t3a")]); // 无 refreshToken → 刷新直接返回 null
   const out = await p.attemptAccount(acc("t3a"), {}, "{}", {});
-  assert.equal(out, null);
+  assert.equal(out.kind, "skip");
   assert.equal(accountCooldownRecord.has("t3a"), false, "401 must not punish streak");
 });
 
-test("attemptAccount surfaces 200 business-code as cooldown-classified fail", async () => {
+test("attemptAccount surfaces 200 business-code as switch outcome", async () => {
   scriptFetch({ chat: [jsonResp(200, { code: 11140, msg: "quota done" })] });
   const p = provider("wb-t4", [acc("t4a")]);
   const out = await p.attemptAccount(acc("t4a"), { stream: true }, "{}", {});
-  assert.ok(out.fail, "expected fail");
+  assert.equal(out.kind, "switch");
   assert.equal(out.fail.status, 200);
   assert.equal(out.fail.json.code, 11140);
   assert.equal(out.fail.response.status, 200);
 });
 
-test("attemptAccount surfaces fatal 400 for immediate return", async () => {
+test("attemptAccount surfaces fatal 400 as a switch outcome", async () => {
   scriptFetch({ chat: [new Response("bad param", { status: 400 })] });
   const p = provider("wb-t5", [acc("t5a")]);
   const out = await p.attemptAccount(acc("t5a"), {}, "{}", {});
-  assert.ok(out.fail, "expected fail");
+  assert.equal(out.kind, "switch");
   assert.equal(out.fail.status, 400);
   assert.equal(out.fail.response.status, 400);
 });
 
-test("attemptAccount retries once on 502 jitter then succeeds", async () => {
-  scriptFetch({ chat: [new Response("bad gateway", { status: 502 }), new Response("steady", { status: 200 })] });
+test("attemptAccount requests an in-place retry on 502 (driver owns the retry)", async () => {
+  // 新协议：单次尝试只做一次往返并把 5xx 映射为 { kind:"retry" }，不再自己 sleep / 重发。
+  scriptFetch({ chat: [new Response("bad gateway", { status: 502 })] });
   const p = provider("wb-t6", [acc("t6a")]);
   const out = await p.attemptAccount(acc("t6a"), {}, "{}", {});
-  assert.ok(out.done, "expected done after jitter retry");
-  assert.equal(await out.done.text(), "steady");
+  assert.equal(out.kind, "retry");
+  assert.equal(out.fail.status, 502);
+});
+
+test("callChat retries jitter in place then succeeds (driver budget)", async () => {
+  scriptFetch({ chat: [new Response("bad gateway", { status: 502 }), new Response("steady", { status: 200 })] });
+  const p = new WorkBuddyProvider(
+    { id: "wb-t6", config: { accounts: [acc("t6a")] } },
+    { RETRY_BASE_MS: "0" }
+  );
+  const res = await p.callChat({ messages: [] }, {});
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "steady");
 });
 
 test("callChat cools the punished account and fails over to the next", async () => {
+  // 确定性：重置调度计数器后 rrIndex=0 起排，[t7a,t7b] 首试必为 t7a（429 惩罚对象唯一），
+  // 恢复精确断言——若未来惩罚错对象（t7b 被冷却），本用例失败。
+  resetSchedulingCounterForTests();
+  accountCooldownRecord.delete("t7a");
+  accountCooldownRecord.delete("t7b");
   scriptFetch({
     chat: [new Response("limited", { status: 429 }), new Response("served", { status: 200 })]
   });
@@ -140,8 +157,9 @@ test("RETRY_BASE_MS=0 makes jitter retry immediate", async () => {
     { RETRY_BASE_MS: "0" }
   );
   const t0 = Date.now();
-  const out = await p.attemptAccount(acc("t9a"), {}, "{}", {});
-  assert.ok(out.done, "expected done after immediate retry");
+  const res = await p.callChat({ messages: [] }, {});
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), "fast");
   assert.ok(Date.now() - t0 < 500, "must not sleep the default 600ms");
 });
 

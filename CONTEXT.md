@@ -52,6 +52,9 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 ## Classification vocabulary (in the scheduler)
 
-- **cooldown** — a *punishable* failure (429, 403, quota, safety/compliance filter, Tencent business error). Cool the account down, then switch.
+- **cooldown** — a *punishable* failure (429, 402/403, quota, safety/compliance filter, Tencent business error). Cool the account down, then switch.
 - **retry** — a *transient* server failure (5xx). Switch account without punishment.
-- **fatal** — an unrecoverable client error (4xx other than 403/429). Return to the client.
+- **fatal** — an unrecoverable client error (4xx other than 402/403/429). Return to the client.
+- **attempt** — a single network round-trip against one candidate: one fetch, no sleep, no inner loop. It maps that one round-trip to exactly one **outcome**. (Distinct from *candidate*: one candidate may be attempted more than once.)
+- **outcome** — the closed vocabulary an **attempt** returns to the failover driver: `done` (usable response), `skip` (never tried — e.g. missing credential; no penalty), `switch` (hand raw evidence to the driver's `classifyFailure`), or `retry` (transient transport/5xx wobble; asking the driver to re-attempt the same candidate). Only the driver interprets outcomes; an adapter never classifies.
+- **retry budget** — the driver-owned cap on in-place re-attempts of one candidate (`retry` outcomes). The adapter requests a retry; the driver decides whether the budget allows it, owns the delay and the abort check. When the budget is spent, the attached fail escalates to `switch` and is classified like any other failure.

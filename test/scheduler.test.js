@@ -5,6 +5,7 @@ import {
   orderAccounts,
   computeCooldown,
   classify,
+  classifyFailure,
   businessErrorCode,
   isModelLevelError,
   isWAFChallenge,
@@ -210,4 +211,50 @@ test("classify: WAF challenge cools down even on misleading status", () => {
   assert.equal(classify(302, "redirect to _____tmd_____/punish?x5secdata=1"), "cooldown");
   assert.equal(classify(400, "<html>aliyun_waf</html>"), "cooldown");
   assert.equal(classify(400, "bad request"), "fatal", "plain 400 stays fatal");
+});
+
+// ---- Candidate 02：classifyFailure 是失败分类的唯一边界 ----
+// 关键契约：调用方只交**原始证据**，JSON 解析由分类器完成（调用方不再预处理）。
+
+test("classifyFailure parses RAW JSON text itself (caller need not pre-parse)", () => {
+  // 腾讯 11140 包在 200 里：文本形态直接判 cooldown，无需调用方先 JSON.parse
+  assert.equal(classifyFailure({ status: 200, text: '{"code":11140,"msg":"quota"}' }), "cooldown");
+  // 未知业务码 → retry（切换不惩罚）
+  assert.equal(classifyFailure({ status: 200, text: '{"code":9999,"msg":"weird"}' }), "retry");
+});
+
+test("classifyFailure accepts pre-parsed json as evidence (avoids double parse)", () => {
+  const json = { code: 11128, msg: "safety" };
+  assert.equal(classifyFailure({ status: 200, text: JSON.stringify(json), json }), "cooldown");
+  // 显式 json:null 表示“调用方确认无结构体”，此时不尝试解析 text（严格按文本规则）
+  assert.equal(classifyFailure({ status: 400, text: "unknown field 'quota'", json: null }), "fatal");
+});
+
+test("classifyFailure matches classify() for the same evidence (alias equivalence)", () => {
+  const cases = [
+    { status: 429, text: "rate limited" },
+    { status: 503, text: "overloaded" },
+    { status: 400, text: "bad request" },
+    { status: 200, text: '{"code":6004,"msg":"risk"}' },
+    { status: 403, text: "" },
+    { status: 402, text: "insufficient credits" },
+    // 以下用例专门覆盖“仅靠 JSON 解析才能得出动作、且 code 不是文本关键词”的场景：
+    // 若别名的 json 默认值退回 null（不解析），这些会与 classifyFailure 分叉而失败。
+    { status: 200, text: '{"code":9999,"msg":"weird"}' },   // 未知业务码 → retry
+    { status: 200, text: '{"code":11140,"msg":"quota"}' }    // 已知业务码 → cooldown
+  ];
+  for (const c of cases) {
+    assert.equal(classifyFailure(c), classify(c.status, c.text), `mismatch for ${JSON.stringify(c)}`);
+  }
+  // 显式传 null 表示“确认无结构体”，与缺省（自解析）语义不同，但两者对同一文本的
+  // 最终动作在真实证据下应一致；这里锁死 classify(s,t) 缺省 == classifyFailure({s,t})。
+  assert.equal(classify(200, '{"code":9999}'), classifyFailure({ status: 200, text: '{"code":9999}' }));
+});
+
+test("classifyFailure tolerates malformed / non-JSON text without throwing", () => {
+  assert.equal(classifyFailure({ status: 500, text: "<html>not json</html>" }), "retry");
+  assert.equal(classifyFailure({ status: 0, text: "" }), "fatal");
+  assert.equal(classifyFailure({}), "fatal");
+  assert.equal(classifyFailure(), "fatal");
+  assert.equal(classifyFailure({ status: 400, text: "{broken json" }), "fatal");
 });

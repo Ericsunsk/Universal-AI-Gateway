@@ -1,23 +1,46 @@
-// Failover —— 全网关唯一的“逐项尝试 + 分类切换”循环。
-// account scheduler 提炼了分类词汇（cooldown / retry / fatal），但 workbuddy 的账号循环与
-// dispatch 的候选循环各自重写了一遍“classify → 切换 / 返回”。本模块收敛这个循环：
-// 调用方只描述“试一次”（attempt）与“可重试时的副作用”（onRetryable），不再手写循环。
+// Failover —— 全网关唯一的「逐项尝试 + outcome 解释」驱动器。
 //
-// attempt(item, index) 约定：
-//   - `{ done: Response }` —— 拿到可用响应（含调用方自定的成功渲染），直接返回。
-//   - `{ fail: { status, text, json?, response?, force? } }` —— 失败；由 classify 定去留。
+// 回顾（commit 2032a3e）：曾经 workbuddy 的账号循环与 dispatch 的候选循环各自重写了一遍
+// 「classify → 切换 / 返回」。本模块收敛这个循环，但第一版只收敛了骨架——真正的复杂度
+// （何时原地重试、何时跳过、401 刷新）仍散落在各 adapter 的回调里。
+//
+// 本版把接缝重新划在「一次网络往返」与「一次决策」之间：
+//   - **attempt** 只做一次网络往返，把结果映射为恰好一个 **outcome**（无 sleep、无内层循环）。
+//   - **driver**（本模块）拥有重试预算、延迟、abort 检查与 classify，是唯一解释 outcome 的地方。
+//
+// attempt(item, index) 返回的 outcome（闭合四元组，见 CONTEXT.md）：
+//   - `{ kind: "done", response }` —— 拿到可用响应，直接返回。
+//   - `{ kind: "skip", reason? }` —— 从未真正尝试（如账号缺 token）；不计失败、不惩罚、不重试。
+//   - `{ kind: "switch", fail }` —— 把原始证据交给 driver 的 classify 定去留。
 //       fatal → 返回调用方预渲染的 fail.response；cooldown/retry → onRetryable 后试下一项。
-//       response 必须预渲染（fatal 与耗尽时直接返回，不再二次拼装）。
-//       force: "retry" —— 调用方断言“这次失败是当前项特有的”（如模型身份错误，后面有
-//       不同模型的候选），即使 classify 判 fatal 也切换。只用于调用方能证明换项有用的场景。
-//       被 force 的失败在 onRetryable 里按 "retry" 上报（不惩罚，只切换）。
-//   - 返回 null/undefined —— 跳过该项（如账号缺 token），不记失败。
-//   - 抛错 —— 传输失败：记录后试下一项；isAbort(err) 为 true 则直接抛出终止。
-// 耗尽：返回最后一个 fail.response；没有则调 renderExhausted({ lastError, lastFail })。
-import { classify } from "./scheduler.js";
+//       fail.response 必须预渲染（fatal 与耗尽时直接返回，不再二次拼装）。
+//       fail.force === "retry" —— 调用方断言“这次失败是当前项特有的”（如模型身份错误，
+//       后面有不同模型的候选），即使 classify 判 fatal 也切换；上报时不惩罚，只切换。
+//   - `{ kind: "retry", fail, delayMs? }` —— 瞬时抖动（5xx / 传输错误），请求 driver 原地
+//       重试同一项。driver 依据 retryBudget 决定是否批准：批准则等待 delayMs 后再次 attempt
+//       同一项；预算耗尽则把这个 fail 升级为一条 switch 记录（照常 classify）。
+//       adapter 只“请求”重试，预算与 abort 由 driver 掌握。
+//
+// 兼容：调用方若直接抛错（未包装成 outcome），driver 视为一次传输失败并切换到下一项
+// （isAbort(err) 为 true 时直接抛出终止）——这是 retry 的一种退化形态。
+//
+// 耗尽：返回最后一个 fail.response；若最后发生的是未包装异常则返回该异常；都没有则调
+// renderExhausted({ lastError, lastFail })。
+import { classifyFailure } from "./scheduler.js";
 import { corsHeaders } from "../http/headers.js";
 
-export async function runFailover(items, { attempt, onRetryable, isAbort, renderExhausted }) {
+export async function runFailover(items, {
+  attempt,
+  onRetryable,
+  isAbort,
+  renderExhausted,
+  // 每个 item 允许的原地重试次数上限（retry 预算）。0 = 完全不原地重试。
+  retryBudget = 1,
+  // retry outcome 未显式给 delayMs 时的默认等待。
+  retryDelayMs = 0,
+  // 可选：等待重试期间响应的 AbortSignal。
+  signal = null
+}) {
   let lastError = null;
   let lastFail = null;
   // 最近一次失败的类型：记录到达顺序，让耗尽收尾能用“最后发生的那次”作为权威错误。
@@ -25,27 +48,73 @@ export async function runFailover(items, { attempt, onRetryable, isAbort, render
 
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
-    let outcome;
-    try {
-      outcome = await attempt(item, index);
-    } catch (err) {
-      if (isAbort?.(err)) throw err;
-      lastError = err;
-      lastFailureKind = "error";
-      continue;
+    let retriesLeft = retryBudget;
+
+    // 同一项的原地重试内层循环：仅由 outcome.kind === "retry" 驱动，且受预算约束。
+    while (true) {
+      let outcome;
+      try {
+        outcome = await attempt(item, index);
+      } catch (err) {
+        if (isAbort?.(err)) throw err;
+        // 未包装异常 = 一次传输失败：若有预算，请求原地重试；否则作为权威错误记下并切换。
+        if (retriesLeft > 0) {
+          retriesLeft--;
+          await waitOrAbort(retryDelayMs, signal);
+          continue;
+        }
+        lastError = err;
+        lastFailureKind = "error";
+        break;
+      }
+
+      if (outcome?.kind === "done") {
+        // 防御：done 缺 response 是 adapter bug——退化为 skip（而非返回 undefined 到 HTTP 层），并告警。
+        if (!outcome.response) {
+          console.warn(`[Failover] Item ${index} returned kind:"done" without a response; treating as skip`);
+          break;
+        }
+        return outcome.response;
+      }
+      if (outcome?.kind === "skip") break; // 跳过：不计失败、不重试
+      if (outcome?.kind === "retry") {
+        if (retriesLeft > 0) {
+          retriesLeft--;
+          await waitOrAbort(outcome.delayMs ?? retryDelayMs, signal);
+          continue;
+        }
+        // 预算耗尽：把这次瞬时失败降格为一条 switch 记录，照常走 classify。
+        lastFail = outcome.fail ?? lastFail;
+        lastFailureKind = lastFail ? "fail" : lastFailureKind;
+        if (lastFail) {
+          const action = classifyFailure(lastFail);
+          if (action === "fatal" && lastFail.force !== "retry") return lastFail.response;
+          if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, lastFail);
+        }
+        break;
+      }
+      if (outcome?.kind === "switch") {
+        const fail = outcome.fail;
+        if (!fail) break;
+        lastFail = fail;
+        lastFailureKind = "fail";
+        const action = classifyFailure(fail);
+        if (action === "fatal" && fail.force !== "retry") return fail.response;
+        if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, fail);
+        break;
+      }
+      // 未知/畸形 outcome：视为跳过，避免误判为失败；非空畸形必须告警，
+      // 否则 adapter 拼错字段会静默丢失候选（null/undefined 视为历史遗留的 skip 写法，保持静默）。
+      if (outcome !== null && outcome !== undefined) {
+        console.warn(`[Failover] Item ${index} returned malformed outcome; treating as skip:`, JSON.stringify(outcome)?.slice(0, 200));
+      }
+      break;
     }
-    if (outcome?.done) return outcome.done;
-    const fail = outcome?.fail;
-    if (!fail) continue;
-    lastFail = fail;
-    lastFailureKind = "fail";
-    const action = classify(fail.status, fail.text, fail.json ?? null);
-    if (action === "fatal" && fail.force !== "retry") return fail.response;
-    if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, fail);
   }
 
   // 耗尽收尾：以“最后发生的那次失败”为权威。
-  // 最后一项是抛错（网络/传输失败）时，不能返回更早 fail 的预渲染响应，否则真实异常被掩盖。
+  // 优先级：真实的最后失败响应 > 调用方自定义 renderExhausted > 兜底 502。
+  // 最后一项是未包装异常（网络/传输失败）时，不能返回更早 fail 的预渲染响应，否则真实异常被掩盖。
   const lastIsError = lastFailureKind === "error" && !!lastError;
   if (lastFail?.response && !lastIsError) return lastFail.response;
   if (renderExhausted) return renderExhausted({ lastError, lastFail });
@@ -55,4 +124,25 @@ export async function runFailover(items, { attempt, onRetryable, isAbort, render
     status: 502,
     headers: { "Content-Type": "application/json", ...corsHeaders }
   });
+}
+
+// 等待 ms 毫秒；若 driver 收到 signal 且已 abort（或等待期间 abort），则抛出 AbortError（与 fetch 一致）。
+function waitOrAbort(ms, signal) {
+  if (signal?.aborted) return Promise.reject(abortError());
+  if (!ms || ms <= 0) return Promise.resolve();
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => { clearTimeout(timer); reject(abortError()); };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError() {
+  const e = new Error("The operation was aborted");
+  e.name = "AbortError";
+  return e;
 }

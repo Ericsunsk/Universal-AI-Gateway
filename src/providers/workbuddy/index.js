@@ -11,6 +11,12 @@ const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
 const noCredentialWarned = new Set();
 let roundRobinCounter = 0;
 
+// 测试隔离钩：重置模块级调度计数器，让依赖账号顺序的用例确定性。
+// 生产代码永不调用（复用 createMemoryKv 式的"测试拿隔离状态"思路）。
+export function resetSchedulingCounterForTests() {
+  roundRobinCounter = 0;
+}
+
 // 抖动重试基准延迟（Q6 可配置）：env RETRY_BASE_MS，默认 600ms。
 // Vercel 与 CF 超时/计费模型不同，允许两边设不同值；非法值回退默认。
 export const DEFAULT_RETRY_DELAY_MS = 600;
@@ -283,10 +289,13 @@ export class WorkBuddyProvider {
 
     const serializedPayload = JSON.stringify(payload);
 
-    // 账号级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、耗尽收尾
-    // 由驱动器统一处理；单个账号的“试一次”（401 刷新、抖动重试、业务码检测）见 attemptAccount。
+    // 账号级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、retry 预算、
+    // 耗尽收尾由驱动器统一处理；单账号的「一次往返 → 一个 outcome」见 attemptAccount。
     return await runFailover(accounts, {
       isAbort: (err) => err?.name === "AbortError",
+      retryBudget: 1,               // 每个账号允许一次原地重试（对齐旧“600ms 重试一次”）
+      retryDelayMs: retryDelayMs(this.env),
+      signal: options.signal,
       onRetryable: async (account, action, fail) => {
         const label = account.name || account.id;
         if (action === "retry") {
@@ -303,12 +312,14 @@ export class WorkBuddyProvider {
     });
   }
 
-  // 对单个账号试一次（runFailover 的 attempt）：{ done } 命中即返；
-  // { fail } 由驱动器分类后 fatal 即返 / cooldown-retry 切换；null 跳过该账号。
+  // 单次尝试 = 一次「逻辑往返」→ 恰好一个 outcome（见 core/failover.js 的契约）。
+  // 这里不再内嵌 sleep / 重试 / 跳过分支：5xx 与传输抖动都返回 { kind:"retry" }，
+  // 由 driver 依据 retry 预算决定是否原地重发；缺 token 返回 { kind:"skip" }。
+  // 401 刷新重放属于「同一次逻辑往返」的一部分，留在 doRequestWithRefresh 内。
   async attemptAccount(account, payload, serializedPayload, options) {
-    let token = await this.getActiveToken(account);
+    const token = await this.getActiveToken(account);
     const userId = account.userId;
-    if (!token || !userId) return null;
+    if (!token || !userId) return { kind: "skip", reason: "missing-token-or-user" };
 
     const makeRequest = async (tk) => {
       const ep = this.ep();
@@ -333,33 +344,27 @@ export class WorkBuddyProvider {
       });
     };
 
-    try {
-      let { resp, token, refreshed } = await this.doRequestWithRefresh(account, makeRequest);
-      if (resp.status === 401 && !refreshed) {
-        // 刷新失败：直接切换下一账号（不计入冷却 streak，401 通常是 token 过期而非额度问题）
-        console.warn(`[WorkBuddy] Account "${account.name || account.id}" 401 token refresh failed, switching to next account...`);
-        return null;
-      }
+    const accountLabel = account.name || account.id;
+    const delay = retryDelayMs(this.env);
 
-      // 遇到 502 / 503 / 504 服务端瞬时抖动，毫秒级原地快速重试一次（避开上游偶发拥塞）
+    // 单一映射点：把一次 resp 解释为恰好一个 outcome。5xx → retry，成功 → done，
+    // 其余失败 → switch（交 driver 分类）。doRequestWithRefresh 已把 401 重放包在这一层内。
+    // 分类所需的 JSON 解析不在调用方重复：只交原始 status + text，classifyFailure 自行解析。
+    const mapResponse = async (resp) => {
+      // 502 / 503 / 504：服务端瞬时抖动，请求 driver 原地重试（预算与延迟归 driver）。
       if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
-        console.warn(`[WorkBuddy] Account "${account.name || account.id}" hit ${resp.status}, retrying in 600ms...`);
-        await new Promise(r => setTimeout(r, retryDelayMs(this.env)));
-        if (options.signal?.aborted) {
-          throw new DOMException("The operation was aborted", "AbortError");
-        }
-        const retryResp = await makeRequest(token);
-        if (retryResp.ok) {
-          await setAccountCooldown(account, this.env, "clear");
-          return { done: accountResponse(account, {
-            body: retryResp.body, status: retryResp.status,
-            statusText: retryResp.statusText, headers: retryResp.headers
-          }) };
-        }
-        resp = retryResp;
+        console.warn(`[WorkBuddy] Account "${accountLabel}" hit ${resp.status}, requesting in-place retry...`);
+        const errText = await resp.text();
+        return { kind: "retry", delayMs: delay, fail: {
+          status: resp.status,
+          text: errText,
+          response: accountResponse(account, {
+            body: errText, status: resp.status,
+            headers: resp.headers, contentType: "application/json"
+          })
+        } };
       }
 
-      // 成功响应直接返回（若请求 stream 但返回 application/json，检测是否为腾讯 200 业务错误码）
       if (resp.ok) {
         const contentType = resp.headers.get("content-type") || "";
         if (payload.stream && contentType.includes("application/json")) {
@@ -367,9 +372,9 @@ export class WorkBuddyProvider {
           try {
             const resJson = await clone.json();
             if (businessErrorCode(resJson) !== 0) {
-              // 200 包业务错误码：交驱动器分类（已知码 cooldown 惩罚并由 onRetryable 落盘，
-              // 未知码 retry 只切换不惩罚）；预渲染响应在 fatal/耗尽时直接返回。
-              return { fail: {
+              // 200 包业务错误码：这是 adapter 级判断（决定“200 其实是失败”），
+              // 判定后把已解析的 json 作为证据交给驱动器分类（避免 classifyFailure 再解析一遍）。
+              return { kind: "switch", fail: {
                 status: 200,
                 text: resJson.msg || resJson.message || JSON.stringify(resJson),
                 json: resJson,
@@ -381,63 +386,40 @@ export class WorkBuddyProvider {
             }
           } catch (e) {}
         }
-        // 请求成功，清除冷却与连续惩罚标记
         await setAccountCooldown(account, this.env, "clear");
-        return { done: accountResponse(account, {
+        return { kind: "done", response: accountResponse(account, {
           body: resp.body, status: resp.status,
           statusText: resp.statusText, headers: resp.headers
         }) };
       }
 
+      // 失败收口：429 / 403 / 额度耗尽 / 其余 4xx 统一交驱动器分类
       const status = resp.status;
-
-      // 失败收口：429 / 5xx / 403 / 额度耗尽等统一交驱动器分类
-      //（fatal 即返预渲染响应，cooldown/retry 经 onRetryable 切换）。
       const errText = await resp.text();
-      // 尝试解析 JSON 以进行结构化错误码判定
-      let parsedJson = null;
-      try { parsedJson = JSON.parse(errText); } catch (e) {}
-      return { fail: {
+      return { kind: "switch", fail: {
         status,
         text: errText,
-        json: parsedJson,
         response: accountResponse(account, {
           body: errText, status,
           headers: resp.headers, contentType: "application/json"
         })
       } };
+    };
+
+    try {
+      const { resp, refreshed } = await this.doRequestWithRefresh(account, makeRequest);
+      if (resp.status === 401 && !refreshed) {
+        // 刷新失败：直接切换下一账号（不计入冷却 streak，401 通常是 token 过期而非额度问题）
+        console.warn(`[WorkBuddy] Account "${accountLabel}" 401 token refresh failed, skipping...`);
+        return { kind: "skip", reason: "refresh-failed" };
+      }
+      return await mapResponse(resp);
     } catch (err) {
-      if (err.name === "AbortError") {
-        throw err; // 客户端主动中断取消，直接抛出终止
-      }
-      console.warn(`[WorkBuddy] Account "${account.name || account.id}" network error: ${err.message}, retrying in 600ms...`);
-      try {
-        await new Promise(r => setTimeout(r, retryDelayMs(this.env)));
-        if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
-        const retryResp = await makeRequest(token);
-        // 走 accountResponse seam：网络重试成功分支此前直返原始 Response，
-        // 会漏掉 X-Gateway-Account 归因头（与上方 5xx 原地重试分支收敛同一处）。
-        if (retryResp.ok) return { done: accountResponse(account, {
-          body: retryResp.body, status: retryResp.status,
-          statusText: retryResp.statusText, headers: retryResp.headers
-        }) };
-        const retryErrText = await retryResp.text();
-        let retryJson = null;
-        try { retryJson = JSON.parse(retryErrText); } catch (e) {}
-        return { fail: {
-          status: retryResp.status,
-          text: retryErrText,
-          json: retryJson,
-          response: accountResponse(account, {
-            body: retryErrText, status: retryResp.status,
-            headers: retryResp.headers, contentType: "application/json"
-          })
-        } };
-      } catch (retryErr) {
-        if (retryErr.name === "AbortError") throw retryErr;
-        console.warn(`[WorkBuddy] Account "${account.name || account.id}" retry failed: ${retryErr.message}, switching next...`);
-        return null;
-      }
+      if (err.name === "AbortError") throw err; // 客户端主动中断，直接抛出终止
+      // 传输错误：请求 driver 原地重试（预算与延迟归 driver）。fail 留空——
+      // driver 在预算耗尽时会以该异常作为权威错误收尾。
+      console.warn(`[WorkBuddy] Account "${accountLabel}" network error: ${err.message}, requesting in-place retry...`);
+      return { kind: "retry", delayMs: delay, fail: null };
     }
   }
 

@@ -13,11 +13,12 @@ import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.j
  * 单一深度接口，封装完整的协议探测、跨协议转译、指纹清洗、优先级回退与流式输出
  */
 // 客户端错误直返（400 参数校验 / 404 模型未知）：不进故障转移，两处 short-circuit 共用。
+// 返回裸 Response；调用方包成 { kind:"done", response } outcome 交给 driver。
 function clientError(status, message) {
-  return { done: new Response(JSON.stringify({ error: { message } }), {
+  return new Response(JSON.stringify({ error: { message } }), {
     status,
     headers: { "Content-Type": "application/json", ...corsHeaders }
-  }) };
+  });
 }
 export async function dispatchExchange({
   protocol,
@@ -71,9 +72,12 @@ export async function dispatchExchange({
     });
   }
 
-  // 候选级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、耗尽收尾
-  // 由驱动器统一处理；单个候选的“试一次”（取 provider → 调上游 → 成功渲染 / 失败收口）见 attempt。
+  // 候选级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、retry 预算、
+  // 耗尽收尾由驱动器统一处理；单个候选的「一次往返 → 一个 outcome」见 attempt。
+  // 候选层不原地重试（retryBudget: 0）：不同上游的抖动差异大，切换候选比重发更快。
   return await runFailover(candidates, {
+    retryBudget: 0,
+    signal: request?.signal,
     onRetryable: async (candidate, action, fail) => {
       console.warn(`[Fallback] Provider "${candidate.provider}" (${candidate.model}) returned ${fail.status}, retrying next candidate...`);
     },
@@ -111,7 +115,7 @@ export async function dispatchExchange({
           } catch (err) {
             // 参数校验失败（400 / 404）：直接返回，不进行故障转移
             if (err.status === 400 || err.status === 404) {
-              return clientError(err.status, err.message);
+              return { kind: "done", response: clientError(err.status, err.message) };
             }
             throw err;
           }
@@ -132,7 +136,7 @@ export async function dispatchExchange({
       } catch (err) {
         // 上游抛出的客户端错误（400 / 404）：直接返回，不进行故障转移
         if (err.status === 400 || err.status === 404) {
-          return clientError(err.status, err.message);
+          return { kind: "done", response: clientError(err.status, err.message) };
         }
         console.warn(`[Fallback] Provider "${candidate.provider}" failed: ${err.message}, retrying next candidate...`);
         throw err;
@@ -149,13 +153,13 @@ export async function dispatchExchange({
 
         if (isAnthropic && !nativeAnthropic) {
           if (body.stream !== false) {
-            return { done: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders) };
+            return { kind: "done", response: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders) };
           } else {
-            return { done: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders) };
+            return { kind: "done", response: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders) };
           }
         }
 
-        return { done: new Response(upstreamRes.body, {
+        return { kind: "done", response: new Response(upstreamRes.body, {
           status: 200,
           headers: {
             ...corsHeaders,
@@ -168,9 +172,8 @@ export async function dispatchExchange({
       if (upstreamRes) {
         const status = upstreamRes.status;
         const errText = await upstreamRes.text();
-        // 尝试解析 JSON 以进行结构化错误码判定；分类本身由驱动器经 classify 完成
-        let parsedErrJson = null;
-        try { parsedErrJson = JSON.parse(errText); } catch (e) {}
+        // 分类由驱动器统一经 classifyFailure 完成：这里只交原始证据（status + text），
+        // JSON 解析不再在调用方重复一遍（那是分类内部的一步）。
         // 模型身份级错误（上游说“此模型不可用”）且后面还有不同模型的候选：
         // 对当前模型判 fatal 没有意义，强制切换，让备用模型接管。
         // 可达性说明（审计 H3）：仅当上游返回 400/404 且正文命中 isModelLevelError 时生效。
@@ -184,10 +187,9 @@ export async function dispatchExchange({
         if (laterModelsDiffer) {
           console.warn(`[Fallback] Provider "${candidate.provider}" model "${candidate.model}" unavailable, failing over to a different model...`);
         }
-        return { fail: {
+        return { kind: "switch", fail: {
           status,
           text: errText,
-          json: parsedErrJson,
           ...(laterModelsDiffer ? { force: "retry" } : {}),
           response: new Response(errText, {
             status: status,

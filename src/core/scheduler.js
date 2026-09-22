@@ -8,6 +8,11 @@
 //   cooldown     —— 冷却中（已退避，暂时跳过）
 //   retry        —— 切换下一个账号（服务端瞬时故障，不惩罚）
 //   fatal        —— 不可恢复，直接返回错误给客户端
+//
+// 失败分类的唯一边界是 `classifyFailure(evidence)`：调用方只交出**原始证据**
+// （HTTP 状态 + 原始文本 + 可选已解析 JSON），分类所需的解析（JSON.parse）、
+// 业务码探测（businessErrorCode）、模型身份探测（isModelLevelError）都在这里完成。
+// 调用方（dispatch / workbuddy / failover driver）不再各自预处理——这正是本模块的 seam。
 
 // 指数退避上限（分钟）
 const BACKOFF_MAX_MINUTES = 8;
@@ -104,21 +109,56 @@ export function isWAFChallenge(bodyText = "") {
   return WAF_BODY_MARKERS.some(m => text.includes(m));
 }
 
-// 纯函数：将 HTTP 状态码 + 响应体分类为调度动作。
-//   "cooldown" —— 惩罚性退避（429 / 403 / 结构化业务错误码 / 额度耗尽 / 风控 / WAF 挑战）
-//   "retry"    —— 切换下一账号但不惩罚（5xx 服务端瞬时故障）
+// 纯函数：判断腾讯在 200 状态里返回的业务错误码是否应触发退避。
+// 返回 0 表示无业务错误；否则返回业务错误码。
+export function businessErrorCode(resJson) {
+  if (resJson && typeof resJson === "object" && resJson.code !== undefined && resJson.code !== 0) {
+    return resJson.code;
+  }
+  return 0;
+}
+
+// 纯函数：上游是否在说“这个模型不存在/不可用”（模型身份级错误）。
+// 与配额/限流不同：换一个模型（不同 candidate）可能成功，所以 dispatch 允许它
+// 在“后面还有不同模型的候选”时故障转移。注意边界：
+//   - 只认身份信号（unavailable / not found / does not exist / invalid model），
+//     不认 access/permission（密钥级，全局无解，转移无意义）
+//   - workbuddy 账号循环不使用它（同一模型换账号试同一身份错误纯属浪费）。
+export function isModelLevelError(bodyText = "") {
+  const text = (bodyText || "").toLowerCase();
+  return (
+    text.includes("model is unavailable") ||
+    text.includes("model not found") ||
+    text.includes("no such model") ||
+    text.includes("does not exist") ||
+    text.includes("invalid model") ||
+    text.includes("unknown model") ||
+    text.includes("model_not_found")
+  );
+}
+
+// 纯函数：将「原始证据」分类为调度动作。
+//   "cooldown" —— 惩罚性退避（429 / 403 / 402 / 结构化业务错误码 / 额度耗尽 / 风控 / WAF 挑战）
+//   "retry"    —— 切换下一项但不惩罚（5xx 服务端瞬时故障 / 未知业务码）
 //   "fatal"    —— 不可恢复的客户端错误，直接返回
 //
+// evidence: { status?: number, text?: string, json?: object|null }
+//   - text 为**原始**响应文本；解析 JSON 由本函数完成（调用方不再预处理）。
+//   - json 为调用方已解析好的对象（可选，避免重复解析）；缺省时本函数尝试 JSON.parse(text)。
 // 优先使用结构化业务错误码判定（如腾讯 11140/11128/6004），
 // 仅在 code 字段不存在时，才回退到文本关键词匹配。
 // 这防止普通对话内容（如 "my quota is low"）误判为账号冷却。
-export function classify(status, bodyText = "", resJson = null) {
-  const text = (bodyText || "").toLowerCase();
+export function classifyFailure(evidence = {}) {
+  const status = evidence.status ?? 0;
+  const bodyText = evidence.text ?? "";
+  const text = String(bodyText || "").toLowerCase();
+  // json 缺省时自行解析：调用方只交原始证据，解析是分类的一部分。
+  const resJson = evidence.json !== undefined ? evidence.json : tryParseJson(bodyText);
 
   // 0. WAF 挑战优先：签名只出现在风控页，不可能误伤正常对话
   if (isWAFChallenge(bodyText)) return "cooldown";
 
-  // 1. 结构化错误码优先：从 200 JSON 响应中读取业务 code（通过 businessErrorCode）
+  // 1. 结构化错误码优先：从 JSON 响应中读取业务 code（通过 businessErrorCode）
   //    这样可以避免在 200 响应体里的自由文本里误匹配 "quota"/"rate limit" 等关键词
   if (resJson) {
     const bizCode = businessErrorCode(resJson);
@@ -185,30 +225,20 @@ export function classify(status, bodyText = "", resJson = null) {
   return "fatal";
 }
 
-// 纯函数：上游是否在说“这个模型不存在/不可用”（模型身份级错误）。
-// 与配额/限流不同：换一个模型（不同 candidate）可能成功，所以 dispatch 允许它
-// 在“后面还有不同模型的候选”时故障转移。注意边界：
-//   - 只认身份信号（unavailable / not found / does not exist / invalid model），
-//     不认 access/permission（密钥级，全局无解，转移无意义）
-//   - workbuddy 账号循环不使用它（同一模型换账号试同一身份错误纯属浪费）。
-export function isModelLevelError(bodyText = "") {
-  const text = (bodyText || "").toLowerCase();
-  return (
-    text.includes("model is unavailable") ||
-    text.includes("model not found") ||
-    text.includes("no such model") ||
-    text.includes("does not exist") ||
-    text.includes("invalid model") ||
-    text.includes("unknown model") ||
-    text.includes("model_not_found")
-  );
+// 别名：老签名 classify(status, text, json) 仍然可用（签名兼容）。
+// 注意语义差一处：resJson 默认 **undefined**（不是老默认 null）：缺省时与
+// classifyFailure({status,text}) 一样自行解析 text。旧语义（"确认无结构体、不解析"）
+// 请显式传 null。src 内已无 classify 旧调用（仅测试），生产路径均走 classifyFailure。
+export function classify(status, bodyText = "", resJson) {
+  return classifyFailure({ status, text: bodyText, json: resJson });
 }
 
-// 纯函数：判断腾讯在 200 状态里返回的业务错误码是否应触发退避。
-// 返回 0 表示无业务错误；否则返回业务错误码。
-export function businessErrorCode(resJson) {
-  if (resJson && typeof resJson === "object" && resJson.code !== undefined && resJson.code !== 0) {
-    return resJson.code;
+function tryParseJson(bodyText) {
+  if (typeof bodyText !== "string" || !bodyText) return null;
+  try {
+    const v = JSON.parse(bodyText);
+    return typeof v === "object" && v !== null ? v : null;
+  } catch (e) {
+    return null;
   }
-  return 0;
 }
