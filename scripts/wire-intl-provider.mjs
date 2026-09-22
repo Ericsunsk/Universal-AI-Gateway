@@ -6,7 +6,7 @@
 // 说明：
 // - 经 /admin/api/config 读写，redacted 密钥由服务端 mergeSecrets 自动回填，不会抹掉现网凭据。
 // - 账号来源为本机 CLI 登录态文件；脚本只读所需三个字段，不打印、不落盘。
-// - 已验证 serve 的 intl 模型才配 routes：glm-5.2、deepseek-v4.1-flash（各带 opencode 兜底）。
+// - 已验证 serve 的 intl 模型才配 routes：glm-5.2、deepseek-v4.1-flash。
 import fs from "node:fs";
 
 const GATEWAY_URL = (process.env.GATEWAY_URL || "http://localhost:8787").replace(/\/$/, "");
@@ -66,12 +66,10 @@ config.providers = providers;
 
 const INTL_ROUTES = {
   "glm-5.2-intl": [
-    { provider: "workbuddy-intl", model: "glm-5.2" },
-    { provider: "opencode", model: "mimo-v2.5-free" }
+    { provider: "workbuddy-intl", model: "glm-5.2" }
   ],
   "deepseek-v4.1-flash-intl": [
-    { provider: "workbuddy-intl", model: "deepseek-v4.1-flash" },
-    { provider: "opencode", model: "mimo-v2.5-free" }
+    { provider: "workbuddy-intl", model: "deepseek-v4.1-flash" }
   ]
 };
 config.routes = { ...(config.routes || {}), ...INTL_ROUTES };

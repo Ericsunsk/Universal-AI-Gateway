@@ -90,7 +90,7 @@ export function reduceOpenAIChunk(parsed) {
     return { kind: "tool_use", calls, stopReason: "tool_use" };
   }
 
-  // 思维链增量（兼容 DeepSeek reasoning_content 与 OpenCode / MiMo reasoning）
+  // 思维链增量（兼容 DeepSeek 的 reasoning_content 与通用 reasoning 字段）
   const reasoningDelta = delta?.reasoning_content || delta?.reasoning;
   if (reasoningDelta) {
     return { kind: "thinking", text: reasoningDelta };
@@ -256,7 +256,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             const delta = parsed.choices?.[0]?.delta;
             if (!delta) continue;
 
-            // 思维链 (DeepSeek reasoning_content / OpenCode reasoning)
+            // 思维链 (DeepSeek reasoning_content / 通用 reasoning 字段)
             const reasoningChunk = delta.reasoning_content || delta.reasoning || "";
             if (reasoningChunk) {
               if (currentBlockType !== "thinking") {

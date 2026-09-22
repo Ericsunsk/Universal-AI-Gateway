@@ -31,7 +31,7 @@
 | :--- | :--- | :--- |
 | **协议支持** | 仅支持单一上游格式 | **双向转译**：同时对外暴露 `/v1/messages` (Claude) 与 `/v1/chat/completions` (OpenAI) |
 | **思维链 & 工具** | 易丢失或乱码 | **完整支持**：原生还原 `thinking` 推理流、Tool Calling 函数调用与心跳保活 |
-| **多上游容灾 (Fallback)** | 单点故障，429/超时直接报错 | **优先级队列**：遇 429、5xx 或风控秒级自动切换备用上游（如 OpenCode Zen 免费池 / 官方 DeepSeek） |
+| **多上游容灾 (Fallback)** | 单点故障，429/超时直接报错 | **优先级队列**：遇 429、5xx 或风控秒级自动切换备用上游（如 WorkBuddy 多账号 / DeepSeek 官方） |
 | **WorkBuddy 凭证保活** | 几天后 Token 过期需手动重新登录 | **无感刷新**：后台通过 RefreshToken 自动无感续签，长效免维护 |
 | **每日领积分** | 容易忘记签到导致积分耗尽 | **自动签到**：Cloudflare Cron 每日两次自动执行签到，结果入库 KV |
 | **CC-Switch 余额显示** | 无法显示 WorkBuddy 积分 | **专属端点**：提供 `/v1/usage`，配合脚本无缝在 CC-Switch 显示剩余积分 |

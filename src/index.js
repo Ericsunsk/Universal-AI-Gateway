@@ -109,9 +109,7 @@ export default {
       if (!auth.ok) return auth.response;
 
       const configuredModels = Object.keys(config.routes || {});
-      const opencode = fleet?.getProvider?.("opencode");
-      const opencodeFreeModels = typeof opencode?.getFreeModels === "function" ? opencode.getFreeModels() : [];
-      const allModels = Array.from(new Set([...configuredModels, ...opencodeFreeModels]));
+      const allModels = Array.from(new Set(configuredModels));
 
       return new Response(JSON.stringify({
         object: "list",
@@ -119,7 +117,7 @@ export default {
           id,
           object: "model",
           created: Math.floor(Date.now() / 1000),
-          owned_by: opencodeFreeModels.includes(id) ? "opencode-zen-free" : "worker-gateway"
+          owned_by: "worker-gateway"
         }))
       }), {
         status: 200,

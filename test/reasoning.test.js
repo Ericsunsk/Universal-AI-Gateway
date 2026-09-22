@@ -3,23 +3,9 @@ import assert from "node:assert/strict";
 import {
   parseReasoningIntent,
   applyReasoningToPayload,
-  matchOpenCodeFamily,
   budgetToEffortLevel,
   effortLevelToBudget
 } from "../src/exchange/reasoning.js";
-
-test("matchOpenCodeFamily is the single model-name knowledge", () => {
-  assert.equal(matchOpenCodeFamily("muse-spark-1.3-contributor-free"), "muse-spark");
-  assert.equal(matchOpenCodeFamily("ling-3.0-flash-fin-free"), "ling");
-  assert.equal(matchOpenCodeFamily("deepseek/deepseek-chat"), "deepseek");
-  assert.equal(matchOpenCodeFamily("deepseek-v4-flash-free"), "deepseek");
-  assert.equal(matchOpenCodeFamily("big-pickle"), "generic");
-  assert.equal(matchOpenCodeFamily("nemotron-3-ultra-free"), "generic");
-  assert.equal(matchOpenCodeFamily("claude-3-7-sonnet-20250219"), null);
-  assert.equal(matchOpenCodeFamily("gpt-4o"), null);
-  assert.equal(matchOpenCodeFamily(null), null);
-  assert.equal(matchOpenCodeFamily(""), null);
-});
 
 test("budgetToEffortLevel and effortLevelToBudget convert accurately", () => {
   assert.equal(budgetToEffortLevel(1024), "minimal");
@@ -115,20 +101,6 @@ test("applyReasoningToPayload adapts to OpenAI provider correctly", () => {
   const adapted = applyReasoningToPayload(payload, intent, "openai", "o3-mini");
   assert.equal(adapted.reasoning_effort, "high", "xhigh maps to OpenAI high");
   assert.deepEqual(adapted.reasoning, { effort: "high", enabled: true });
-});
-
-test("applyReasoningToPayload adapts to OpenCode models specifically", () => {
-  // Muse Spark 支持 xhigh
-  const museIntent = { cleanModel: "muse-spark-1.3", enabled: true, level: "xhigh" };
-  const musePayload = applyReasoningToPayload({ model: "muse-spark-1.3" }, museIntent, "opencode", "muse-spark-1.3");
-  assert.equal(musePayload.reasoning_effort, "xhigh");
-  assert.deepEqual(musePayload.reasoning, { effort: "xhigh", enabled: true });
-
-  // Ling 3.0 支持 toggle
-  const lingIntent = { cleanModel: "ling-3.0", enabled: false };
-  const lingPayload = applyReasoningToPayload({ model: "ling-3.0-flash-fin-free" }, lingIntent, "opencode", "ling-3.0-flash-fin-free");
-  assert.deepEqual(lingPayload.reasoning, { enabled: false });
-  assert.equal(lingPayload.reasoning_effort, undefined);
 });
 
 test("applyReasoningToPayload safely sanitizes WorkBuddy provider to prevent 400 errors", () => {

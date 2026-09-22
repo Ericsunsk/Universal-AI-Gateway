@@ -5,7 +5,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 ## Module layout (DDD-lite: one context, role-based folders)
 
 - `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration).
-- `src/providers/` — upstream adapters only: one directory per multi-file provider (`opencode/`, `workbuddy/`, each with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
+- `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, `qwenweb/`, each with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
 - `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer`.
 - `src/config/`, `src/admin/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the Worker entry, `api/` the Vercel entry.
 
@@ -15,7 +15,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **candidate** — a `{ provider, model }` pair tried in sequence during failover. One route has many candidates.
 
-- **provider** — an adapter over one upstream AI service (WorkBuddy/Tencent, Qwen Web, an OpenAI-compatible endpoint, or an Anthropic-compatible endpoint). Concrete implementations: `WorkBuddyProvider`, `QwenWebProvider`, `OpenCodeProvider`, `OpenAIStandardProvider`, `AnthropicStandardProvider`.
+- **provider** — an adapter over one upstream AI service (WorkBuddy/Tencent, Qwen Web, an OpenAI-compatible endpoint, or an Anthropic-compatible endpoint). Concrete implementations: `WorkBuddyProvider`, `QwenWebProvider`, `OpenAIStandardProvider`, `AnthropicStandardProvider`.
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 
@@ -45,7 +45,7 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 - **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/stream.js`).
 
-- **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and hands the intent to transform; **OpenCode family** (`matchOpenCodeFamily`: muse-spark / ling / deepseek / generic) is the single home of model-name knowledge shared by effort-level mapping and the opencode adapter's endpoint routing.
+- **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and hands the intent to `applyReasoningToPayload`, which adapts it per provider type (anthropic / openai-compatible / workbuddy).
 
 ## Classification vocabulary (in the scheduler)
 

@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerProvider, supportedProviderTypes, createProvider } from "../src/providers/index.js";
 
-test("registry ships the five built-in provider types", () => {
-  assert.deepEqual(supportedProviderTypes(), ["workbuddy", "opencode", "openai", "anthropic", "qwenweb"]);
+test("registry ships the four built-in provider types", () => {
+  assert.deepEqual(supportedProviderTypes(), ["workbuddy", "openai", "anthropic", "qwenweb"]);
 });
 
 test("registry creates providers without touching the factory", () => {

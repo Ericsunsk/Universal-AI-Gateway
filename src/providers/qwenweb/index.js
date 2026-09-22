@@ -233,7 +233,7 @@ export class QwenWebProvider {
   }
 
   // qwen 自定义 SSE → OpenAI chat.completion.chunk SSE（下游现有转译器直接可用；
-  // thinking 走 reasoning_content 键，与 opencode 通道约定一致）
+  // thinking 走 reasoning_content 键，与 OpenAI 兼容通道约定一致）
   toOpenAIStream(upstreamBody, model) {
     return new ReadableStream({
       async start(controller) {

@@ -394,25 +394,6 @@ test("streamOpenAIToAnthropic cancels upstream on client abort (no stranded pump
   reader.releaseLock();
 });
 
-test("translateResponsesStreamToOpenAI cancels upstream on abort", async () => {
-  const { translateResponsesStreamToOpenAI } = await import("../src/providers/opencode/responses.js");
-  let upstreamCancelled = false;
-  const slowUpstream = new ReadableStream({
-    start(c) {
-      c.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"hi"}\n\n'));
-    },
-    cancel() { upstreamCancelled = true; }
-  });
-  const ac = new AbortController();
-  const res = translateResponsesStreamToOpenAI(slowUpstream, { elapsed: 1, upstreamHeaders: new Headers(), signal: ac.signal });
-  const reader = res.body.getReader();
-  await reader.read();
-  ac.abort();
-  await new Promise(r => setTimeout(r, 50));
-  assert.equal(upstreamCancelled, true, "responses pump must cancel upstream on abort");
-  reader.releaseLock();
-});
-
 test("dispatchExchange returns 400 (not 502) for image input", async () => {
   const fakeFleet = { getProvider: () => ({ type: "openai", callChat: async () => { throw new Error("must not reach upstream"); } }) };
   const res = await dispatchExchange({

@@ -38,8 +38,7 @@ config.providers = providers;
 config.routes = {
   ...(config.routes || {}),
   "qwen3.7-plus-test": [
-    { provider: "qwenweb", model: "qwen3.7-plus" },
-    { provider: "opencode", model: "mimo-v2.5-free" }
+    { provider: "qwenweb", model: "qwen3.7-plus" }
   ]
 };
 

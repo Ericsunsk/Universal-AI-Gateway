@@ -179,14 +179,14 @@ test("backfillMissingRoutes adds missing default routes without touching existin
   const defaults = getDefaultConfig({ API_KEY: "k" });
   const stored = {
     providers: JSON.parse(JSON.stringify(defaults.providers)),
-    routes: { "mimo-v2.5-free": JSON.parse(JSON.stringify(defaults.routes["mimo-v2.5-free"])) }
+    routes: { "glm-5.2": JSON.parse(JSON.stringify(defaults.routes["glm-5.2"])) }
   };
-  const custom = [{ provider: "opencode", model: "custom-model" }];
+  const custom = [{ provider: "workbuddy", model: "custom-model" }];
   stored.routes["my-custom"] = custom;
   const out = backfillMissingRoutes(stored, defaults);
-  assert.ok(out.routes["nemotron-3.5-lightning-free"], "missing default route backfilled");
+  assert.ok(out.routes["deepseek-v4.1-flash"], "missing default route backfilled");
   assert.deepEqual(out.routes["my-custom"], custom, "custom route untouched");
-  assert.deepEqual(out.routes["mimo-v2.5-free"], defaults.routes["mimo-v2.5-free"]);
+  assert.deepEqual(out.routes["glm-5.2"], defaults.routes["glm-5.2"]);
 });
 
 test("backfillMissingRoutes keeps empty-provider config empty (degraded path)", () => {
@@ -199,12 +199,12 @@ test("backfillMissingRoutes keeps empty-provider config empty (degraded path)", 
 test("backfillMissingRoutes skips routes referencing unknown providers", () => {
   const defaults = getDefaultConfig({ API_KEY: "k" });
   const stored = {
-    providers: [{ id: "opencode", config: {} }],
+    providers: [{ id: "workbuddy", config: {} }],
     routes: {}
   };
   backfillMissingRoutes(stored, defaults);
-  assert.ok(stored.routes["nemotron-3.5-lightning-free"], "opencode-only route backfilled");
-  assert.equal(stored.routes["deepseek-v4.1-flash"], undefined, "workbuddy-mixed route skipped");
+  assert.ok(stored.routes["glm-5.2"], "workbuddy-only route backfilled");
+  assert.equal(stored.routes["glm-5.2-intl"], undefined, "workbuddy-intl route skipped (unknown provider)");
 });
 
 test("defaults include disabled workbuddy-intl slot with zero runtime effect", () => {

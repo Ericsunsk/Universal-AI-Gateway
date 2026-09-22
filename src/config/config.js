@@ -78,138 +78,56 @@ export function getDefaultConfig(env) {
           fingerprint: {}
         }
       },
-      {
-        id: "opencode",
-        name: "OpenCode Zen (Free Tier)",
-        type: "opencode",
-        enabled: true,
-        config: {
-          baseUrl: "https://opencode.ai/zen/v1"
-        }
-      },
     ],
     routes: {
       "deepseek-v4.1-flash": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4-flash" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
       ],
       "deepseek-v4-flash": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" },
-        { provider: "opencode", model: "mimo-v2.5-free" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
       ],
       "deepseek-v4-pro": [
         { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4.1-flash" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" }
+        { provider: "workbuddy", model: "deepseek-v4.1-flash" }
       ],
       "claude-3-7-sonnet-20250219": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4-flash" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
       ],
       "claude-3-5-sonnet-20241022": [
         { provider: "workbuddy", model: "deepseek-v4.1-flash" },
         { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "workbuddy", model: "deepseek-v4-flash" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
       ],
       "claude-3-5-haiku-20241022": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" },
-        { provider: "opencode", model: "mimo-v2.5-free" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
       ],
       "claude-3-haiku-20240307": [
-        { provider: "workbuddy", model: "deepseek-v4-flash" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" }
+        { provider: "workbuddy", model: "deepseek-v4-flash" }
       ],
       "claude-3-opus-20240229": [
-        { provider: "workbuddy", model: "deepseek-v4-pro" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+        { provider: "workbuddy", model: "deepseek-v4-pro" }
       ],
       "glm-5.2": [
-        { provider: "workbuddy", model: "glm-5.2" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
+        { provider: "workbuddy", model: "glm-5.2" }
       ],
       "kimi-k3-1": [
-        { provider: "workbuddy", model: "kimi-k3-1" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-      ],
-      "mimo-v2.5-free": [
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" }
+        { provider: "workbuddy", model: "kimi-k3-1" }
       ],
       // 国际站已验证 serve 的路由（glm-5.2 实测 200）。intl provider 无凭证时保持 disabled，
       // 存量 KV 因回填约束（引用 provider 必须存在）自动跳过本条，不影响现网。
       "glm-5.2-intl": [
-        { provider: "workbuddy-intl", model: "glm-5.2" },
-        { provider: "opencode", model: "mimo-v2.5-free" }
+        { provider: "workbuddy-intl", model: "glm-5.2" }
       ],
       // Qwen 网页版 live 验证通道：仅 QWEN_TOKEN 在时出现（X-Gateway-Model 头可验明哪家 serve）。
       ...(qwenToken !== "" ? {
         "qwen3.7-plus-test": [
-          { provider: "qwenweb", model: "qwen3.7-plus" },
-          { provider: "opencode", model: "mimo-v2.5-free" }
+          { provider: "qwenweb", model: "qwen3.7-plus" }
         ]
-      } : {}),
-      "ling-3.0-flash-fin-free": [
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "big-pickle" },
-        { provider: "opencode", model: "mimo-v2.5-free" }
-      ],
-      "big-pickle": [
-        { provider: "opencode", model: "big-pickle" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" }
-      ],
-      "nemotron-3-ultra-free": [
-        { provider: "opencode", model: "nemotron-3-ultra-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-      ],
-      "nemotron-3.5-lightning-free": [
-        { provider: "opencode", model: "nemotron-3.5-lightning-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-      ],
-      "muse-spark-1.3": [
-        { provider: "opencode", model: "muse-spark-1.3-contributor-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-      ],
-      "muse-spark-1.3-contributor-free": [
-        { provider: "opencode", model: "muse-spark-1.3-contributor-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-      ],
-      "muse-spark-1.2-contributor-free": [
-        { provider: "opencode", model: "muse-spark-1.2-contributor-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" }
-      ],
-      "deepseek-v4-flash-free": [
-        { provider: "opencode", model: "deepseek-v4-flash-free" },
-        { provider: "opencode", model: "ling-3.0-flash-fin-free" },
-        { provider: "opencode", model: "mimo-v2.5-free" }
-      ]
+      } : {})
     },
     virtual_keys: {
       [defaultApiKey]: {
@@ -223,7 +141,7 @@ export function getDefaultConfig(env) {
 }
 
 // 纯函数：用代码默认路由回填 KV 存量配置里缺失的路由（只增不改）。
-// 背景：KV 一旦写入就盖住代码默认，后续发版新增路由（如 nemotron-3.5）对存量环境不可见，
+// 背景：KV 一旦写入就盖住代码默认，后续发版新增路由（如新的 workbuddy 模型路由）对存量环境不可见，
 // 必须手动清 KV 才能生效。本函数让读路径自动补齐缺失项，各环境无需动线上密钥。
 // 约束：只补“引用 provider 在存量配置里全部存在”的路由；空 provider 配置（如测试的降级场景）保持原样。
 export function backfillMissingRoutes(stored, defaults) {

@@ -127,30 +127,12 @@ export function parseReasoningIntent({ model = "", body = {} } = {}) {
 }
 
 /**
- * OpenCode 家族归属判定 —— 全网关唯一的“模型名 → 家族”知识。
- * 返回 "muse-spark" | "ling" | "deepseek" | "generic"（家族内其他免费模型）| null（非家族）。
- * 推理档位映射（本模块）与端点路由（opencode adapter）共用；不要在调用方另写 includes。
- * 注意：仅做“归属分类”，不做“是否走 OpenCode 通道”判定 —— 裸 deepseek（如 OpenAI 兼容上游的
- * deepseek/deepseek-chat）分类上属 deepseek 家族，但通道仍由下方的 isOpenCode 门控决定。
- */
-export function matchOpenCodeFamily(modelName) {
-  const lower = String(modelName || "").toLowerCase();
-  if (!lower) return null;
-  if (lower.includes("muse-spark")) return "muse-spark";
-  if (lower.includes("ling")) return "ling";
-  if (lower.includes("deepseek")) return "deepseek";
-  if (lower.includes("-free") || lower.includes("big-pickle") || lower.includes("nemotron")) return "generic";
-  return null;
-}
-
-/**
  * 将解析出的标准推理意图，安全适配注入到对应上游提供商的 Payload 中
  */
 export function applyReasoningToPayload(payload, intent, providerType, targetModel = "") {
   if (!payload || !intent) return payload;
 
   const type = (providerType || "").toLowerCase();
-  const lowerModel = (targetModel || payload.model || "").toLowerCase();
 
   // ----------------------------------------------------
   // 1. Anthropic 官方 / 兼容提供商 (如 Claude 3.7 Hybrid Thinking)
@@ -168,67 +150,6 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
       if (payload.temperature !== undefined && payload.temperature !== 1.0) {
         payload.temperature = 1.0;
       }
-    }
-    return payload;
-  }
-
-  // ----------------------------------------------------
-  // 2. OpenCode Zen 提供商 (如 Muse Spark, Ling 3.0, DeepSeek V4)
-  // ----------------------------------------------------
-  // 家族归属由 matchOpenCodeFamily 统一判定；显式 type === "opencode" 时未知模型走 generic。
-  // 门控保持旧语义：裸 deepseek（如 OpenAI 兼容上游的 deepseek/deepseek-chat）不进 OpenCode 通道，
-  // 只有 muse-spark / ling / 免费标记（-free、big-pickle、nemotron）或显式 type 才进。
-  const family = matchOpenCodeFamily(lowerModel);
-  const isOpenCode = type === "opencode" || family === "muse-spark" || family === "ling" || family === "generic";
-
-  if (isOpenCode) {
-    // Muse Spark 支持完整的 5 档: minimal, low, medium, high, xhigh
-    if (family === "muse-spark") {
-      const museEffort = intent.level || "medium";
-      payload.reasoning = {
-        effort: museEffort,
-        enabled: intent.enabled
-      };
-      payload.reasoning_effort = museEffort;
-      return payload;
-    }
-
-    // Ling 3.0 支持 toggle 开关
-    if (family === "ling") {
-      payload.reasoning = { enabled: intent.enabled };
-      if (!intent.enabled) {
-        delete payload.reasoning_effort;
-      }
-      return payload;
-    }
-
-    // DeepSeek V4 支持 low, high, max 及 toggle
-    if (family === "deepseek") {
-      let dsEffort = "high";
-      if (intent.level === "minimal" || intent.level === "low") dsEffort = "low";
-      else if (intent.level === "xhigh" || intent.level === "max") dsEffort = "max";
-
-      payload.reasoning = {
-        enabled: intent.enabled,
-        effort: dsEffort
-      };
-      if (intent.enabled) {
-        payload.reasoning_effort = dsEffort;
-      } else {
-        delete payload.reasoning_effort;
-      }
-      return payload;
-    }
-
-    // 其他 OpenCode 免费模型（如 mimo-v2.5, big-pickle, nemotron）
-    if (!intent.enabled) {
-      payload.reasoning = { enabled: false };
-    } else if (intent.level) {
-      payload.reasoning = {
-        enabled: true,
-        effort: intent.level
-      };
-      payload.reasoning_effort = intent.level;
     }
     return payload;
   }
