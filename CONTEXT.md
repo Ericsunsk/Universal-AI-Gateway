@@ -15,7 +15,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **candidate** — a `{ provider, model }` pair tried in sequence during failover. One route has many candidates.
 
-- **provider** — an adapter over one upstream AI service (WorkBuddy/Tencent, OpenRouter, an OpenAI-compatible endpoint, or an Anthropic-compatible endpoint). Concrete implementations: `WorkBuddyProvider`, `OpenAIStandardProvider`, `AnthropicStandardProvider`.
+- **provider** — an adapter over one upstream AI service (WorkBuddy/Tencent, Qwen Web, an OpenAI-compatible endpoint, or an Anthropic-compatible endpoint). Concrete implementations: `WorkBuddyProvider`, `QwenWebProvider`, `OpenCodeProvider`, `OpenAIStandardProvider`, `AnthropicStandardProvider`.
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 

@@ -31,7 +31,7 @@
 | :--- | :--- | :--- |
 | **协议支持** | 仅支持单一上游格式 | **双向转译**：同时对外暴露 `/v1/messages` (Claude) 与 `/v1/chat/completions` (OpenAI) |
 | **思维链 & 工具** | 易丢失或乱码 | **完整支持**：原生还原 `thinking` 推理流、Tool Calling 函数调用与心跳保活 |
-| **多上游容灾 (Fallback)** | 单点故障，429/超时直接报错 | **优先级队列**：遇 429、5xx 或风控秒级自动切换备用上游（如 OpenRouter / 官方 DeepSeek） |
+| **多上游容灾 (Fallback)** | 单点故障，429/超时直接报错 | **优先级队列**：遇 429、5xx 或风控秒级自动切换备用上游（如 OpenCode Zen 免费池 / 官方 DeepSeek） |
 | **WorkBuddy 凭证保活** | 几天后 Token 过期需手动重新登录 | **无感刷新**：后台通过 RefreshToken 自动无感续签，长效免维护 |
 | **每日领积分** | 容易忘记签到导致积分耗尽 | **自动签到**：Cloudflare Cron 每日两次自动执行签到，结果入库 KV |
 | **CC-Switch 余额显示** | 无法显示 WorkBuddy 积分 | **专属端点**：提供 `/v1/usage`，配合脚本无缝在 CC-Switch 显示剩余积分 |
@@ -55,7 +55,7 @@ flowchart TD
     
     subgraph Fleet ["🛡️ Provider Fleet 插件与适配器"]
         Fallback --> P_WB["WorkBuddy 深度插件<br/>(Token 自动续签 / 定时签到 / 积分查询 / 11128 脱敏)"]
-        Fallback --> P_OAI["OpenAI 兼容适配器<br/>(DeepSeek 官方 / OpenRouter / 硅基流动等)"]
+        Fallback --> P_OAI["OpenAI 兼容适配器<br/>(DeepSeek 官方 / 硅基流动等)"]
         Fallback --> P_ANT["Anthropic 原生适配器"]
     end
     
@@ -291,12 +291,12 @@ claude
 </details>
 
 <details>
-<summary><b>Q: 如何配置备用模型（例如 OpenRouter）？</b></summary>
+<summary><b>Q: 如何配置备用模型（例如 DeepSeek 官方 API）？</b></summary>
 
-登录 `/admin` 控制台，在 **上游提供商** 中开启 OpenRouter 并填入你的 OpenRouter API Key，然后在 **模型路由** 中把 `deepseek-v4.1-flash` 的候选列表设置为：
+登录 `/admin` 控制台，在 **上游提供商** 中新增一个 `type: "openai"` 的兼容上游并填入 API Key，然后在 **模型路由** 中把 `deepseek-v4.1-flash` 的候选列表设置为：
 1. `workbuddy -> deepseek-v4.1-flash`
-2. `openrouter -> deepseek/deepseek-chat`  
-保存后即时生效！一旦 WorkBuddy 额度耗尽或发生限流，请求会自动重试并降级到 OpenRouter。
+2. `deepseek-official -> deepseek-chat`  
+保存后即时生效！一旦 WorkBuddy 额度耗尽或发生限流，请求会自动重试并降级到 DeepSeek 官方。
 </details>
 
 ---

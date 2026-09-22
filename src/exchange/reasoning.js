@@ -130,7 +130,7 @@ export function parseReasoningIntent({ model = "", body = {} } = {}) {
  * OpenCode 家族归属判定 —— 全网关唯一的“模型名 → 家族”知识。
  * 返回 "muse-spark" | "ling" | "deepseek" | "generic"（家族内其他免费模型）| null（非家族）。
  * 推理档位映射（本模块）与端点路由（opencode adapter）共用；不要在调用方另写 includes。
- * 注意：仅做“归属分类”，不做“是否走 OpenCode 通道”判定 —— 裸 deepseek（如 openrouter 的
+ * 注意：仅做“归属分类”，不做“是否走 OpenCode 通道”判定 —— 裸 deepseek（如 OpenAI 兼容上游的
  * deepseek/deepseek-chat）分类上属 deepseek 家族，但通道仍由下方的 isOpenCode 门控决定。
  */
 export function matchOpenCodeFamily(modelName) {
@@ -176,7 +176,7 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
   // 2. OpenCode Zen 提供商 (如 Muse Spark, Ling 3.0, DeepSeek V4)
   // ----------------------------------------------------
   // 家族归属由 matchOpenCodeFamily 统一判定；显式 type === "opencode" 时未知模型走 generic。
-  // 门控保持旧语义：裸 deepseek（如 openrouter 的 deepseek/deepseek-chat）不进 OpenCode 通道，
+  // 门控保持旧语义：裸 deepseek（如 OpenAI 兼容上游的 deepseek/deepseek-chat）不进 OpenCode 通道，
   // 只有 muse-spark / ling / 免费标记（-free、big-pickle、nemotron）或显式 type 才进。
   const family = matchOpenCodeFamily(lowerModel);
   const isOpenCode = type === "opencode" || family === "muse-spark" || family === "ling" || family === "generic";
@@ -234,7 +234,7 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
   }
 
   // ----------------------------------------------------
-  // 3. OpenAI 官方 / 兼容提供商 (如 o1, o3-mini, OpenRouter)
+  // 3. OpenAI 官方 / 兼容提供商 (如 o1, o3-mini, DeepSeek 官方)
   // ----------------------------------------------------
   if (type === "openai" || !type) {
     // 映射到 OpenAI 仅支持的 3 档: low, medium, high
