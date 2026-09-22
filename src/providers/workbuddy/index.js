@@ -107,6 +107,7 @@ export class WorkBuddyProvider {
   }
 
   // 获取所有启用的账号列表（支持单账号与账号池双重兼容）
+  // 获取所有启用的账号列表（平级账号池）
   getAccounts() {
     if (Array.isArray(this.config.accounts) && this.config.accounts.length > 0) {
       return this.config.accounts.filter(acc => acc.enabled !== false);
@@ -119,8 +120,8 @@ export class WorkBuddyProvider {
     const defaultRefresh = this.config.refreshToken || this.env.REFRESH_TOKEN;
     if (defaultUserId) {
       return [{
-        id: "primary",
-        name: "主账号",
+        id: "account-1",
+        name: "Account 1",
         enabled: true,
         userId: defaultUserId,
         accessToken: defaultAccess,
@@ -130,7 +131,7 @@ export class WorkBuddyProvider {
     return [];
   }
 
-  // 获取特定账号的有效 Token
+  // 获取特定账号的有效 Token（所有账号平级读取缓存）
   async getActiveToken(account) {
     const cacheKey = `${this.id}_${account.id}`;
     const now = Date.now();
@@ -141,21 +142,22 @@ export class WorkBuddyProvider {
 
     if (this.kv) {
       const kvToken = await this.kv.get(`WB_ACCESS_TOKEN_${cacheKey}`) ||
-                     (account.id === "primary" ? await this.kv.get(`WB_ACCESS_TOKEN_${this.id}`) || await this.kv.get("ACCESS_TOKEN") : null);
+                     (await this.kv.get(`WB_ACCESS_TOKEN_${this.id}`)) ||
+                     (await this.kv.get("ACCESS_TOKEN"));
       if (kvToken) {
         memoryTokenCache.set(cacheKey, { token: kvToken, timestamp: now });
         return kvToken;
       }
     }
 
-    const fallback = account.accessToken || (account.id === "primary" ? this.env.ACCESS_TOKEN : "");
+    const fallback = account.accessToken || this.env.ACCESS_TOKEN || "";
     if (fallback) {
       memoryTokenCache.set(cacheKey, { token: fallback, timestamp: now });
     }
     return fallback;
   }
 
-  // 刷新特定账号或全部账号的 AccessToken
+  // 刷新特定账号或全部账号的 AccessToken（所有账号平级刷新与存储）
   async refreshAccessToken(account = null) {
     if (!account) {
       const accounts = this.getAccounts();
@@ -163,10 +165,11 @@ export class WorkBuddyProvider {
       return results.map(r => r.status === "fulfilled" ? r.value : null).filter(Boolean);
     }
     const cacheKey = `${this.id}_${account.id}`;
-    let refreshToken = account.refreshToken || (account.id === "primary" ? this.env.REFRESH_TOKEN : "");
+    let refreshToken = account.refreshToken || this.env.REFRESH_TOKEN || "";
     if (this.kv) {
       const cachedRefresh = await this.kv.get(`WB_REFRESH_TOKEN_${cacheKey}`) ||
-                           (account.id === "primary" ? await this.kv.get(`WB_REFRESH_TOKEN_${this.id}`) || await this.kv.get("REFRESH_TOKEN") : null);
+                           (await this.kv.get(`WB_REFRESH_TOKEN_${this.id}`)) ||
+                           (await this.kv.get("REFRESH_TOKEN"));
       if (cachedRefresh) refreshToken = cachedRefresh;
     }
     if (!refreshToken) return null;
@@ -195,16 +198,8 @@ export class WorkBuddyProvider {
 
         if (this.kv) {
           await this.kv.put(`WB_ACCESS_TOKEN_${cacheKey}`, newAccess);
-          if (account.id === "primary") {
-            await this.kv.put(`WB_ACCESS_TOKEN_${this.id}`, newAccess);
-            await this.kv.put("ACCESS_TOKEN", newAccess);
-          }
           if (newRefresh) {
             await this.kv.put(`WB_REFRESH_TOKEN_${cacheKey}`, newRefresh);
-            if (account.id === "primary") {
-              await this.kv.put(`WB_REFRESH_TOKEN_${this.id}`, newRefresh);
-              await this.kv.put("REFRESH_TOKEN", newRefresh);
-            }
           }
           await this.kv.put("LAST_REFRESH", new Date().toISOString());
         }
@@ -320,8 +315,8 @@ export class WorkBuddyProvider {
             status: retryResp.status,
             statusText: retryResp.statusText,
             headers: buildResponseHeaders(retryResp.headers, {
-              "X-Gateway-Account": account.id || "primary",
-              "X-Gateway-Account-Id": account.id || "primary"
+              "X-Gateway-Account": account.id || "account",
+              "X-Gateway-Account-Id": account.id || "account"
             })
           }) };
         }
@@ -346,8 +341,8 @@ export class WorkBuddyProvider {
                   status: 200,
                   headers: buildResponseHeaders(resp.headers, {
                     "Content-Type": "application/json",
-                    "X-Gateway-Account": account.id || "primary",
-                    "X-Gateway-Account-Id": account.id || "primary"
+                    "X-Gateway-Account": account.id || "account",
+                    "X-Gateway-Account-Id": account.id || "account"
                   })
                 })
               } };
@@ -360,8 +355,8 @@ export class WorkBuddyProvider {
           status: resp.status,
           statusText: resp.statusText,
           headers: buildResponseHeaders(resp.headers, {
-            "X-Gateway-Account": account.id || "primary",
-            "X-Gateway-Account-Id": account.id || "primary"
+            "X-Gateway-Account": account.id || "account",
+            "X-Gateway-Account-Id": account.id || "account"
           })
         }) };
       }
@@ -382,8 +377,8 @@ export class WorkBuddyProvider {
           status: status,
           headers: buildResponseHeaders(resp.headers, {
             "Content-Type": "application/json",
-            "X-Gateway-Account": account.id || "primary",
-            "X-Gateway-Account-Id": account.id || "primary"
+            "X-Gateway-Account": account.id || "account",
+            "X-Gateway-Account-Id": account.id || "account"
           })
         })
       } };
@@ -408,8 +403,8 @@ export class WorkBuddyProvider {
             status: retryResp.status,
             headers: buildResponseHeaders(retryResp.headers, {
               "Content-Type": "application/json",
-              "X-Gateway-Account": account.id || "primary",
-              "X-Gateway-Account-Id": account.id || "primary"
+              "X-Gateway-Account": account.id || "account",
+              "X-Gateway-Account-Id": account.id || "account"
             })
           })
         } };

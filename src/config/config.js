@@ -36,9 +36,16 @@ export function getDefaultConfig(env) {
         type: "workbuddy",
         enabled: true,
         config: {
-          userId: env.USER_ID || "",
-          accessToken: env.ACCESS_TOKEN || "",
-          refreshToken: env.REFRESH_TOKEN || ""
+          accounts: [
+            {
+              id: "account-1",
+              name: "Account 1",
+              enabled: true,
+              userId: env.USER_ID || "",
+              accessToken: env.ACCESS_TOKEN || "",
+              refreshToken: env.REFRESH_TOKEN || ""
+            }
+          ]
         }
       },
       {
@@ -54,7 +61,7 @@ export function getDefaultConfig(env) {
           region: "intl",
           accounts: intlUserId !== "" ? [{
             id: "intl-1",
-            name: "intl primary",
+            name: "Intl Account 1",
             enabled: true,
             userId: intlUserId,
             accessToken: readEnv("INTL_ACCESS_TOKEN") || "",
