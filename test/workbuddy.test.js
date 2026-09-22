@@ -200,3 +200,19 @@ test("workbuddy region table: cn frozen, intl explicit-unprobed, env fallback cn
   assert.deepEqual(intlProv.getAccounts(), [], "intl must not reuse cn env credentials");
   assert.equal(intlProv.ep().chat, "https://www.codebuddy.ai/v2/chat/completions");
 });
+
+test("explicit pool members fail closed without own credentials (no env borrowing)", async () => {
+  const env = { USER_ID: "u", ACCESS_TOKEN: "env-access", REFRESH_TOKEN: "env-refresh" };
+  const pool = new WorkBuddyProvider(
+    { id: "wb-pool-fc", config: { accounts: [{ id: "bare-1", enabled: true, userId: "u1" }] } },
+    env
+  );
+  const [member] = pool.getAccounts();
+  assert.equal(await pool.getActiveToken(member), "", "pool member must not borrow env access token");
+  assert.equal(await pool.refreshAccessToken(member), null, "pool member must not borrow env refresh token");
+  // 合成单账号保持旧语义：env 兜底可用
+  const single = new WorkBuddyProvider({ id: "wb-single-fc", config: {} }, env);
+  const [solo] = single.getAccounts();
+  assert.equal(solo.allowEnvFallback, true);
+  assert.equal(await single.getActiveToken(solo), "env-access", "synthesized single account keeps env fallback");
+});

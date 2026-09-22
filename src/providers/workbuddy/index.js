@@ -7,6 +7,8 @@ import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./c
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
+// 显式池成员缺凭证告警去重：每账号每进程只告警一次，避免热路径刷屏
+const noCredentialWarned = new Set();
 let roundRobinCounter = 0;
 
 // 抖动重试基准延迟（Q6 可配置）：env RETRY_BASE_MS，默认 600ms。
@@ -16,6 +18,15 @@ export function retryDelayMs(env) {
   const raw = Number(env?.RETRY_BASE_MS);
   if (!Number.isFinite(raw) || raw < 0) return DEFAULT_RETRY_DELAY_MS;
   return Math.floor(raw);
+}
+
+// 显式池成员缺自身凭证时 fail-closed：env 兜底只属于无 accounts 数组时的合成单账号。
+// 每个账号每进程只告警一次（调用方含请求热路径与 cron 冷路径）。
+function warnNoCredential(providerId, account) {
+  const key = `${providerId}_${account?.id}`;
+  if (noCredentialWarned.has(key)) return;
+  noCredentialWarned.add(key);
+  console.warn(`[WorkBuddy] Account "${account?.name || account?.id}" has no credentials, skipping (env fallback only applies to single-account config)`);
 }
 
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
@@ -106,8 +117,7 @@ export class WorkBuddyProvider {
     return this.endpoints;
   }
 
-  // 获取所有启用的账号列表（支持单账号与账号池双重兼容）
-  // 获取所有启用的账号列表（平级账号池）
+  // 获取所有启用的账号列表（平级账号池，兼容无 accounts 数组的单账号扁平配置）
   getAccounts() {
     if (Array.isArray(this.config.accounts) && this.config.accounts.length > 0) {
       return this.config.accounts.filter(acc => acc.enabled !== false);
@@ -125,13 +135,15 @@ export class WorkBuddyProvider {
         enabled: true,
         userId: defaultUserId,
         accessToken: defaultAccess,
-        refreshToken: defaultRefresh
+        refreshToken: defaultRefresh,
+        // 合成单账号标记：唯一允许借用 env 凭证的账号形态
+        allowEnvFallback: true
       }];
     }
     return [];
   }
 
-  // 获取特定账号的有效 Token（所有账号平级读取缓存）
+  // 获取特定账号的有效 Token（所有账号平级读取缓存；env 兜底仅合成单账号可用）
   async getActiveToken(account) {
     const cacheKey = `${this.id}_${account.id}`;
     const now = Date.now();
@@ -150,9 +162,12 @@ export class WorkBuddyProvider {
       }
     }
 
-    const fallback = account.accessToken || this.env.ACCESS_TOKEN || "";
+    const allowEnv = account.allowEnvFallback === true;
+    const fallback = account.accessToken || (allowEnv ? this.env.ACCESS_TOKEN || "" : "");
     if (fallback) {
       memoryTokenCache.set(cacheKey, { token: fallback, timestamp: now });
+    } else if (!allowEnv) {
+      warnNoCredential(this.id, account);
     }
     return fallback;
   }
@@ -165,14 +180,18 @@ export class WorkBuddyProvider {
       return results.map(r => r.status === "fulfilled" ? r.value : null).filter(Boolean);
     }
     const cacheKey = `${this.id}_${account.id}`;
-    let refreshToken = account.refreshToken || this.env.REFRESH_TOKEN || "";
+    const allowEnv = account.allowEnvFallback === true;
+    let refreshToken = account.refreshToken || (allowEnv ? this.env.REFRESH_TOKEN || "" : "");
     if (this.kv) {
       const cachedRefresh = await this.kv.get(`WB_REFRESH_TOKEN_${cacheKey}`) ||
                            (await this.kv.get(`WB_REFRESH_TOKEN_${this.id}`)) ||
                            (await this.kv.get("REFRESH_TOKEN"));
       if (cachedRefresh) refreshToken = cachedRefresh;
     }
-    if (!refreshToken) return null;
+    if (!refreshToken) {
+      if (!allowEnv) warnNoCredential(this.id, account);
+      return null;
+    }
 
     try {
       const ep = this.ep();
