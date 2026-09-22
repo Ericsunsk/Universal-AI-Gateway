@@ -1,0 +1,7 @@
+.codegraph
+.git
+test
+docs
+scripts
+*.md
+.env*

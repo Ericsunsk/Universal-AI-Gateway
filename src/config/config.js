@@ -1,4 +1,4 @@
-export const VERSION = "2.4.0";
+export const VERSION = "2.5.0";
 
 let cachedConfig = null;
 let cachedConfigTimestamp = 0;
@@ -9,7 +9,7 @@ export function requireSecret(env, name) {
   if (!value || typeof value !== "string" || !value.trim()) {
     throw new Error(
       `Missing required secret "${name}". Refusing to fall back to a hardcoded default — ` +
-      `set it in .dev.vars (local), wrangler secret put (Workers), or the platform env (Vercel/Node).`
+      `set it in .env.local (local) or Vercel environment variables.`
     );
   }
   return value.trim();
@@ -27,7 +27,7 @@ export function getDefaultConfig(env) {
     config_version: 1,
     master_key: masterKey,
     cron_secret: env.CRON_SECRET || "",
-    max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : (typeof process !== "undefined" && (process.env?.VERCEL || process.env?.NODE_ENV) ? 0 : 40),
+    max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : 0,
     usage_provider_id: "workbuddy",
     providers: [
       {
@@ -43,7 +43,7 @@ export function getDefaultConfig(env) {
       },
       {
         // 国际站：有 INTL_* 环境凭证即启用（与 CN 共用同一套 adapter，按 region 切端点）。
-        // 凭证走 secrets（wrangler secret / Vercel env），永不进代码库；无凭证时保持 disabled，零运行时影响。
+        // 凭证走 Vercel 环境变量（Environment Variables），永不进代码库；无凭证时保持 disabled，零运行时影响。
         // 已验证 serve：glm-5.2。模型池见 CLI product.json：
         // gpt-5.6-sol/terra/luna、gpt-5.5/5.4、gpt-5.3-codex、gemini-3.5-flash、glm-5.3/5.2、kimi-k3/k2.6、minimax-m3。
         id: "workbuddy-intl",

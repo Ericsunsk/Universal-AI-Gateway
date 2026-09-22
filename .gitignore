@@ -1,15 +1,14 @@
-# Cloudflare Worker artifacts & build
-.wrangler/
+# Build artifacts & logs
 dist/
 *.log
 
 # Sensitive local credentials (gitignored, kept private)
-.dev.vars
 .env
+.env*
+!.env.example
 
 # Dependencies & OS
 node_modules/
 .DS_Store
 .vercel
-.env*
 .codegraph/

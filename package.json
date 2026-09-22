@@ -1,13 +1,12 @@
 {
   "name": "universal-ai-gateway",
-  "version": "2.4.0",
-  "description": "High-performance, multi-engine Universal AI Gateway (Cloudflare Workers, Vercel, Node.js) with protocol translation, multi-provider fallback, WorkBuddy auto-checkin, and Web Admin console.",
-  "main": "src/index.js",
+  "version": "2.5.0",
+  "description": "High-performance Universal AI Gateway for Vercel Serverless and Node.js with protocol translation, multi-provider fallback, WorkBuddy auto-checkin, and Web Admin console.",
+  "main": "api/index.js",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "dry-run": "wrangler deploy --dry-run",
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
     "test": "node --test",
     "bench": "node scripts/bench.mjs"
   },
@@ -16,7 +15,6 @@
     "universal-ai-gateway",
     "vercel",
     "serverless",
-    "cloudflare-workers",
     "one-api",
     "anthropic",
     "openai",
@@ -26,8 +24,5 @@
     "deepseek"
   ],
   "author": "Ericsunsk",
-  "license": "MIT",
-  "devDependencies": {
-    "wrangler": "^4.120.1"
-  }
+  "license": "MIT"
 }

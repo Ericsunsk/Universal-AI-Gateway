@@ -6,20 +6,7 @@ import { getProviderFleet } from "./core/fleet.js";
 import { handleAdminRequest } from "./admin/admin.js";
 
 export default {
-  // Cloudflare Cron 定时任务：触发所有已注册 Provider 的生命周期调度（签到、Token保活）
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => {
-      try {
-        const config = await getConfig(env);
-        const fleet = getProviderFleet(config, env);
-        await fleet.runScheduledTasks();
-      } catch (e) {
-        console.error("[Cron] Scheduled execution failed:", e);
-      }
-    })());
-  },
-
-  // HTTP 请求入口
+  // HTTP 请求核心分发入口
   async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
@@ -89,15 +76,16 @@ export default {
       });
     }
 
-    // 5. 手动签到接口 (/checkin)
-    // 需要 Master Key 或 Cron Secret：此接口会触发上游真实签到，不能对普通虚拟密钥开放
-    // Cron secret 只能触发定时任务，无法调用 Admin API（因 isMaster: false 袹_admin 网关拦截）
+    // 5. 每日签到与生命周期保活接口 (/checkin)
+    // 需要 Master Key 或 Cron Secret：此接口会触发上游真实签到与 Token 保活，不能对普通虚拟密钥开放
+    // Cron secret 只能触发定时任务，无法调用 Admin API（因 isMaster: false 被 admin 网关拦截）
     if (path === "/checkin") {
       const auth = authenticateAccess(request, config, { requireMaster: true, allowCron: true });
       if (!auth.ok) return auth.response;
 
       const results = await fleet.runDailyCheckins();
-      return new Response(JSON.stringify({ success: true, results }, null, 2), {
+      const refreshes = await fleet.refreshAllTokens();
+      return new Response(JSON.stringify({ success: true, results, refreshes }, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json", ...corsHeaders }
       });

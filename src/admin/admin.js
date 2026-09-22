@@ -12,7 +12,7 @@ export async function handleAdminRequest(request, env, authResult, fleet) {
       service: "universal-ai-gateway",
       version: VERSION,
       mode: "agent-native",
-      description: "Universal AI Gateway Management API (Cloudflare Workers, Vercel, Node.js) for Autonomous Agents",
+      description: "Universal AI Gateway Management API (Vercel Serverless, Node.js) for Autonomous Agents",
       auth: {
         type: "Bearer Token or x-api-key",
         required_key: "MASTER_KEY",

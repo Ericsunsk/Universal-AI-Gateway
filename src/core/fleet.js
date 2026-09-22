@@ -19,9 +19,13 @@ export class ProviderFleet {
     const providerConfigs = config.providers || [];
     for (const pConf of providerConfigs) {
       if (pConf.enabled !== false) {
-        const instance = createProvider(pConf, env);
-        if (instance) {
-          this._instances.set(pConf.id, instance);
+        try {
+          const instance = createProvider(pConf, env);
+          if (instance) {
+            this._instances.set(pConf.id, instance);
+          }
+        } catch (e) {
+          console.warn(`[Fleet] Skipping unavailable provider "${pConf?.id}": ${e.message}`);
         }
       }
     }

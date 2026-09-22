@@ -2,11 +2,10 @@
 
 <div align="center">
 
-**通用全功能 AI 统一网关 (Cloudflare Workers & Vercel Serverless 双引擎架构)**
+**通用全功能 AI 统一网关 (Vercel Serverless 架构，彻底告别 10ms CPU 限制)**
 
 [![GitHub stars](https://img.shields.io/github/stars/Ericsunsk/Universal-AI-Gateway?style=social)](https://github.com/Ericsunsk/Universal-AI-Gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Cloudflare Workers](https://img.shields.io/badge/Deploy-Cloudflare%20Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![Vercel](https://img.shields.io/badge/Deploy-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
 [![Node Version](https://img.shields.io/badge/Node-%3E%3D18.0.0-339933?logo=node.js&logoColor=white)]()
 [![Protocol](https://img.shields.io/badge/Protocol-Anthropic%20%7C%20OpenAI-6366F1.svg)]()
@@ -19,25 +18,25 @@
 
 ## 📖 简介
 
-**Universal-AI-Gateway** 是一款高性能通用型多平台 AI 网关（原生支持 **Cloudflare Workers** 与 **Vercel Serverless** 双引擎）。它不仅能实现 **Anthropic ⟷ OpenAI 双向跨协议转译**，还深度集成了 **腾讯云代码助手 (WorkBuddy / CodeBuddy)** 插件，完美解决 **Claude Code 11128 拦截**、**无感 Token 自动续期**、**每日定时自动签到领积分**、**突破 10ms CPU 限制 (Vercel 引擎)** 以及 **CC-Switch 桌面端实时积分余额卡片** 展示。
+**Universal-AI-Gateway** 是一款面向 **Vercel Serverless** 与 Node.js 运行时的高性能多平台 AI 网关。它不仅能实现 **Anthropic ⟷ OpenAI 双向跨协议转译**，还深度集成了 **腾讯云代码助手 (WorkBuddy / CodeBuddy)**，完美解决 **Claude Code 11128 敏感词拦截**、**无感 Token 自动续签**、**每日定时自动签到领积分**、**突破传统边缘环境的 CPU/内存限制** 以及 **CC-Switch 桌面端实时积分余额卡片** 展示。
 
-无论你是个人开发者需要稳定使用 DeepSeek / Claude Code，还是团队需要一套低成本、免服务器维护、支持故障自动 Fallback 的 AI 网关，本项目都能开箱即用。
+Vercel 实例提供 **1024MB RAM** 与长达 **300 秒执行时间**，彻底根除长对话上下文（如 Claude Code 深度审计、上千条消息）引发的 CPU/内存超时崩溃问题。
 
 ---
 
 ## ✨ 核心特性
 
-| 功能维度 | 原生直连 / 传统反代 | ⚡ Universal-AI-Gateway |
+| 功能维度 | 原生直连 / 传统反代 | ⚡ Universal-AI-Gateway (Vercel) |
 | :--- | :--- | :--- |
 | **协议支持** | 仅支持单一上游格式 | **双向转译**：同时对外暴露 `/v1/messages` (Claude) 与 `/v1/chat/completions` (OpenAI) |
-| **思维链 & 工具** | 易丢失或乱码 | **完整支持**：原生还原 `thinking` 推理流、Tool Calling 函数调用与心跳保活 |
+| **思维链 & 工具** | 易丢失或乱码 | **完整支持**：原生还原 `thinking` 推理流、Tool Calling 函数调用与长连接保活 |
 | **多上游容灾 (Fallback)** | 单点故障，429/超时直接报错 | **优先级队列**：遇 429、5xx 或风控秒级自动切换备用上游（如 WorkBuddy 多账号 / DeepSeek 官方） |
-| **WorkBuddy 凭证保活** | 几天后 Token 过期需手动重新登录 | **无感刷新**：后台通过 RefreshToken 自动无感续签，长效免维护 |
-| **每日领积分** | 容易忘记签到导致积分耗尽 | **自动签到**：Cloudflare Cron 每日两次自动执行签到，结果入库 KV |
+| **WorkBuddy 凭证保活** | 几天后 Token 过期需手动重新登录 | **无感续签**：后台通过 RefreshToken 自动无感续签，长效免维护 |
+| **每日领积分 & 保活** | 容易忘记签到导致积分耗尽 | **自动签到保活**：Vercel Cron 每日定时自动执行签到与 Token 刷新，数据入库 Upstash KV |
 | **CC-Switch 余额显示** | 无法显示 WorkBuddy 积分 | **专属端点**：提供 `/v1/usage`，配合脚本无缝在 CC-Switch 显示剩余积分 |
 | **11128 关键字拦截** | Claude Code 无法调用 WorkBuddy | **快速短路脱敏**：独家指纹脱敏，O(1) 短路探测，彻底规避风控拦截 |
 | **配置热更新** | 必须重新部署代码 | **Agent-Native 控制台**：访问 `/admin` 自解释规范，AI 智能体直接读取与热更新配置，改动秒级生效 |
-| **响应延迟** | 每次查 KV 额外浪费 30~80ms | **L1 内存热缓存**：内存级 0.001ms 直出，节省 98% KV 读配额 |
+| **长上下文保真** | 受边缘 CPU 限制不得不裁剪历史 | **零限制全量保真**：Vercel 充足算力默认 0 剪枝，完整保留全部轮次历史 |
 
 ---
 
@@ -60,104 +59,58 @@ flowchart TD
     end
     
     subgraph Storage ["动态存储与运维后台"]
-        KV[("Cloudflare KV<br/>(GATEWAY_CONFIG / 运行状态)")] <--> Gate
+        KV[("Upstash KV / Redis<br/>(GATEWAY_CONFIG / 运行状态)")] <--> Gate
         KV <--> Fleet
         Admin["🤖 Agent-Native 控制台 (/admin)"] --> KV
-        Cron["⏰ Cloudflare Cron Triggers<br/>(每日自动签到 & 保活)"] --> Fleet
+        Cron["⏰ Vercel Cron Jobs<br/>(每日自动签到 & Token 保活)"] --> Fleet
     end
 ```
 
-> 🔧 **开发者**：项目源码按领域分层组织于 `src/`（`http/` `config/` `auth/` `exchange/` `providers/`），领域词汇表见 [`CONTEXT.md`](CONTEXT.md) —— 其中定义了 route、candidate、account、cooldown、account scheduler、sanitize、normalize 等术语的精确含义。
+> 🔧 **开发者**：项目源码按领域分层组织于 `src/`（`http/` `config/` `auth/` `exchange/` `providers/`），领域词汇表见 [`CONTEXT.md`](CONTEXT.md)。
 
 ---
 
 ## 🚀 快速部署方案
 
-### 方案 A：Cloudflare 控制台连接 GitHub 自动部署（⭐️ 官方推荐，免命令行）
+### 方案 A：Vercel 仪表盘一键连接 GitHub 部署（⭐️ 推荐）
 
-Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 GitHub，后续每次代码有更新，Cloudflare 会**全自动构建并发布**。
+Vercel 原生支持 Git 仓库持续集成，关联后每次代码推送会自动完成构建与发布。
 
-1. **Fork 或使用本项目**：确保仓库已存在于你的 GitHub 账号下（如 `你的用户名/Universal-AI-Gateway`）。
-2. **创建 KV 数据库**：
-   - 打开 [Cloudflare 控制台](https://dash.cloudflare.com/) ➔ 进入 **Storage & Databases** ➔ **KV**。
-   - 点击 **Create Namespace**，名称填写 `GATEWAY_KV`。
-   - 记录下生成的 **Namespace ID**。
-3. **连接 GitHub 仓库**：
-   - 进入 Cloudflare 控制台 ➔ **Workers & Pages** ➔ 点击 **Create** ➔ **Workers** ➔ 选择 **Import from Git**（或在已有 Worker 的 **Settings** ➔ **Builds** 中点击 **Connect Git repository**）。
-   - 授权并选择你的仓库：`Universal-AI-Gateway`。
-   - **生产分支**：`main`。
-   - **构建命令**：`npm install`。
-   - **部署命令**：`npx wrangler deploy`。
-4. **配置环境变量与 KV 绑定**：
-   - 在 Worker 的 **Settings** ➔ **Bindings** 中，添加 KV 绑定：
-     - Variable name: `GATEWAY_KV`
-     - KV namespace: 选择第 2 步创建的 `GATEWAY_KV`
-   - 在 **Settings** ➔ **Variables and Secrets** 中，配置基础凭据：
-     - `API_KEY`: 客户端调用的默认 Key（如 `sk-workbuddy-gateway`）
-     - `MASTER_KEY`: 管理后台的主密钥（如 `your-admin-password`）
-     - `USER_ID`: 你的腾讯云代码助手用户 ID
-     - `ACCESS_TOKEN`: 你的 WorkBuddy AccessToken
-     - `REFRESH_TOKEN`: 你的 WorkBuddy RefreshToken
-5. 点击 **Save and Deploy**，1 分钟内完成全自动部署！
+1. **Fork 或克隆本项目**：确保代码在你的 GitHub 账号下。
+2. **导入 Vercel 项目**：
+   - 访问 [Vercel 仪表盘](https://vercel.com/new)，选择并导入你的仓库。
+   - Framework Preset 保持为 `Other`。
+3. **配置环境变量 (Environment Variables)**：
+   在项目设置中添加以下环境变量：
+   - `API_KEY`: 客户端调用的默认 Key（如 `sk-workbuddy-deepseek`）
+   - `MASTER_KEY`: 管理后台主密钥（如 `your-master-password`）
+   - `USER_ID`: 你的腾讯云代码助手用户 ID
+   - `ACCESS_TOKEN`: 你的 WorkBuddy AccessToken
+   - `REFRESH_TOKEN`: 你的 WorkBuddy RefreshToken
+   - *(可选)* `CRON_SECRET`: Vercel Cron 定时任务鉴权密钥（自动签到与 Token 保活安全校验）
+   - *(可选)* `KV_REST_API_URL` & `KV_REST_API_TOKEN`: 若需要持久化配置，可在 Vercel Storage 中一键创建免费 Upstash Redis / Vercel KV，系统将全自动接入；不填则默认使用高效内存级热缓存。
+4. **点击 Deploy**：
+   数十秒即可完成部署并获得类似 `https://your-gateway.vercel.app` 的访问链接。
 
 ---
 
-### 方案 B：本地 Wrangler CLI 命令行部署
+### 方案 B：本地 Vercel CLI 命令行一键部署
 
-1. **克隆项目并安装依赖**：
+1. **安装依赖并登录**：
    ```bash
-   git clone https://github.com/Ericsunsk/Universal-AI-Gateway.git
-   cd Universal-AI-Gateway
    npm install
+   npx vercel login
    ```
 
-2. **登录 Cloudflare 并创建 KV**：
+2. **本地联调开发**：
    ```bash
-   npx wrangler login
-   npx wrangler kv namespace create GATEWAY_KV
-   ```
-   记录终端返回的 KV `id`。
-
-3. **配置凭据**：
-   ```bash
-   cp wrangler.example.jsonc wrangler.jsonc
-   ```
-   编辑 `wrangler.jsonc`，将你的 KV ID 填入配置中。本地私密环境变量可直接写入 `.dev.vars`：
-   ```ini
-   API_KEY=sk-workbuddy-gateway
-   MASTER_KEY=admin-secret-key
-   USER_ID=你的腾讯云用户ID
-   ACCESS_TOKEN=你的AccessToken
-   REFRESH_TOKEN=你的RefreshToken
+   npm run dev
    ```
 
-4. **一键发布**：
+3. **一键发布到生产环境**：
    ```bash
    npm run deploy
    ```
-
----
-
-### 方案 C：Vercel Serverless 一键部署（🔥 零 10ms CPU 限制，超长上下文首选）
-
-针对超大上下文（如 Claude Code 上千条交互日志、长文本分析）或高并发场景，Vercel Serverless 提供 **1024MB RAM** 与高达 **10~15 秒 CPU 计算时间**（相比 Cloudflare 免费版严格的 10ms CPU 上限，彻底根治 1102 CPU 超限问题）。
-
-1. **一键导入项目**：
-   - 访问 [Vercel 仪表盘](https://vercel.com/new)，选择并导入你的 `Universal-AI-Gateway` GitHub 仓库。
-   - Framework Preset 保持为 `Other`。
-2. **配置环境变量 (Environment Variables)**：
-   在 Vercel 项目部署设置中添加以下环境变量：
-   - `API_KEY`: 客户端调用的默认 Key（例如 `sk-workbuddy-deepseek`）
-   - `MASTER_KEY`: 管理后台主密钥
-   - `USER_ID`: 你的腾讯云用户 ID
-   - `ACCESS_TOKEN`: 你的 WorkBuddy AccessToken
-   - `REFRESH_TOKEN`: 你的 WorkBuddy RefreshToken
-   - *(可选)* `CRON_SECRET`: Vercel Cron 定时任务鉴权密钥（用于每日自动签到领积分）
-   - *(可选)* `KV_REST_API_URL` & `KV_REST_API_TOKEN`: 若需要持久化 KV，可在 Vercel Storage 中一键创建免费 Upstash Redis / Vercel KV，系统将全自动接入；不填则默认使用高效内存级热缓存。
-3. **点击 Deploy**：
-   部署完成后即可获得 `https://your-project.vercel.app`。可绑定个人自定义域名（国内访问更稳定）。
-   - **Claude Code 接入**：设置 `ANTHROPIC_BASE_URL="https://your-project.vercel.app"`。
-   - **自动签到**：项目已内置 `vercel.json`，每天 UTC 01:00 自动触发 `/checkin` 领积分。
 
 ---
 
@@ -167,8 +120,8 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
 
 在 CC-Switch 中点击 **添加供应商**：
 - **供应商名称**：`WorkBuddy`
-- **API URL**：`https://你的worker域名.workers.dev`
-- **API Key**：`sk-workbuddy-gateway`（或自定义的 Key）
+- **API URL**：`https://your-gateway.vercel.app`
+- **API Key**：`sk-workbuddy-deepseek`
 - **协议类型**：`Anthropic`
 
 #### 注入余额查询脚本（即时展示剩余积分）：
@@ -200,8 +153,7 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
   }
 })
 ```
-保存后，CC-Switch 卡片右上角即可实时显示类似：
-> **剩余：598.54 积分 WorkBuddy 剩余积分**
+保存后，CC-Switch 卡片右上角即可实时显示剩余积分。
 
 ---
 
@@ -209,25 +161,20 @@ Cloudflare Workers 现已原生支持 Git 仓库集成，只需要关联一次 G
 
 彻底解决官方直连触发的 **11128 风控错误**：
 ```bash
-export ANTHROPIC_BASE_URL="https://你的worker域名.workers.dev"
-export ANTHROPIC_API_KEY="sk-workbuddy-gateway"
+export ANTHROPIC_BASE_URL="https://your-gateway.vercel.app"
+export ANTHROPIC_API_KEY="sk-workbuddy-deepseek"
 
 # 启动 Claude Code
 claude
 ```
 
-> 网关的免费模型（如 `mimo-v2.5-free`）不在 Claude Code 内置模型目录里，首次会提示
-> `isn't described by this version's model catalog`，属正常警告不影响使用。
-> 如需消除：升级 Claude Code 后用 `behavesAs` 映射，或设置
-> `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1`。
-
 ---
 
 ### 3. Cursor / NextChat / OpenAI 生态客户端
 
-- **API 接口地址**：`https://你的worker域名.workers.dev/v1`
-- **API Key**：`sk-workbuddy-gateway`
-- **推荐模型**：
+- **API 接口地址**：`https://your-gateway.vercel.app/v1`
+- **API Key**：`sk-workbuddy-deepseek`
+- **可用模型**：
   - `deepseek-v4.1-flash`
   - `deepseek-v4-pro`
   - `claude-3-7-sonnet-20250219`
@@ -237,10 +184,10 @@ claude
 
 ## 🤖 Agent-Native 智能体控制台 (`/admin`)
 
-网关专为 **AI 智能体与自动化运维** 设计，彻底移除了冗余的人类 Web 前端，获取极致的轻量化与边缘冷启动性能：
+网关专为 **AI 智能体与自动化运维** 设计，彻底移除了冗余的前端依赖，获取极致的轻量化与冷启动性能：
 
 * 🧭 **自解释规范 (`GET /admin`)**：公开返回网关完整的 API 规范、鉴权指引与端点索引，Agent 可自主理解并操作。
-* 📝 **配置热读写 (`GET/POST /admin/api/config`)**：携带 `MASTER_KEY` 直接读写全量 JSON 配置，包含上游提供商、模型路由链路与虚拟客户端密钥，KV 秒级热更新生效。
+* 📝 **配置热读写 (`GET/POST /admin/api/config`)**：携带 `MASTER_KEY` 直接读写全量 JSON 配置，包含上游提供商、模型路由链路与虚拟客户端密钥，秒级热更新生效。
 * 📊 **状态监控 (`GET /admin/api/status`)**：获取聚合积分余额、账号池健康度、最后签到记录及当前可用模型数。
 * ⚡ **运维控制 (`POST /admin/api/checkin` & `POST /admin/api/refresh`)**：一键对多账号池执行每日签到或强制刷新 AccessToken。
 
@@ -256,9 +203,9 @@ claude
 | `/v1/usage` | `GET` | Virtual Key / Master Key | CC-Switch 专用的实时积分/额度查询接口 |
 | `/admin` | `GET` | 公开 | Agent-Native 自解释规范与端点导航索引 |
 | `/admin/api/*` | `*` | Master Key Required | 管理后台后端 REST API（配置热存、状态查询、运维动作） |
-| `/status` | `GET` | 公开 | Worker 存活状态（仅 service/version，不含余额等敏感数据） |
-| `/checkin` | `POST/GET` | Master Key / Cron Secret | 手动触发所有激活渠道执行签到（不对普通 Virtual Key 开放） |
-| `/healthz` | `GET` | 公开 | 容器存活心跳探测 |
+| `/status` | `GET` | 公开 | 服务存活状态（仅 service/version，不含余额等敏感数据） |
+| `/checkin` | `POST/GET` | Master Key / Cron Secret | 执行每日签到领积分与 Token 自动保活 |
+| `/healthz` | `GET` | 公开 | 服务存活心跳探测 |
 
 ---
 
@@ -278,16 +225,20 @@ claude
 <details>
 <summary><b>Q: 什么是 11128 错误？网关是如何解决的？</b></summary>
 
-腾讯云对请求上文做了关键词检测，当发现 Claude Code 默认注入的 System Prompt（如 `"You are Claude Code, Anthropic's official CLI for Claude."`）时，会返回 `11128: 敏感指令拦截`。  
+腾讯云对请求上下文做了关键词检测，当发现 Claude Code 默认注入的 System Prompt（如 `"You are Claude Code, Anthropic's official CLI for Claude."`）时，会返回 `11128: 敏感指令拦截`。  
 网关内置了高性能的短路脱敏引擎，在保持长文本 O(1) 极速处理的同时，精准重写敏感标识并剔除特征 Header，让 Claude Code 可以顺畅使用 WorkBuddy 模型。
 </details>
 
 <details>
-<summary><b>Q: 自动签到什么时候触发？</b></summary>
+<summary><b>Q: 自动签到与 Token 保活什么时候触发？</b></summary>
 
-在 `wrangler.jsonc` 中配置了 Cloudflare 定时触发器：
-`"crons": ["0 1 * * *", "0 13 * * *"]`  
-分别对应北京时间 **每天 09:00 和 21:00** 自动触发签到与 Token 保活，无需任何人工干预。
+在 `vercel.json` 中配置了 Vercel Cron：
+```json
+"crons": [
+  { "path": "/checkin", "schedule": "0 1 * * *" }
+]
+```
+每天 UTC 01:00（北京时间 **09:00**）由 Vercel 自动发起请求执行签到并刷新 Token，无需人工干预。
 </details>
 
 <details>

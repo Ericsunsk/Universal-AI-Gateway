@@ -72,7 +72,7 @@ export function normalizeOpenAIMessages(messages) {
 
 /**
  * 智能上下文窗口剪枝与管理：
- * 1. 彻底根治超长会话（如 Claude Code 累积数十上百轮、上千条消息）在 Cloudflare Workers 触发 1102 (CPU/Memory Limit) 致命错误。
+ * 1. 根治超长会话（如 Claude Code 累积数十上百轮、上千条消息）触发边缘运行时 CPU/内存上限导致的致命错误。
  * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
  * 3. 对历史工具执行结果（tool_result）的大块冗余终端输出进行两端保留式剪枝。
  */
@@ -155,12 +155,12 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
     lastText.includes("<analysis>")
   );
 
-  // 动态上下文保留策略：Vercel / Node 环境下默认 0（完全不剪枝，长上下文保真），Cloudflare Workers 免费版环境下默认 40
+  // 动态上下文保留策略：Vercel / Node 环境下默认 0（完全不剪枝，长上下文全量保真）
   const maxTurns = config?.max_context_turns !== undefined
     ? config.max_context_turns
     : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TURNS !== undefined
         ? parseInt(process.env.MAX_CONTEXT_TURNS, 10)
-        : (typeof process !== "undefined" && (process.env?.VERCEL || process.env?.NODE_ENV) ? 0 : 40));
+        : 0);
 
   const messages = pruneAnthropicMessages(rawMessages, isCompact, maxTurns);
 
