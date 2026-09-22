@@ -3,7 +3,6 @@ import { authenticateAccess } from "./auth/auth.js";
 import { corsHeaders } from "./http/headers.js";
 import { dispatchExchange } from "./exchange/exchange.js";
 import { getProviderFleet } from "./core/fleet.js";
-import { handleAdminRequest } from "./admin/admin.js";
 
 export default {
   // HTTP 请求核心分发入口
@@ -17,13 +16,7 @@ export default {
     const config = await getConfig(env);
     const fleet = getProviderFleet(config, env);
 
-    // 1. 管理后台与 Admin API
-    if (path.startsWith("/admin")) {
-      const auth = authenticateAccess(request, config);
-      return await handleAdminRequest(request, env, auth, fleet);
-    }
-
-    // 2. 健康检查（公开）
+    // 1. 健康检查（公开）
     // 当零可用 provider 或零路由时标记 degraded，避免永远 ok
     if (path === "/" || path === "/healthz") {
       const hasProviders = fleet.activeCount > 0;
@@ -42,9 +35,9 @@ export default {
       });
     }
 
-    // 3. 状态检查 (/status)
+    // 2. 状态检查 (/status)
     // 仅返回无害的存活信息。余额 / 签到日志 / Token 刷新时间属敏感运营数据，
-    // 已收敛到需鉴权的 /admin/api/status 与 /v1/usage，避免公开泄露上游账号状态。
+    // 仅经需鉴权的 /v1/usage 对外，避免公开泄露上游账号状态。
     if (path === "/status") {
       const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
       return new Response(JSON.stringify({
@@ -57,7 +50,7 @@ export default {
       });
     }
 
-    // 4. 余额与积分查询 (/v1/usage 或 /usage, 兼容 CC-Switch)
+    // 3. 余额与积分查询 (/v1/usage 或 /usage, 兼容 CC-Switch)
     if (path.endsWith("/usage")) {
       const auth = authenticateAccess(request, config);
       if (!auth.ok) return auth.response;
@@ -76,9 +69,8 @@ export default {
       });
     }
 
-    // 5. 每日签到与生命周期保活接口 (/checkin)
+    // 4. 每日签到与生命周期保活接口 (/checkin)
     // 需要 Master Key 或 Cron Secret：此接口会触发上游真实签到与 Token 保活，不能对普通虚拟密钥开放
-    // Cron secret 只能触发定时任务，无法调用 Admin API（因 isMaster: false 被 admin 网关拦截）
     if (path === "/checkin") {
       const auth = authenticateAccess(request, config, { requireMaster: true, allowCron: true });
       if (!auth.ok) return auth.response;
@@ -91,7 +83,7 @@ export default {
       });
     }
 
-    // 6. 模型列表接口 (/v1/models 或 /models)
+    // 5. 模型列表接口 (/v1/models 或 /models)
     if (path.endsWith("/models")) {
       const auth = authenticateAccess(request, config);
       if (!auth.ok) return auth.response;
@@ -113,7 +105,7 @@ export default {
       });
     }
 
-    // 7. Anthropic Messages 接口 (/v1/messages)
+    // 6. Anthropic Messages 接口 (/v1/messages)
     if (path.endsWith("/messages")) {
       if (request.method !== "POST") {
         return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
@@ -141,7 +133,7 @@ export default {
       }
     }
 
-    // 8. OpenAI 对话接口 (/v1/chat/completions)
+    // 7. OpenAI 对话接口 (/v1/chat/completions)
     if (path.endsWith("/chat/completions")) {
       if (request.method !== "POST") {
         return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });

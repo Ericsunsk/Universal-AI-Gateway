@@ -227,41 +227,52 @@ test("streamOpenAIToAnthropic surfaces upstream business error as notice", async
 });
 
 // ---- 纯 reducer：单个 OpenAI chunk -> 发射指令 ----
-import { reduceOpenAIChunk } from "../src/exchange/exchange.js";
+import { reduceOpenAIChunkAll } from "../src/exchange/exchange.js";
 
-test("reduceOpenAIChunk classifies text delta", () => {
-  assert.deepEqual(reduceOpenAIChunk({ choices: [{ delta: { content: "hi" } }] }), { kind: "text", text: "hi" });
+test("reduceOpenAIChunkAll classifies text delta", () => {
+  assert.deepEqual(reduceOpenAIChunkAll({ choices: [{ delta: { content: "hi" } }] }), [{ kind: "text", text: "hi" }]);
 });
 
-test("reduceOpenAIChunk classifies reasoning_content as thinking", () => {
-  assert.deepEqual(reduceOpenAIChunk({ choices: [{ delta: { reasoning_content: "thinking..." } }] }), { kind: "thinking", text: "thinking..." });
+test("reduceOpenAIChunkAll classifies reasoning_content as thinking", () => {
+  assert.deepEqual(reduceOpenAIChunkAll({ choices: [{ delta: { reasoning_content: "thinking..." } }] }), [{ kind: "thinking", text: "thinking..." }]);
 });
 
-test("reduceOpenAIChunk classifies tool_calls", () => {
-  const out = reduceOpenAIChunk({ choices: [{ delta: { tool_calls: [{ id: "c1", function: { name: "bash", arguments: "{\"cmd\":\"ls\"}" } }] } }] });
-  assert.equal(out.kind, "tool_use");
-  assert.equal(out.calls.length, 1);
-  assert.equal(out.calls[0].id, "c1");
-  assert.equal(out.calls[0].name, "bash");
-  assert.equal(out.stopReason, "tool_use");
+test("reduceOpenAIChunkAll classifies tool_calls", () => {
+  const out = reduceOpenAIChunkAll({ choices: [{ delta: { tool_calls: [{ id: "c1", function: { name: "bash", arguments: "{\"cmd\":\"ls\"}" } }] } }] });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].kind, "tool_use");
+  assert.equal(out[0].calls.length, 1);
+  assert.equal(out[0].calls[0].id, "c1");
+  assert.equal(out[0].calls[0].name, "bash");
+  assert.equal(out[0].stopReason, "tool_use");
 });
 
-test("reduceOpenAIChunk classifies upstream business error", () => {
-  const out = reduceOpenAIChunk({ code: 11128, message: "compliance filter" });
-  assert.equal(out.kind, "error");
-  assert.match(out.message, /compliance filter/);
+test("reduceOpenAIChunkAll classifies upstream business error", () => {
+  const out = reduceOpenAIChunkAll({ code: 11128, message: "compliance filter" });
+  assert.equal(out.length, 1);
+  assert.equal(out[0].kind, "error");
+  assert.match(out[0].message, /compliance filter/);
 });
 
-test("reduceOpenAIChunk classifies error field", () => {
-  const out = reduceOpenAIChunk({ error: { message: "boom" } });
-  assert.equal(out.kind, "error");
-  assert.equal(out.message, "boom");
+test("reduceOpenAIChunkAll classifies error field", () => {
+  const out = reduceOpenAIChunkAll({ error: { message: "boom" } });
+  assert.deepEqual(out, [{ kind: "error", message: "boom" }]);
 });
 
-test("reduceOpenAIChunk returns null for empty/invalid chunks", () => {
-  assert.equal(reduceOpenAIChunk(null), null);
-  assert.equal(reduceOpenAIChunk({}), null);
-  assert.equal(reduceOpenAIChunk({ choices: [] }), null);
+test("reduceOpenAIChunkAll returns [] for empty/invalid/delta-less chunks", () => {
+  assert.deepEqual(reduceOpenAIChunkAll(null), []);
+  assert.deepEqual(reduceOpenAIChunkAll({}), []);
+  assert.deepEqual(reduceOpenAIChunkAll({ choices: [] }), []);
+  assert.deepEqual(reduceOpenAIChunkAll({ choices: [{ finish_reason: "stop" }] }), []);
+});
+
+test("reduceOpenAIChunkAll emits thinking+text+tool+finish in order for mixed chunk", () => {
+  const out = reduceOpenAIChunkAll({ choices: [{ delta: {
+    reasoning_content: "r", content: "c",
+    tool_calls: [{ id: "c1", function: { name: "f", arguments: "{}" } }]
+  }, finish_reason: "tool_calls" }] });
+  assert.deepEqual(out.map(e => e.kind), ["thinking", "text", "tool_use", "finish"]);
+  assert.equal(out[3].finishReason, "tool_calls");
 });
 
 // ---- 共享纯 helper：错误消息 / 错误判定 / usage 提取 ----
@@ -533,4 +544,42 @@ test("stream translator records upstream prefix-cache hits", async () => {
   assert.equal(snap.cachedTokens, 80);
   assert.equal(snap.hitRate, 100);
   resetCacheStats();
+});
+
+test("streamOpenAIToAnthropic emits both thinking and text from one mixed chunk", async () => {
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { reasoning_content: "r1", content: "c1" } }] }),
+    "data: [DONE]"
+  ]);
+  const resp = streamOpenAIToAnthropic(upstream, "m");
+  const events = await readAnthropicEvents(resp);
+  const starts = events.filter(e => e.event === "content_block_start").map(e => e.data.content_block.type);
+  assert.deepEqual(starts, ["thinking", "text"]);
+});
+
+test("formatOpenAIToAnthropicJson accumulates SSE tool_calls into tool_use blocks", async () => {
+  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { tool_calls: [{ id: "call_1", function: { name: "bash", arguments: "{\"cm" } }] } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: { tool_calls: [{ id: "call_1", function: { arguments: "d\":\"ls\"}" } }] } }] }),
+    "data: [DONE]"
+  ]);
+  const resp = await formatOpenAIToAnthropicJson(upstream, "m");
+  const body = await resp.json();
+  const tool = body.content.find(c => c.type === "tool_use");
+  assert.ok(tool, "SSE tool_calls must surface as tool_use (was silently dropped)");
+  assert.equal(tool.id, "call_1");
+  assert.deepEqual(tool.input, { cmd: "ls" }, "fragments merge by id before parse");
+  assert.equal(body.stop_reason, "end_turn");
+});
+
+test("formatOpenAIToAnthropicJson maps SSE finish_reason to stop_reason", async () => {
+  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "hi" }, finish_reason: "length" }] }),
+    "data: [DONE]"
+  ]);
+  const resp = await formatOpenAIToAnthropicJson(upstream, "m");
+  const body = await resp.json();
+  assert.equal(body.stop_reason, "max_tokens", "SSE finish was previously ignored (always end_turn)");
 });

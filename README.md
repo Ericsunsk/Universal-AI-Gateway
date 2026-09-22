@@ -35,7 +35,7 @@ Vercel 实例提供 **1024MB RAM** 与长达 **300 秒执行时间**，彻底根
 | **每日领积分 & 保活** | 容易忘记签到导致积分耗尽 | **自动签到保活**：Vercel Cron 每日定时自动执行签到与 Token 刷新，数据入库 Upstash KV |
 | **CC-Switch 余额显示** | 无法显示 WorkBuddy 积分 | **专属端点**：提供 `/v1/usage`，配合脚本无缝在 CC-Switch 显示剩余积分 |
 | **11128 关键字拦截** | Claude Code 无法调用 WorkBuddy | **快速短路脱敏**：独家指纹脱敏，O(1) 短路探测，彻底规避风控拦截 |
-| **配置热更新** | 必须重新部署代码 | **Agent-Native 控制台**：访问 `/admin` 自解释规范，AI 智能体直接读取与热更新配置，改动秒级生效 |
+| **配置热更新** | 必须重新部署代码 | **KV 直行**：直接改 KV 中的 `GATEWAY_CONFIG`（记得同步 bump `config_version`），60 秒内全实例生效 |
 | **长上下文保真** | 受边缘 CPU 限制不得不裁剪历史 | **零限制全量保真**：Vercel 充足算力默认 0 剪枝，完整保留全部轮次历史 |
 
 ---
@@ -58,10 +58,9 @@ flowchart TD
         Fallback --> P_ANT["Anthropic 原生适配器"]
     end
     
-    subgraph Storage ["动态存储与运维后台"]
+    subgraph Storage ["动态存储与定时任务"]
         KV[("Upstash KV / Redis<br/>(GATEWAY_CONFIG / 运行状态)")] <--> Gate
         KV <--> Fleet
-        Admin["🤖 Agent-Native 控制台 (/admin)"] --> KV
         Cron["⏰ Vercel Cron Jobs<br/>(每日自动签到 & Token 保活)"] --> Fleet
     end
 ```
@@ -182,17 +181,6 @@ claude
 
 ---
 
-## 🤖 Agent-Native 智能体控制台 (`/admin`)
-
-网关专为 **AI 智能体与自动化运维** 设计，彻底移除了冗余的前端依赖，获取极致的轻量化与冷启动性能：
-
-* 🧭 **自解释规范 (`GET /admin`)**：公开返回网关完整的 API 规范、鉴权指引与端点索引，Agent 可自主理解并操作。
-* 📝 **配置热读写 (`GET/POST /admin/api/config`)**：携带 `MASTER_KEY` 直接读写全量 JSON 配置，包含上游提供商、模型路由链路与虚拟客户端密钥，秒级热更新生效。
-* 📊 **状态监控 (`GET /admin/api/status`)**：获取聚合积分余额、账号池健康度、最后签到记录及当前可用模型数。
-* ⚡ **运维控制 (`POST /admin/api/checkin` & `POST /admin/api/refresh`)**：一键对多账号池执行每日签到或强制刷新 AccessToken。
-
----
-
 ## 📡 端点总览 (API Reference)
 
 | 路径 (Path) | 方法 | 鉴权要求 | 说明 |
@@ -201,8 +189,6 @@ claude
 | `/v1/chat/completions` | `POST` | Virtual Key / Master Key | 标准 OpenAI 对话接口（适配 Cursor / NextChat） |
 | `/v1/models` | `GET` | Virtual Key / Master Key | 返回当前网关已配置的所有可用模型列表 |
 | `/v1/usage` | `GET` | Virtual Key / Master Key | CC-Switch 专用的实时积分/额度查询接口 |
-| `/admin` | `GET` | 公开 | Agent-Native 自解释规范与端点导航索引 |
-| `/admin/api/*` | `*` | Master Key Required | 管理后台后端 REST API（配置热存、状态查询、运维动作） |
 | `/status` | `GET` | 公开 | 服务存活状态（仅 service/version，不含余额等敏感数据） |
 | `/checkin` | `POST/GET` | Master Key / Cron Secret | 执行每日签到领积分与 Token 自动保活 |
 | `/healthz` | `GET` | 公开 | 服务存活心跳探测 |
@@ -244,7 +230,7 @@ claude
 <details>
 <summary><b>Q: 如何配置备用模型（例如 DeepSeek 官方 API）？</b></summary>
 
-登录 `/admin` 控制台，在 **上游提供商** 中新增一个 `type: "openai"` 的兼容上游并填入 API Key，然后在 **模型路由** 中把 `deepseek-v4.1-flash` 的候选列表设置为：
+直接改 KV 中的 `GATEWAY_CONFIG`：在 **providers** 中新增一个 `type: "openai"` 的兼容上游并填入 API Key（记得同步 bump `config_version`），然后在 **模型路由** 中把 `deepseek-v4.1-flash` 的候选列表设置为：
 1. `workbuddy -> deepseek-v4.1-flash`
 2. `deepseek-official -> deepseek-chat`  
 保存后即时生效！一旦 WorkBuddy 额度耗尽或发生限流，请求会自动重试并降级到 DeepSeek 官方。

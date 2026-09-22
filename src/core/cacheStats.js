@@ -1,7 +1,7 @@
 // 上游前缀缓存命中计数器（进程级，只记数不存内容）。
 // 信号来源：OpenAI 形 usage.prompt_tokens_details.cached_tokens、
 // Anthropic 形 usage.cache_read_input_tokens（见 stream.js extractCachedTokens）。
-// 供 /admin/api/status 可见与日志，命中率 = cachedResponses / responses。
+// 供日志观测，命中率 = cachedResponses / responses。
 const stats = {
   responses: 0,
   cachedResponses: 0,

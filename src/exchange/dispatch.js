@@ -12,6 +12,13 @@ import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.j
  * Deep Exchange Module:
  * 单一深度接口，封装完整的协议探测、跨协议转译、指纹清洗、优先级回退与流式输出
  */
+// 客户端错误直返（400 参数校验 / 404 模型未知）：不进故障转移，两处 short-circuit 共用。
+function clientError(status, message) {
+  return { done: new Response(JSON.stringify({ error: { message } }), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders }
+  }) };
+}
 export async function dispatchExchange({
   protocol,
   model,
@@ -83,14 +90,17 @@ export async function dispatchExchange({
           } catch (err) {
             // 参数校验失败（400 / 404）：直接返回，不进行故障转移
             if (err.status === 400 || err.status === 404) {
-              return { done: new Response(JSON.stringify({ error: { message: err.message } }), {
-                status: err.status,
-                headers: { "Content-Type": "application/json", ...corsHeaders }
-              }) };
+              return clientError(err.status, err.message);
             }
             throw err;
           }
-          applyReasoningToPayload(openaiPayload, reasoningIntent, provider.type, candidate.model);
+          // 推理适配恰好一次：transformAnthropicToOpenAI 的输出已是 OpenAI 方言（含映射，幂等，
+          // 无需二次 apply）；唯 WorkBuddy 上游拒收推理参数，需清洗一次。OpenAI 协议客户端
+          // 直传 payload，未经过 transform，仍需按方言完整适配一次。
+          // 方言身份（workbuddy 清洗 vs openai 映射）集中判定于此，不再散落多处拼写。
+          if (!isAnthropic || provider.type === "workbuddy") {
+            applyReasoningToPayload(openaiPayload, reasoningIntent, provider.type === "workbuddy" ? "workbuddy" : "openai", candidate.model);
+          }
           if (wantsStreamedChat(provider)) {
             openaiPayload.stream = true;
           }
@@ -101,10 +111,7 @@ export async function dispatchExchange({
       } catch (err) {
         // 上游抛出的客户端错误（400 / 404）：直接返回，不进行故障转移
         if (err.status === 400 || err.status === 404) {
-          return { done: new Response(JSON.stringify({ error: { message: err.message } }), {
-            status: err.status,
-            headers: { "Content-Type": "application/json", ...corsHeaders }
-          }) };
+          return clientError(err.status, err.message);
         }
         console.warn(`[Fallback] Provider "${candidate.provider}" failed: ${err.message}, retrying next candidate...`);
         throw err;

@@ -43,8 +43,10 @@ export class ProviderFleet {
     return this._instances.size;
   }
 
-  // 统一余额查询（短 TTL 缓存：/v1/usage 被 CC-Switch 高频轮询，/admin/api/status 被控制台轮询，
+  // 统一余额查询（短 TTL 缓存：/v1/usage 被 CC-Switch 高频轮询，
   // 每次都打上游等于拿用户配额做心跳。成功 60s / 失败 10s；仅展示用途，路由与鉴权不受影响）
+  // 归属注意：balanceCache 是模块单例，不随 config_version 重建 fleet 而清空 ——
+  // provider 换血后余额最多陈旧一个 TTL 窗口，换来零额外 KV/上游开销。
   async getBalance(targetId = null) {
     const providerId = targetId || this.config.usage_provider_id || "workbuddy";
     const now = Date.now();
@@ -112,7 +114,8 @@ export class ProviderFleet {
 // 单例获取 Fleet，复用 Provider 实例减少无谓的对象重新分配。
 // 判等优先用 config_version：getConfig 每 60s 刷新会产生新对象（内容不变），
 // 按引用判等会导致 provider 实例每分钟重建一次（含各 adapter 构造开销）。
-// saveConfig 每次写入必 bump 版本，所以版本号相等即配置未变；无版本号时回退引用判等。
+// 注意：Admin API 已删除，KV 直行写入配置时必须手动 bump config_version，
+// 否则版本号不变会导致 fleet 沿用旧实例、新配置不生效；无版本号时回退引用判等。
 export function getProviderFleet(config, env) {
   const version = config?.config_version;
   const same = cachedFleet && (version !== undefined

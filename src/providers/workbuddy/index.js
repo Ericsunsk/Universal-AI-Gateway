@@ -29,6 +29,20 @@ function warnNoCredential(providerId, account) {
   console.warn(`[WorkBuddy] Account "${account?.name || account?.id}" has no credentials, skipping (env fallback only applies to single-account config)`);
 }
 
+// 同一账号归因渲染 seam：所有上游透传响应的 X-Gateway-Account 收敛一处，
+// 五处调用点不再手写归因头，避免漏标/错标漂移。
+function accountResponse(account, { body, status, statusText, headers, contentType }) {
+  return new Response(body, {
+    status,
+    statusText,
+    headers: buildResponseHeaders(headers, {
+      ...(contentType ? { "Content-Type": contentType } : {}),
+      "X-Gateway-Account": account.id || "account",
+      "X-Gateway-Account-Id": account.id || "account"
+    })
+  });
+}
+
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
 // （同一编码会话内稳定；跨会话碰撞只影响落点、不影响正确性）。
 // 取不到返回 null → orderAccounts 走纯轮询。只读不写。
@@ -230,6 +244,20 @@ export class WorkBuddyProvider {
     return null;
   }
 
+  // 401 自愈 seam：取 token → 请求 → 401 则清内存缓存、刷 token、重放一次。
+  // 返回 { resp, token }（token 为 resp 实际使用的凭证）与 refreshed（是否发生过刷新）。
+  // 刷新失败时 resp 仍是原始 401，调用方自行决定跳过还是继续——与旧 inline 语义一致。
+  async doRequestWithRefresh(account, doRequest) {
+    let token = await this.getActiveToken(account);
+    let resp = await doRequest(token);
+    if (resp.status !== 401) return { resp, token, refreshed: false };
+    memoryTokenCache.delete(`${this.id}_${account.id}`);
+    const refreshed = await this.refreshAccessToken(account);
+    if (!refreshed) return { resp, token, refreshed: false };
+    token = refreshed;
+    return { resp: await doRequest(token), token, refreshed: true };
+  }
+
   // 核心 Chat 接口：会话粘性 + 自动故障转移（Failover on 429 / Quota Error）。
   // 同一会话固定打同一健康账号（上游按账号隔离的前缀缓存保持热，命中率不随账号数稀释）；
   // 无会话标识时回退 round-robin；命中冷却/限流时 failover 照常漂移到下一健康账号。
@@ -306,18 +334,11 @@ export class WorkBuddyProvider {
     };
 
     try {
-      let resp = await makeRequest(token);
-      if (resp.status === 401) {
-        memoryTokenCache.delete(`${this.id}_${account.id}`);
-        const refreshed = await this.refreshAccessToken(account);
-        if (refreshed) {
-          token = refreshed;
-          resp = await makeRequest(token);
-        } else {
-          // 刷新失败：直接切换下一账号（不计入冷却 streak，401 通常是 token 过期而非额度问题）
-          console.warn(`[WorkBuddy] Account "${account.name || account.id}" 401 token refresh failed, switching to next account...`);
-          return null;
-        }
+      let { resp, token, refreshed } = await this.doRequestWithRefresh(account, makeRequest);
+      if (resp.status === 401 && !refreshed) {
+        // 刷新失败：直接切换下一账号（不计入冷却 streak，401 通常是 token 过期而非额度问题）
+        console.warn(`[WorkBuddy] Account "${account.name || account.id}" 401 token refresh failed, switching to next account...`);
+        return null;
       }
 
       // 遇到 502 / 503 / 504 服务端瞬时抖动，毫秒级原地快速重试一次（避开上游偶发拥塞）
@@ -330,13 +351,9 @@ export class WorkBuddyProvider {
         const retryResp = await makeRequest(token);
         if (retryResp.ok) {
           await setAccountCooldown(account, this.env, "clear");
-          return { done: new Response(retryResp.body, {
-            status: retryResp.status,
-            statusText: retryResp.statusText,
-            headers: buildResponseHeaders(retryResp.headers, {
-              "X-Gateway-Account": account.id || "account",
-              "X-Gateway-Account-Id": account.id || "account"
-            })
+          return { done: accountResponse(account, {
+            body: retryResp.body, status: retryResp.status,
+            statusText: retryResp.statusText, headers: retryResp.headers
           }) };
         }
         resp = retryResp;
@@ -356,13 +373,9 @@ export class WorkBuddyProvider {
                 status: 200,
                 text: resJson.msg || resJson.message || JSON.stringify(resJson),
                 json: resJson,
-                response: new Response(JSON.stringify(resJson), {
-                  status: 200,
-                  headers: buildResponseHeaders(resp.headers, {
-                    "Content-Type": "application/json",
-                    "X-Gateway-Account": account.id || "account",
-                    "X-Gateway-Account-Id": account.id || "account"
-                  })
+                response: accountResponse(account, {
+                  body: JSON.stringify(resJson), status: 200,
+                  headers: resp.headers, contentType: "application/json"
                 })
               } };
             }
@@ -370,13 +383,9 @@ export class WorkBuddyProvider {
         }
         // 请求成功，清除冷却与连续惩罚标记
         await setAccountCooldown(account, this.env, "clear");
-        return { done: new Response(resp.body, {
-          status: resp.status,
-          statusText: resp.statusText,
-          headers: buildResponseHeaders(resp.headers, {
-            "X-Gateway-Account": account.id || "account",
-            "X-Gateway-Account-Id": account.id || "account"
-          })
+        return { done: accountResponse(account, {
+          body: resp.body, status: resp.status,
+          statusText: resp.statusText, headers: resp.headers
         }) };
       }
 
@@ -392,13 +401,9 @@ export class WorkBuddyProvider {
         status,
         text: errText,
         json: parsedJson,
-        response: new Response(errText, {
-          status: status,
-          headers: buildResponseHeaders(resp.headers, {
-            "Content-Type": "application/json",
-            "X-Gateway-Account": account.id || "account",
-            "X-Gateway-Account-Id": account.id || "account"
-          })
+        response: accountResponse(account, {
+          body: errText, status,
+          headers: resp.headers, contentType: "application/json"
         })
       } };
     } catch (err) {
@@ -418,13 +423,9 @@ export class WorkBuddyProvider {
           status: retryResp.status,
           text: retryErrText,
           json: retryJson,
-          response: new Response(retryErrText, {
-            status: retryResp.status,
-            headers: buildResponseHeaders(retryResp.headers, {
-              "Content-Type": "application/json",
-              "X-Gateway-Account": account.id || "account",
-              "X-Gateway-Account-Id": account.id || "account"
-            })
+          response: accountResponse(account, {
+            body: retryErrText, status: retryResp.status,
+            headers: retryResp.headers, contentType: "application/json"
           })
         } };
       } catch (retryErr) {
@@ -533,7 +534,6 @@ export class WorkBuddyProvider {
       if (!token || !userId) return { id: account.id, name: account.name, success: false, msg: "missing credentials" };
 
       try {
-        let currentToken = token;
         const doReq = (tk) => fetch(this.ep().checkin, {
           method: "POST",
           headers: {
@@ -547,15 +547,8 @@ export class WorkBuddyProvider {
           },
           body: "{}"
         });
-
-        let resp = await doReq(currentToken);
-        if (resp.status === 401) {
-          const refreshed = await this.refreshAccessToken(account);
-          if (refreshed) {
-            currentToken = refreshed;
-            resp = await doReq(currentToken);
-          }
-        }
+        // 401 自愈一次（与 chat 路径同一 seam；失败则沿用原始响应继续判定）
+        const { resp } = await this.doRequestWithRefresh(account, doReq);
 
         const contentType = resp.headers.get("content-type") || "";
         if (!contentType.includes("application/json")) {

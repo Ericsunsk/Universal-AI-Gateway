@@ -7,7 +7,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 - `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration).
 - `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
 - `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer`.
-- `src/config/`, `src/admin/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the core Fetch handler, `api/index.js` the Vercel serverless entry.
+- `src/config/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the core Fetch handler, `api/index.js` the Vercel serverless entry.
 - `src/kv/` — persistence seam: `get` / `put` / `delete` (+ `json`) behind one interface; memory / Upstash-REST / composite adapters inside. Constructed once at the entry (`createKvFromEnv`), injected via env — core never imports adapters directly.
 
 ## Core concepts
@@ -42,11 +42,13 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 - **transform** — the request-side mapping: Anthropic `tool_use`/`tool_result` blocks → OpenAI `tool_calls`/`tool` messages, and vice versa for the response.
 
-- **reduce** — the pure per-chunk classifier (`reduceOpenAIChunk`) that maps one parsed OpenAI SSE chunk → a typed emission (`error` / `thinking` / `text` / `tool_use`). The streaming state machine (`streamOpenAIToAnthropic`) consumes it, but the error-classification branch is the only part wired through the reducer today; text/thinking/tool-call emission remains inline.
+- **reduce** — 纯分类器（`reduceOpenAIChunkAll` in `src/exchange/stream.js`）：单个已解析 chunk → 按序发射数组
+  （thinking / text / tool_use / finish）。流式与非流式两条消费路径都遍历数组，不再各写字段读取；
+  error 独占。最高回归面（tool-use 交错、thinking 切换、stop 映射）至此可当纯数据单测。
 
 - **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/stream.js`).
 
-- **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and hands the intent to `applyReasoningToPayload`, which adapts it per provider type (anthropic / openai-compatible / workbuddy).
+- **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and applies the intent exactly once per request (`transformAnthropicToOpenAI` 输出已含 OpenAI 映射，不二次 apply；唯 WorkBuddy 方言需清洗）。
 
 ## Classification vocabulary (in the scheduler)
 

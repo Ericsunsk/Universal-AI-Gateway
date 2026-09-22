@@ -7,13 +7,16 @@ export const config = {
 };
 
 // 网关只读取白名单内的环境变量/密钥，其余进程环境变量不可达
+// （导出供测试锁定覆盖率：src/ 与 api/ 消费的每个 env 键必须在此出现，见 test/entry.test.js）。
 // 防止意外泄露或读取未声明的机密字段
-const ENV_ALLOWLIST = new Set([
+export const ENV_ALLOWLIST = new Set([
   "API_KEY", "MASTER_KEY", "CRON_SECRET",
   "USER_ID", "ACCESS_TOKEN", "REFRESH_TOKEN",
   "MAX_CONTEXT_TURNS", "RETRY_BASE_MS",
   "GATEWAY_KV", "WORKBUDDY_KV",
   "KV_REST_API_URL", "KV_REST_API_TOKEN",
+  "KV_TIMEOUT_MS",
+  "INTL_USER_ID", "INTL_ACCESS_TOKEN", "INTL_REFRESH_TOKEN",
   "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN",
   "REDIS_REST_API_URL", "REDIS_REST_API_TOKEN",
   "PROXY_URL",

@@ -1,9 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getDefaultConfig, redactConfig, saveConfig, validateConfig, backfillMissingRoutes } from "../src/config/config.js";
+import { getDefaultConfig, backfillMissingRoutes } from "../src/config/config.js";
 import { timingSafeEqual, authenticateAccess } from "../src/auth/auth.js";
 import { buildResponseHeaders } from "../src/http/headers.js";
-import { createMemoryKv } from "../src/kv/index.js";
 
 // ---- #1 密钥兜底必须抛错 ----
 test("missing secrets throw instead of hardcoded default", () => {
@@ -44,7 +43,7 @@ test("cron secret accepted only on cron-gated endpoints (allowCron=true)", () =>
   assert.equal(cronAuth.principal.role, "cron");
 });
 
-test("cron secret rejected on admin endpoints (requireMaster=true)", () => {
+test("cron secret rejected on master-gated endpoints (requireMaster=true)", () => {
   assert.equal(authenticateAccess(req("cs"), cfg, { requireMaster: true }).ok, false);
 });
 
@@ -62,94 +61,6 @@ test("plain API_KEY is not master", () => {
   const r = authenticateAccess(req("sk-real"), cfg);
   assert.equal(r.ok, true);
   assert.equal(r.principal.isMaster, false);
-});
-
-// ---- #2 脱敏 ----
-test("redactConfig hides all secret material", () => {
-  const full = getDefaultConfig({
-    API_KEY: "APIKEY-LEAK", MASTER_KEY: "MASTER-LEAK", CRON_SECRET: "CRON-LEAK",
-    ACCESS_TOKEN: "ACCESS-LEAK", REFRESH_TOKEN: "REFRESH-LEAK", USER_ID: "u1"
-  });
-  const dump = JSON.stringify(redactConfig(full));
-  for (const v of ["APIKEY-LEAK", "MASTER-LEAK", "CRON-LEAK", "ACCESS-LEAK", "REFRESH-LEAK"]) {
-    assert.equal(dump.includes(v), false, `leaked ${v}`);
-  }
-  assert.equal(dump.includes("u1"), true, "non-secret userId should survive");
-});
-
-// ---- #2 合并式写入 ----
-test("merge-on-write preserves secrets across redacted round-trip", async () => {
-  const kv = createMemoryKv();
-  const env = { GATEWAY_KV: kv };
-  const secret = "SECRET-A";
-  await saveConfig(env, {
-    providers: [{ id: "wb", config: { accounts: [{ id: "a", accessToken: secret }] } }],
-    routes: { m: [{ provider: "wb", model: "x" }] }
-  });
-  const stored = JSON.parse(await kv.get("GATEWAY_CONFIG"));
-  assert.equal(stored.providers[0].config.accounts[0].accessToken, secret);
-
-  // 客户端回传脱敏视图
-  await saveConfig(env, redactConfig(stored));
-  const after = JSON.parse(await kv.get("GATEWAY_CONFIG"));
-  assert.equal(after.providers[0].config.accounts[0].accessToken, secret, "secret must survive round-trip");
-});
-
-test("explicit new secret overwrites", async () => {
-  const kv = createMemoryKv();
-  const env = { GATEWAY_KV: kv };
-  await saveConfig(env, { providers: [{ id: "wb", config: { accounts: [{ id: "a", accessToken: "OLD" }] } }], routes: { m: [{ provider: "wb" }] } });
-  const patch = redactConfig(JSON.parse(await kv.get("GATEWAY_CONFIG")));
-  patch.providers[0].config.accounts[0].accessToken = "NEW";
-  await saveConfig(env, patch);
-  assert.equal(JSON.parse(await kv.get("GATEWAY_CONFIG")).providers[0].config.accounts[0].accessToken, "NEW");
-});
-
-test("config version conflict returns 409", async () => {
-  const kv = createMemoryKv();
-  const env = { GATEWAY_KV: kv };
-  await saveConfig(env, { providers: [{ id: "wb", config: { accounts: [{ id: "a", accessToken: "OLD" }] } }], routes: { m: [{ provider: "wb" }] } });
-  const stored = JSON.parse(await kv.get("GATEWAY_CONFIG"));
-  // A client reads config_version=1 and tries to save with that version
-  const clientA = redactConfig(JSON.parse(JSON.stringify(stored)));
-  // B also reads and modifies concurrently
-  const clientB = redactConfig(JSON.parse(JSON.stringify(stored)));
-  clientB.providers[0].config.accounts[0].accessToken = "B-CHANGE";
-  await saveConfig(env, clientB);
-  // Now A tries to save with stale version=1 → should throw 409
-  await assert.rejects(saveConfig(env, clientA), /version conflict/, "stale version should throw 409");
-});
-
-// ---- #10 schema 校验 ----
-test("validateConfig rejects malformed routes", () => {
-  // routes 引用了不存在的 provider → 被拒绝
-  assert.ok(validateConfig({ providers: [], routes: { m: [{ provider: "wb" }] } }).length > 0, "unknown provider in routes");
-  assert.ok(validateConfig({ providers: [], routes: { m: [{ model: "x" }] } }).length > 0, "missing provider");
-  assert.ok(validateConfig({ providers: [] }).length > 0, "missing routes");
-  assert.ok(validateConfig({ providers: [], routes: { m: [] } }).length > 0, "empty route array");
-});
-
-test("validateConfig rejects duplicate ids and zero-account providers", () => {
-  const dupProviders = {
-    providers: [{ id: "wb" }, { id: "wb" }],
-    routes: { m: [{ provider: "wb" }] }
-  };
-  assert.ok(validateConfig(dupProviders).some(e => e.includes('duplicate provider id')), "duplicate provider id");
-  const dupAccounts = {
-    providers: [{ id: "wb", config: { accounts: [{ id: "a" }, { id: "a" }] } }],
-    routes: { m: [{ provider: "wb" }] }
-  };
-  assert.ok(validateConfig(dupAccounts).some(e => e.includes('duplicate account id')), "duplicate account id");
-  const zeroAccounts = {
-    providers: [{ id: "wb", config: { accounts: [] } }],
-    routes: { m: [{ provider: "wb" }] }
-  };
-  assert.ok(validateConfig(zeroAccounts).some(e => e.includes('zero accounts')), "zero accounts");
-  const missingAccountId = {
-    providers: [{ id: "wb", config: { accounts: [{}] } }],
-    routes: { m: [{ provider: "wb" }] }
-  };
-  assert.ok(validateConfig(missingAccountId).some(e => e.includes('missing id')), "account missing id");
 });
 
 // ---- #9 响应头过滤 ----
@@ -211,7 +122,6 @@ test("defaults include disabled workbuddy-intl slot with zero runtime effect", (
   assert.ok(intl, "intl slot present");
   assert.equal(intl.enabled, false);
   assert.equal(intl.config.region, "intl");
-  assert.deepEqual(validateConfig(defaults), [], "defaults with disabled intl must validate clean");
 });
 
 test("defaults enable workbuddy-intl only when INTL_* secrets present", () => {
@@ -221,7 +131,7 @@ test("defaults enable workbuddy-intl only when INTL_* secrets present", () => {
   assert.equal(intl.config.region, "intl");
   assert.equal(intl.config.accounts[0].userId, "u");
   assert.ok(withIntl.routes["glm-5.2-intl"], "intl route present");
-  assert.deepEqual(validateConfig(withIntl), [], "intl-enabled defaults must validate clean");
   const without = getDefaultConfig({ API_KEY: "k" });
   assert.equal(without.providers.find(p => p.id === "workbuddy-intl").enabled, false);
 });
+

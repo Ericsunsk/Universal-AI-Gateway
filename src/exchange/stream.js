@@ -19,7 +19,7 @@ const EVENT_MSG_STOP_BYTES = textEncoder.encode("event: message_stop\ndata: {\"t
 //   "text"     —— 正文文本增量
 //   "tool_use" —— 工具调用块（可能伴随 id/name/arguments）
 // 纯函数：从已解析的上游 JSON 中提取错误消息（error 字段 / msg / message / 非零 code）。
-// reduceOpenAIChunk 与 formatOpenAIToAnthropicJson 共享，避免两处各自拼装。
+// reduceOpenAIChunkAll 与 formatOpenAIToAnthropicJson 共享，避免两处各自拼装。
 export function extractErrorMessage(parsed) {
   if (!parsed || typeof parsed !== "object") return null;
   return parsed.error?.message || parsed.msg || parsed.message ||
@@ -68,45 +68,46 @@ export function finishReasonToAnthropic(finishReason) {
   }
 }
 
-export function reduceOpenAIChunk(parsed) {
-  if (!parsed || typeof parsed !== "object") return null;
-
-  // 上游业务错误（Tencent code !== 0 或显式 error 字段）
+// 纯函数：把单个已解析的 OpenAI SSE chunk 归约为一组「发射指令」（按发射顺序排列）。
+// 取代单发射 reducer：同一 chunk 可同时携带 thinking + text + tool_calls，单发射按优先级
+// 会吞掉后者。两条消费路径（流式 / 非流式）都遍历数组，不再各写一遍字段读取。
+// emission 种类（error 独占；其余按 thinking → text → tool_use → finish 顺序排列）：
+//   "error"    —— 上游业务错误/非零 code（同 chunk 其他字段忽略）
+//   "thinking" —— { text } 思维链增量
+//   "text"     —— { text } 正文增量
+//   "tool_use" —— { calls: [{ id, name, args, ident }], stopReason }，ident 标记该 call
+//                 是否自带 id/name（无身份的纯 argument 碎片由消费方决定去留）
+//   "finish"   —— { finishReason } 上游原始值，由消费方决定是否采用
+// 无 delta 且无 error 的 chunk（如纯 finish 标记）返回 []。
+export function reduceOpenAIChunkAll(parsed) {
+  if (!parsed || typeof parsed !== "object") return [];
   if (isUpstreamError(parsed)) {
-    const msg = extractErrorMessage(parsed) || "Unknown error";
-    return { kind: "error", message: msg };
+    return [{ kind: "error", message: extractErrorMessage(parsed) || "Unknown error" }];
   }
-
   const delta = parsed.choices?.[0]?.delta;
-  const finishReason = parsed.choices?.[0]?.finish_reason;
-
-  // 工具调用：可能在同一 chunk 内携带多个 tool_call
-  if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) {
-    const calls = delta.tool_calls.map(tc => ({
-      id: tc.id || null,
-      name: tc.function?.name || "tool",
-      arguments: tc.function?.arguments || ""
-    }));
-    return { kind: "tool_use", calls, stopReason: "tool_use" };
-  }
-
+  if (!delta) return [];
+  const out = [];
   // 思维链增量（兼容 DeepSeek 的 reasoning_content 与通用 reasoning 字段）
-  const reasoningDelta = delta?.reasoning_content || delta?.reasoning;
-  if (reasoningDelta) {
-    return { kind: "thinking", text: reasoningDelta };
-  }
-
+  const reasoningDelta = delta.reasoning_content || delta.reasoning;
+  if (reasoningDelta) out.push({ kind: "thinking", text: reasoningDelta });
   // 正文增量
-  if (delta?.content) {
-    return { kind: "text", text: delta.content };
+  if (delta.content) out.push({ kind: "text", text: delta.content });
+  // 工具调用：同一 chunk 内可能携带多个 tool_call
+  if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+    out.push({
+      kind: "tool_use",
+      calls: delta.tool_calls.map(tc => ({
+        id: tc.id || null,
+        name: tc.function?.name || "tool",
+        args: tc.function?.arguments || "",
+        ident: !!(tc.id || tc.function?.name)
+      })),
+      stopReason: "tool_use"
+    });
   }
-
-  // finish_reason 标记（无内容，但影响最终 stop_reason）
-  if (finishReason === "tool_calls") {
-    return { kind: "tool_use", calls: [], stopReason: "tool_use" };
-  }
-
-  return null;
+  const finishReason = parsed.choices?.[0]?.finish_reason;
+  if (finishReason) out.push({ kind: "finish", finishReason });
+  return out;
 }
 
 // 上游流停滞熔断：连续该时长收不到上游任何字节即判定上游卡死（如某些模型只回 200 头然后静默），
@@ -231,10 +232,11 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             const cached = extractCachedTokens(parsed);
             if (cached > maxCachedTokens) maxCachedTokens = cached;
 
-            // 检查上游是否嵌入了业务错误（如 Tencent code !== 0 或 error 字段）
-            // 委托纯函数 reducer 判定与提取错误消息，避免此分支逻辑与 reducer 分叉
-            const errorEmission = reduceOpenAIChunk(parsed);
-            if (errorEmission?.kind === "error") {
+            // 全部分类走 reducer seam：同一 chunk 的 thinking/text/tool/finish 按序发射，
+            // 不再各写一遍字段读取（error 独占，与旧语义一致）。
+            const emissions = reduceOpenAIChunkAll(parsed);
+            const errorEmission = emissions.find(e => e.kind === "error");
+            if (errorEmission) {
               const errMsg = errorEmission.message;
               console.warn(`[Stream Upstream Error] ${errMsg}`);
               if (currentBlockType !== "text") {
@@ -256,9 +258,10 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             const delta = parsed.choices?.[0]?.delta;
             if (!delta) continue;
 
-            // 思维链 (DeepSeek reasoning_content / 通用 reasoning 字段)
-            const reasoningChunk = delta.reasoning_content || delta.reasoning || "";
-            if (reasoningChunk) {
+            for (const emission of emissions) {
+            // 思维链
+            if (emission.kind === "thinking") {
+              const reasoningChunk = emission.text;
               if (currentBlockType !== "thinking") {
                 await closeCurrentBlock();
                 currentBlockIndex++;
@@ -275,8 +278,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             }
 
             // 正文内容
-            const textChunk = delta.content || "";
-            if (textChunk) {
+            else if (emission.kind === "text") {
+              const textChunk = emission.text;
               if (currentBlockType !== "text") {
                 await closeCurrentBlock();
                 currentBlockIndex++;
@@ -293,15 +296,15 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             }
 
             // 工具调用
-            if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+            else if (emission.kind === "tool_use") {
               finalStopReason = "tool_use";
-              for (const tc of delta.tool_calls) {
-                if (tc.id || tc.function?.name) {
+              for (const tc of emission.calls) {
+                if (tc.ident) {
                   await closeCurrentBlock();
                   currentBlockIndex++;
                   currentBlockType = "tool_use";
                   currentToolId = tc.id || ("call_" + Math.random().toString(36).substring(2, 9));
-                  currentToolName = tc.function?.name || "tool";
+                  currentToolName = tc.name;
                   await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
                     type: "content_block_start",
                     index: currentBlockIndex,
@@ -313,16 +316,17 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
                     }
                   })}\n\n`));
                 }
-                if (tc.function?.arguments) {
+                if (tc.args) {
                   await writer.write(textEncoder.encode(
-                    `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(tc.function.arguments)}}}\n\n`
+                    `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(tc.args)}}}\n\n`
                   ));
                 }
               }
             }
 
-            if (parsed.choices?.[0]?.finish_reason === "tool_calls") {
+            else if (emission.kind === "finish" && emission.finishReason === "tool_calls") {
               finalStopReason = "tool_use";
+            }
             }
           } catch (e) {}
         }
@@ -421,6 +425,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   let accumulated = "";
   let accumulatedThinking = "";
   let accumulatedToolCalls = [];
+  const sseToolFrags = new Map(); // tool id -> { id, name, args }，SSE 分片在此按 id 拼接
   let buffer = "";
   let inputTokens = 20;
   let outputTokens = 1;
@@ -442,15 +447,34 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
         if (jsonStr === "[DONE]") continue;
         try {
           const parsed = JSON.parse(jsonStr);
-          if (isUpstreamError(parsed)) {
-            const errMsg = extractErrorMessage(parsed) || "Unknown error";
-            accumulated += `\n[Upstream Notice: ${errMsg}]\n`;
-            continue;
+          // 同流式路径：全部分类走 reducer seam。SSE 形态的 tool_calls arguments 是分片到达，
+          // 按 id 拼接到一次后再整体解析（与流式 input_json_delta 语义对齐）；无 id 碎片无法
+          // 定址成块，直接丢弃（此前整段 tool_calls 被静默丢弃，stop_reason 恒为 end_turn）。
+          for (const emission of reduceOpenAIChunkAll(parsed)) {
+            if (emission.kind === "error") {
+              accumulated += `\n[Upstream Notice: ${emission.message}]\n`;
+            } else if (emission.kind === "thinking") {
+              accumulatedThinking += emission.text;
+            } else if (emission.kind === "text") {
+              accumulated += emission.text;
+            } else if (emission.kind === "tool_use") {
+              for (const c of emission.calls) {
+                if (!c.id) continue;
+                const prev = sseToolFrags.get(c.id);
+                if (prev) {
+                  if (typeof c.args === "string") prev.args += c.args;
+                  if (c.name && c.name !== "tool") prev.name = c.name;
+                } else {
+                  sseToolFrags.set(c.id, {
+                    id: c.id, name: c.name,
+                    args: typeof c.args === "string" ? c.args : ""
+                  });
+                }
+              }
+            } else if (emission.kind === "finish") {
+              accumulatedFinishReason = emission.finishReason;
+            }
           }
-          const reasoning = parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
-          if (reasoning) accumulatedThinking += reasoning;
-          const delta = parsed.choices?.[0]?.delta?.content;
-          if (delta) accumulated += delta;
           const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
           inputTokens = usage.input;
           outputTokens = usage.output;
@@ -500,6 +524,11 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     }
   } finally {
     reader.releaseLock();
+  }
+
+  // SSE 分片 tools 落袋：拼接后的 args 与单包形态走同一解析路径
+  for (const t of sseToolFrags.values()) {
+    accumulatedToolCalls.push({ id: t.id, name: t.name, args: t.args });
   }
 
   accumulated = accumulated || " ";
