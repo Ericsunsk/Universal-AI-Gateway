@@ -7,7 +7,7 @@ import { handleAdminRequest } from "./admin/admin.js";
 
 export default {
   // HTTP 请求核心分发入口
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
     }

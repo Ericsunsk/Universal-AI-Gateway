@@ -1,5 +1,5 @@
 import { createProvider } from "../providers/index.js";
-import { hasGetBalance, hasOnSchedule, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
+import { hasGetBalance, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
 
 let cachedFleet = null;
 let cachedFleetConfigRef = null;
@@ -73,17 +73,6 @@ export class ProviderFleet {
       balanceCache.set(providerId, { at: now, value });
       return value;
     }
-  }
-
-  // 批量触发 Cron 定时调度（保活与签到）
-  async runScheduledTasks() {
-    const tasks = [];
-    for (const provider of this.getAllActive()) {
-      if (hasOnSchedule(provider)) {
-        tasks.push(provider.onSchedule().catch(err => console.error(`[Fleet] Scheduled task failed for ${provider.id}:`, err)));
-      }
-    }
-    await Promise.allSettled(tasks);
   }
 
   // 批量执行签到

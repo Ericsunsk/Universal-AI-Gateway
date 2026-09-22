@@ -44,6 +44,4 @@ export class AnthropicStandardProvider {
   async getBalance() {
     return { success: false, balance: null, extra: "Anthropic 官方无公共余额 API" };
   }
-
-  async onSchedule() {}
 }

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { getDefaultConfig, redactConfig, saveConfig, validateConfig, backfillMissingRoutes } from "../src/config/config.js";
 import { timingSafeEqual, authenticateAccess } from "../src/auth/auth.js";
 import { buildResponseHeaders } from "../src/http/headers.js";
+import { createMemoryKv } from "../src/kv/index.js";
 
 // ---- #1 密钥兜底必须抛错 ----
 test("missing secrets throw instead of hardcoded default", () => {
@@ -77,41 +78,38 @@ test("redactConfig hides all secret material", () => {
 });
 
 // ---- #2 合并式写入 ----
-function fakeKv(store) {
-  return { get: async (k) => store.get(k) ?? null, put: async (k, v) => store.set(k, v) };
-}
 test("merge-on-write preserves secrets across redacted round-trip", async () => {
-  const store = new Map();
-  const env = { GATEWAY_KV: fakeKv(store) };
+  const kv = createMemoryKv();
+  const env = { GATEWAY_KV: kv };
   const secret = "SECRET-A";
   await saveConfig(env, {
     providers: [{ id: "wb", config: { accounts: [{ id: "a", accessToken: secret }] } }],
     routes: { m: [{ provider: "wb", model: "x" }] }
   });
-  const stored = JSON.parse(store.get("GATEWAY_CONFIG"));
+  const stored = JSON.parse(await kv.get("GATEWAY_CONFIG"));
   assert.equal(stored.providers[0].config.accounts[0].accessToken, secret);
 
   // 客户端回传脱敏视图
   await saveConfig(env, redactConfig(stored));
-  const after = JSON.parse(store.get("GATEWAY_CONFIG"));
+  const after = JSON.parse(await kv.get("GATEWAY_CONFIG"));
   assert.equal(after.providers[0].config.accounts[0].accessToken, secret, "secret must survive round-trip");
 });
 
 test("explicit new secret overwrites", async () => {
-  const store = new Map();
-  const env = { GATEWAY_KV: fakeKv(store) };
+  const kv = createMemoryKv();
+  const env = { GATEWAY_KV: kv };
   await saveConfig(env, { providers: [{ id: "wb", config: { accounts: [{ id: "a", accessToken: "OLD" }] } }], routes: { m: [{ provider: "wb" }] } });
-  const patch = redactConfig(JSON.parse(store.get("GATEWAY_CONFIG")));
+  const patch = redactConfig(JSON.parse(await kv.get("GATEWAY_CONFIG")));
   patch.providers[0].config.accounts[0].accessToken = "NEW";
   await saveConfig(env, patch);
-  assert.equal(JSON.parse(store.get("GATEWAY_CONFIG")).providers[0].config.accounts[0].accessToken, "NEW");
+  assert.equal(JSON.parse(await kv.get("GATEWAY_CONFIG")).providers[0].config.accounts[0].accessToken, "NEW");
 });
 
 test("config version conflict returns 409", async () => {
-  const store = new Map();
-  const env = { GATEWAY_KV: fakeKv(store) };
+  const kv = createMemoryKv();
+  const env = { GATEWAY_KV: kv };
   await saveConfig(env, { providers: [{ id: "wb", config: { accounts: [{ id: "a", accessToken: "OLD" }] } }], routes: { m: [{ provider: "wb" }] } });
-  const stored = JSON.parse(store.get("GATEWAY_CONFIG"));
+  const stored = JSON.parse(await kv.get("GATEWAY_CONFIG"));
   // A client reads config_version=1 and tries to save with that version
   const clientA = redactConfig(JSON.parse(JSON.stringify(stored)));
   // B also reads and modifies concurrently

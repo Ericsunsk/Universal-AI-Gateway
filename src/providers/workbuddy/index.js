@@ -598,11 +598,4 @@ export class WorkBuddyProvider {
       details: checkinLogs
     };
   }
-
-  // 定时调度生命周期钩子：并发执行所有账号签到与 Token 保活
-  async onSchedule() {
-    await this.doDailyCheckin();
-    const accounts = this.getAccounts();
-    await Promise.allSettled(accounts.map(acc => this.refreshAccessToken(acc)));
-  }
 }

@@ -5,7 +5,6 @@
 //   callChat(payload, options) -> Response        —— OpenAI 风格上游（必选，主路径）
 //   callMessages(payload, options) -> Response    —— Anthropic 风格上游（anthropic 主路径）
 //   getBalance() -> { success, balance, total, ...} —— 余额查询（可选）
-//   onSchedule() -> Promise                        —— 定时保活（可选）
 //   doDailyCheckin() -> Promise<{...}>            —— 每日签到（可选）
 //
 // 能力探测统一收敛到这里的纯谓词，fleet.js / dispatch.js 不再手写 typeof 判断，
@@ -33,10 +32,6 @@ export function wantsStreamedChat(provider) {
 
 export function hasTokenRefresh(provider) {
   return !!provider && typeof provider.refreshAccessToken === "function";
-}
-
-export function hasOnSchedule(provider) {
-  return !!provider && typeof provider.onSchedule === "function";
 }
 
 export function hasDailyCheckin(provider) {

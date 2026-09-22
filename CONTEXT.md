@@ -8,6 +8,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 - `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
 - `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer`.
 - `src/config/`, `src/admin/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the core Fetch handler, `api/index.js` the Vercel serverless entry.
+- `src/kv/` — persistence seam: `get` / `put` / `delete` (+ `json`) behind one interface; memory / Upstash-REST / composite adapters inside. Constructed once at the entry (`createKvFromEnv`), injected via env — core never imports adapters directly.
 
 ## Core concepts
 

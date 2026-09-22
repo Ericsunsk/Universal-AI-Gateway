@@ -49,8 +49,4 @@ export class OpenAIStandardProvider {
     }
     return { success: false, balance: null, extra: "暂不支持查询余额" };
   }
-
-  async onSchedule() {
-    // 标准服务默认无定时操作
-  }
 }
