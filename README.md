@@ -234,6 +234,8 @@ claude
 1. `workbuddy -> deepseek-v4.1-flash`
 2. `deepseek-official -> deepseek-chat`  
 保存后即时生效！一旦 WorkBuddy 额度耗尽或发生限流，请求会自动重试并降级到 DeepSeek 官方。
+
+> 未在路由中声明的模型不会 404：网关按“精确匹配 → `routes[\"*\"]` 通配 → `default_provider`（空即首个可用上游）”三级回退，新模型免配置即可用。注意未知模型名会真实打一次上游（拒收回 502），不要把不可信的模型名暴露给按次计费的上游。
 </details>
 
 ---

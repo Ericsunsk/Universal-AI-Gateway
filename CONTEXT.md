@@ -12,7 +12,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 ## Core concepts
 
-- **route** — a `model name → ordered candidate list` mapping (config `routes`). The unit of *model resolution*: a client asks for a logical model name, the gateway walks its candidates in order.
+- **route** — a `model name → ordered candidate list` mapping (config `routes`). The unit of *model resolution*: a client asks for a logical model name, the gateway walks its candidates in order. Resolution is three-level: exact match (after reasoning-suffix strip) → wildcard `routes["*"]` (candidate `model` defaults to the requested name) → default passthrough to `config.default_provider` (empty means first active provider; absent provider means 404).
 
 - **candidate** — a `{ provider, model }` pair tried in sequence during failover. One route has many candidates.
 

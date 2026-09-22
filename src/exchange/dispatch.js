@@ -34,15 +34,36 @@ export async function dispatchExchange({
   const cleanModel = reasoningIntent.cleanModel || "deepseek-v4.1-flash";
   let candidates = routes[model] || routes[cleanModel];
 
-  // 路由模糊回退已改为显式 opt-in（issue #04）。
-  // 仅当 routes 中存在精确匹配时才使用配置的路由，否则返回 404 错误并提供可用模型建议。
+  // 1. 显式路由匹配（包括推理后缀剥离后的 cleanModel）
+  // 2. 通配路由 routes["*"]
+  // 3. 默认上游直通：未在 routes 声明的模型直接透传默认 provider，免除硬编码映射
+  // 政策说明：issue #04 时代未知模型直接 404；现改为三级回退（精确→通配→默认直通），
+  // 新模型免配置即可用。代价是已鉴权客户端的未知模型名会真实打一次上游（单候选），
+  // 上游拒收回 502。如需恢复严格 404，删掉通配与默认 provider（candidates 为空即 404）。
   if (!candidates || candidates.length === 0) {
-    const availableModels = Object.keys(routes || {});
+    if (routes["*"] && Array.isArray(routes["*"]) && routes["*"].length > 0) {
+      candidates = routes["*"].map((c) => ({
+        ...c,
+        model: c.model || cleanModel
+      }));
+    } else {
+      const defaultProviderId = config.default_provider || (fleet?.getAllActive?.()[0]?.id) || "workbuddy";
+      const defaultProvider = fleet?.getProvider?.(defaultProviderId);
+      if (defaultProvider) {
+        candidates = [{
+          provider: defaultProviderId,
+          model: cleanModel
+        }];
+      }
+    }
+  }
+
+  if (!candidates || candidates.length === 0) {
+    const availableModels = Object.keys(routes || {}).filter((k) => k !== "*");
     return new Response(JSON.stringify({
       error: {
-        message: `No route configured for model "${model}". ` +
-          `Available models: ${availableModels.length > 0 ? availableModels.join(", ") : "(none)"}. ` +
-          `To use this model, please add an explicit route in the configuration.`
+        message: `No route or provider configured for model "${model}". ` +
+          `Available models: ${availableModels.length > 0 ? availableModels.join(", ") : "(none)"}.`
       }
     }), {
       status: 404,

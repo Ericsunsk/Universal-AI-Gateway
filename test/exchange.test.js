@@ -583,3 +583,72 @@ test("formatOpenAIToAnthropicJson maps SSE finish_reason to stop_reason", async 
   const body = await resp.json();
   assert.equal(body.stop_reason, "max_tokens", "SSE finish was previously ignored (always end_turn)");
 });
+
+test("dispatchExchange passes through unconfigured model to default provider without 404", async () => {
+  let requestedPayload = null;
+  const mockFleet = {
+    getAllActive: () => [{ id: "mock_wb" }],
+    getProvider: (id) => ({
+      id,
+      callChat: async (payload) => {
+        requestedPayload = payload;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    })
+  };
+
+  const res = await dispatchExchange({
+    request: new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    }),
+    body: { model: "future-deepseek-r1-2026", messages: [{ role: "user", content: "hi" }] },
+    model: "future-deepseek-r1-2026",
+    config: { routes: {} },
+    fleet: mockFleet,
+    protocol: "openai"
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(requestedPayload.model, "future-deepseek-r1-2026", "unconfigured model should passthrough directly to upstream");
+});
+
+test("dispatchExchange honors wildcard route routes['*'] when configured", async () => {
+  let requestedPayload = null;
+  const mockFleet = {
+    getAllActive: () => [{ id: "wb" }],
+    getProvider: (id) => ({
+      id,
+      callChat: async (payload) => {
+        requestedPayload = payload;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    })
+  };
+
+  const res = await dispatchExchange({
+    request: new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    }),
+    body: { model: "any-custom-model", messages: [{ role: "user", content: "hi" }] },
+    model: "any-custom-model",
+    config: {
+      routes: {
+        "*": [{ provider: "wb" }]
+      }
+    },
+    fleet: mockFleet,
+    protocol: "openai"
+  });
+
+  assert.equal(res.status, 200);
+  assert.equal(requestedPayload.model, "any-custom-model");
+});
+

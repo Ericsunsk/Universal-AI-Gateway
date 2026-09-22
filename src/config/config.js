@@ -29,6 +29,9 @@ export function getDefaultConfig(env) {
     cron_secret: env.CRON_SECRET || "",
     max_context_turns: env.MAX_CONTEXT_TURNS !== undefined ? parseInt(env.MAX_CONTEXT_TURNS, 10) : 0,
     usage_provider_id: "workbuddy",
+    // 未配置模型的默认上游：空串表示用首个 active provider；填 provider id 则固定走它；
+    // 删掉本键且无可用 provider 时，未知模型回 404。另见 routes["*"] 通配路由。
+    default_provider: "",
     providers: [
       {
         id: "workbuddy",

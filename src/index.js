@@ -88,7 +88,7 @@ export default {
       const auth = authenticateAccess(request, config);
       if (!auth.ok) return auth.response;
 
-      const configuredModels = Object.keys(config.routes || {});
+      const configuredModels = Object.keys(config.routes || {}).filter((m) => m !== "*");
       const allModels = Array.from(new Set(configuredModels));
 
       return new Response(JSON.stringify({
