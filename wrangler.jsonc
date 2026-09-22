@@ -2,7 +2,7 @@
   "name": "worker-ai-gateway",
   "main": "src/index.js",
   "compatibility_date": "2024-09-23",
-  // qwenweb 反爬移植用 node:crypto（AES-CBC/PKCS7 + sha256/md5），需此 flag 才能在 Workers 运行
+  // nodejs_compat：在 Workers 中提供 node: 内置模块（如 node:crypto）
   "compatibility_flags": ["nodejs_compat"],
   "kv_namespaces": [
     {

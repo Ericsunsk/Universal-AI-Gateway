@@ -5,7 +5,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 ## Module layout (DDD-lite: one context, role-based folders)
 
 - `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration).
-- `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, `qwenweb/`, each with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
+- `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
 - `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer`.
 - `src/config/`, `src/admin/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the Worker entry, `api/` the Vercel entry.
 
@@ -15,7 +15,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **candidate** — a `{ provider, model }` pair tried in sequence during failover. One route has many candidates.
 
-- **provider** — an adapter over one upstream AI service (WorkBuddy/Tencent, Qwen Web, an OpenAI-compatible endpoint, or an Anthropic-compatible endpoint). Concrete implementations: `WorkBuddyProvider`, `QwenWebProvider`, `OpenAIStandardProvider`, `AnthropicStandardProvider`.
+- **provider** — an adapter over one upstream AI service (WorkBuddy/Tencent, an OpenAI-compatible endpoint, or an Anthropic-compatible endpoint). Concrete implementations: `WorkBuddyProvider`, `OpenAIStandardProvider`, `AnthropicStandardProvider`.
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 

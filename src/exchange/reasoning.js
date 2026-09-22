@@ -155,7 +155,7 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
   }
 
   // ----------------------------------------------------
-  // 3. OpenAI 官方 / 兼容提供商 (如 o1, o3-mini, DeepSeek 官方)
+  // 2. OpenAI 官方 / 兼容提供商 (如 o1, o3-mini, DeepSeek 官方)
   // ----------------------------------------------------
   if (type === "openai" || !type) {
     // 映射到 OpenAI 仅支持的 3 档: low, medium, high
@@ -177,7 +177,7 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
   }
 
   // ----------------------------------------------------
-  // 4. WorkBuddy / 腾讯云 (不支持外部动态调节推理强度的渠道)
+  // 3. WorkBuddy / 腾讯云 (不支持外部动态调节推理强度的渠道)
   // ----------------------------------------------------
   if (type === "workbuddy") {
     // 严格清洗掉非标准推理参数，防止上游返回 400 parameter invalid 报错
