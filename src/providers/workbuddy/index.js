@@ -467,8 +467,14 @@ export class WorkBuddyProvider {
           let totalRemain = 0;
           let totalSize = 0;
           for (const acc of data.data.Response.Data.Accounts) {
-            const r = parseFloat(acc.CycleCapacityRemainPrecise || acc.CycleCapacityRemain || acc.CapacityRemain || 0);
-            const s = parseFloat(acc.CycleCapacitySizePrecise || acc.CycleCapacitySize || acc.CapacitySize || 0);
+            const r = Math.max(
+              parseFloat(acc.CapacityRemainPrecise || acc.CapacityRemain || 0),
+              parseFloat(acc.CycleCapacityRemainPrecise || acc.CycleCapacityRemain || 0)
+            );
+            const s = Math.max(
+              parseFloat(acc.CapacitySizePrecise || acc.CapacitySize || 0),
+              parseFloat(acc.CycleCapacitySizePrecise || acc.CycleCapacitySize || 0)
+            );
             totalRemain += r;
             totalSize += s;
           }

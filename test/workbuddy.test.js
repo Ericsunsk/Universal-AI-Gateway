@@ -257,3 +257,54 @@ test("explicit pool members fail closed without own credentials (no env borrowin
   assert.equal(solo.allowEnvFallback, true);
   assert.equal(await single.getActiveToken(solo), "env-access", "synthesized single account keeps env fallback");
 });
+
+test("getBalance correctly aggregates cyclical packages and trial packages with CycleCapacityRemainPrecise=0", async () => {
+  globalThis.fetch = async () => {
+    return new Response(JSON.stringify({
+      code: 0,
+      data: {
+        Response: {
+          Data: {
+            Accounts: [
+              {
+                PackageName: "Trial",
+                CapacityRemain: 500,
+                CapacityRemainPrecise: "500",
+                CycleCapacityRemain: 0,
+                CycleCapacityRemainPrecise: "0",
+                CapacitySize: 500,
+                CapacitySizePrecise: "500",
+                CycleCapacitySize: 500,
+                CycleCapacitySizePrecise: "500"
+              },
+              {
+                PackageName: "CheckIn",
+                CapacityRemain: 100,
+                CapacityRemainPrecise: "100.00000000",
+                CycleCapacityRemain: 100,
+                CycleCapacityRemainPrecise: "100.00000000",
+                CapacitySize: 100,
+                CapacitySizePrecise: "100",
+                CycleCapacitySize: 100,
+                CycleCapacitySizePrecise: "100"
+              }
+            ]
+          }
+        }
+      }
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  const p = new WorkBuddyProvider(
+    { id: "wb-test", config: { accounts: [{ id: "acc1", userId: "u1", accessToken: "t1" }] } },
+    {}
+  );
+  const bal = await p.getBalance();
+  assert.equal(bal.success, true);
+  assert.equal(bal.balance, 600);
+  assert.equal(bal.total, 600);
+});
+
