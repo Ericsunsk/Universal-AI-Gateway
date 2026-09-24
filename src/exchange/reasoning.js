@@ -158,8 +158,8 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
         budget_tokens: budget
       };
       // Anthropic 规范：开启 Extended Thinking 时 temperature 必须为 1.0 或不传
+      // Anthropic thinking 要求 temperature=1.0；覆盖时不记录日志（避免生产噪音）
       if (payload.temperature !== undefined && payload.temperature !== 1.0) {
-        console.debug(`[Reasoning] Overriding temperature ${payload.temperature} to 1.0 for Anthropic thinking`);
         payload.temperature = 1.0;
       }
     }

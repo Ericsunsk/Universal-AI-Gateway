@@ -22,6 +22,7 @@ export const ENV_ALLOWLIST = new Set([
   "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN",
   "REDIS_REST_API_URL", "REDIS_REST_API_TOKEN",
   "VERCEL_URL", "VERCEL_PROJECT_DOMAINS",
+  "DEBUG",
 ]);
 
 function getEnvContext() {
@@ -80,10 +81,13 @@ function resolveUrl(req) {
   const protocol = (forwardedProto && (forwardedProto === "https" || forwardedProto === "http")) ? forwardedProto : "https";
 
   // Vercel 重写时，若 req.url 为 /api，优先从 x-matched-path 读取实际路径
-  // 仅在 host 头与白名单匹配时才信任 x-matched-path，防止路径伪造
+  // 仅在 host 头与白名单匹配时才信任 x-matched-path，且路径必须以 /api 或 /v1 开头（防路径伪造）
   let path = req.url || "/";
   if ((path === "/api" || path === "/api/" || path.startsWith("/api?")) && req.headers["x-matched-path"] && trustedHosts.has(actualHost)) {
-    path = req.headers["x-matched-path"];
+    const matchedPath = req.headers["x-matched-path"];
+    if (matchedPath.startsWith("/api") || matchedPath.startsWith("/v1") || matchedPath === "/" || matchedPath === "/healthz" || matchedPath === "/status") {
+      path = matchedPath;
+    }
   }
   return new URL(path, `${protocol}://${host}`);
 }

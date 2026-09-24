@@ -556,6 +556,8 @@ test("extractCachedTokens reads OpenAI and Anthropic cache fields", async () => 
 test("stream translator logs upstream prefix-cache hits", async () => {
   const lines = [];
   const origLog = console.log;
+  const origDebug = process.env.DEBUG;
+  process.env.DEBUG = "true"; // 启用调试日志以通过测试
   console.log = (...args) => { lines.push(args.join(" ")); };
   try {
     const upstream = openAISseResponse([
@@ -567,6 +569,8 @@ test("stream translator logs upstream prefix-cache hits", async () => {
     await readAnthropicEvents(resp);
   } finally {
     console.log = origLog;
+    if (origDebug !== undefined) process.env.DEBUG = origDebug;
+    else delete process.env.DEBUG;
   }
   assert.ok(lines.some((l) => l.includes("prefix-cache hit") && l.includes("80")), "cache hit must be observable via logs");
 });

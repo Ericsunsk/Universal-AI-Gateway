@@ -5,6 +5,7 @@ dist/
 # Sensitive local credentials (gitignored, kept private)
 .env
 .env*
+.env.local
 # 显式锚定任意层级的本地凭据文件（`.env*` 的 glob 在 git 中不跨目录匹配，
 # 且 Vercel CLI 会把 VERCEL_OIDC_TOKEN 刷新写入 .env.local，必须万无一失）
 **/.env

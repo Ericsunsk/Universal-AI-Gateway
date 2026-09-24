@@ -129,7 +129,10 @@ export function backfillMissingRoutes(stored, defaults) {
     storedRoutes[model] = JSON.parse(JSON.stringify(routeList));
     added++;
   }
-  if (added > 0) console.log(`[Config] Backfilled ${added} missing route(s) from code defaults`);
+  // 路由回填完成（生产环境已移除日志，避免启动噪音）
+  if (added > 0 && process.env.DEBUG === "true") {
+    console.log(`[Config] Backfilled ${added} missing route(s) from code defaults`);
+  }
   return stored;
 }
 
