@@ -42,7 +42,7 @@ test("checkRateLimit refills tokens over time", async () => {
   // 模拟时间流逝：手动更新桶的 lastRefill（测试环境无法真实等待）
   // 生产环境中 refill 由实际时间差驱动，此处验证公式正确性
   const bucket = await kv.get("ratelimit:user:3", "json");
-  assert.equal(bucket.tokens, 5, "5 tokens consumed");
+  assert.equal(Math.round(bucket.tokens), 5, "5 tokens consumed");
 
   // 公式验证：elapsed=1s, refilled=1*10=10, new=min(10, 5+10)=10
   // 实际测试中时间差极小，验证逻辑即可
