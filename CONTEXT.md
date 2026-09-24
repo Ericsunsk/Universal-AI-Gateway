@@ -6,7 +6,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration).
 - `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
-- `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer`.
+- `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer` (vendors-neutral output pruning only).
 - `src/config/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the core Fetch handler, `api/index.js` the Vercel serverless entry.
 - `src/kv/` — persistence seam: `get` / `put` / `delete` (+ `json`) behind one interface; memory / Upstash-REST / composite adapters inside. Constructed once at the entry (`createKvFromEnv`), injected via env — core never imports adapters directly.
 
@@ -36,7 +36,7 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 - **exchange / dispatch** — the layer that translates between the client-facing protocol (Anthropic or OpenAI) and the upstream protocol, in both directions. Debug attribution (`X-Gateway-Account/Model/Fallback`) is master-gated: `dispatchExchange` takes the caller `principal` and only emits these headers for `isMaster`; the WorkBuddy `accountResponse` seam honors the same flag via `options.principal`.
 
-- **sanitize** — rewriting Claude-Code / client fingerprints to bypass upstream keyword filters (Tencent error `11128`). In `src/exchange/sanitizer.js`.
+- **sanitize** — vendor-neutral output pruning in `src/exchange/sanitizer.js` (`optimizeToolOutput`, consumed by transform). Upstream-specific fingerprint defusing (Tencent 11128) lives with its owner in `src/providers/workbuddy/sanitize.js` — providers never import from exchange.
 
 - **normalize** — reordering OpenAI `tool_calls`/`tool_results` to satisfy upstream message-sequence rules (Tencent error `11148`). `normalizeOpenAIMessages`.
 

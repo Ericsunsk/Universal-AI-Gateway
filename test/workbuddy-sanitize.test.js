@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeMessages } from "../src/exchange/sanitizer.js";
+import { sanitizeMessages } from "../src/providers/workbuddy/sanitize.js";
 
 // H4：sanitizer 曾使用大小写敏感的 includes，导致全小写指纹（claude code ...）绕过上游 11128 过滤。
 // sanitizeText 为模块私有，统一经由导出面 sanitizeMessages(user) 验证。

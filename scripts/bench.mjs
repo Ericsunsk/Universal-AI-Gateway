@@ -9,7 +9,7 @@
 // 用法：改动前后各跑一遍，对 P50/P99 与 KV ops。
 import { performance } from "node:perf_hooks";
 import { dispatchExchange } from "../src/exchange/exchange.js";
-import { WorkBuddyProvider } from "../src/providers/workbuddy/index.js";
+import { createProvider } from "../src/providers/index.js";
 
 const args = Object.fromEntries(
   process.argv.slice(2).map(a => a.replace(/^--/, "").split("="))
@@ -93,8 +93,8 @@ async function scenarioB(n, { failStatus = 429 } = {}) {
   for (let i = 0; i < n + 2; i++) {
     const kv = countingKv();
     const tag = `b${i}`;
-    const p = new WorkBuddyProvider(
-      { id: `wbb-${tag}`, config: { accounts: [{ id: `${tag}a`, userId: "u", accessToken: "t" }, { id: `${tag}b`, userId: "u", accessToken: "t" }] } },
+    const p = createProvider(
+      { id: `wbb-${tag}`, type: "workbuddy", config: { accounts: [{ id: `${tag}a`, userId: "u", accessToken: "t" }, { id: `${tag}b`, userId: "u", accessToken: "t" }] } },
       { GATEWAY_KV: kv, ...(process.env.RETRY_BASE_MS ? { RETRY_BASE_MS: process.env.RETRY_BASE_MS } : {}) }
     );
     let calls = 0;

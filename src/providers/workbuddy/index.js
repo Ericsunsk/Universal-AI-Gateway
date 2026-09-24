@@ -1,4 +1,4 @@
-import { sanitizeMessages } from "../../exchange/sanitizer.js";
+import { sanitizeMessages } from "./sanitize.js";
 import { buildResponseHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
 import { runFailover } from "../../core/failover.js";
