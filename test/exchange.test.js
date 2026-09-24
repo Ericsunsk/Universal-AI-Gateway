@@ -283,11 +283,12 @@ test("reduceOpenAIChunkAll classifies error field", () => {
   assert.deepEqual(out, [{ kind: "error", message: "boom" }]);
 });
 
-test("reduceOpenAIChunkAll returns [] for empty/invalid/delta-less chunks", () => {
+test("reduceOpenAIChunkAll returns [] for empty/invalid chunks, finish for delta-less stop", () => {
   assert.deepEqual(reduceOpenAIChunkAll(null), []);
   assert.deepEqual(reduceOpenAIChunkAll({}), []);
   assert.deepEqual(reduceOpenAIChunkAll({ choices: [] }), []);
-  assert.deepEqual(reduceOpenAIChunkAll({ choices: [{ finish_reason: "stop" }] }), []);
+  // 无 delta 的终局 finish_reason 不再被丢弃（stop_reason 否则恒回退 end_turn）
+  assert.deepEqual(reduceOpenAIChunkAll({ choices: [{ finish_reason: "stop" }] }), [{ kind: "finish", finishReason: "stop" }]);
 });
 
 test("reduceOpenAIChunkAll emits thinking+text+tool+finish in order for mixed chunk", () => {
@@ -705,11 +706,13 @@ test("dispatchExchange OpenAI path prunes noisy role:tool output before upstream
   });
 
   assert.equal(res.status, 200);
-  const sentTool = requestedPayload.messages.find(m => m.role === "tool");
-  assert.ok(sentTool, "tool message reaches upstream");
+  // OpenAI 直传同样走 normalize：孤儿 tool 消息被包成 user [Tool Result:]，
+  // 避免乱序直击上游触发 11148；prune 已先做 ANSI/换行清洗。
+  const sentTool = requestedPayload.messages.find(m => String(m.content || "").includes("Tool Result"));
+  assert.ok(sentTool, "tool result reaches upstream (normalized as user message)");
   assert.equal(sentTool.content.includes("\u001b"), false, "ANSI escapes stripped on OpenAI path");
   assert.equal(sentTool.content.includes("\n\n\n"), false, "excess newlines collapsed on OpenAI path");
-  assert.equal(sentTool.content, "==========\n\ndone");
+  assert.ok(sentTool.content.includes("==========\n\ndone"));
 });
 
 test("dispatchExchange honors wildcard route routes['*'] when configured", async () => {

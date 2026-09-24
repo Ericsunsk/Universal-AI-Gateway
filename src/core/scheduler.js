@@ -225,14 +225,6 @@ export function classifyFailure(evidence = {}) {
   return "fatal";
 }
 
-// 别名：老签名 classify(status, text, json) 仍然可用（签名兼容）。
-// 注意语义差一处：resJson 默认 **undefined**（不是老默认 null）：缺省时与
-// classifyFailure({status,text}) 一样自行解析 text。旧语义（"确认无结构体、不解析"）
-// 请显式传 null。src 内已无 classify 旧调用（仅测试），生产路径均走 classifyFailure。
-export function classify(status, bodyText = "", resJson) {
-  return classifyFailure({ status, text: bodyText, json: resJson });
-}
-
 function tryParseJson(bodyText) {
   if (typeof bodyText !== "string" || !bodyText) return null;
   try {

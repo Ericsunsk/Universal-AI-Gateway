@@ -1,3 +1,5 @@
+import { assertPublicHttps } from "./urlGuard.js";
+
 export class AnthropicStandardProvider {
   constructor(config, env) {
     this.id = config.id;
@@ -18,6 +20,7 @@ export class AnthropicStandardProvider {
 
   // Anthropic 原生 messages
   async callMessages(payload, options = {}) {
+    assertPublicHttps(this.baseUrl, `${this.id} baseUrl`);
     const url = `${this.baseUrl}/v1/messages`;
     const headers = {
       "Content-Type": "application/json",
@@ -34,11 +37,6 @@ export class AnthropicStandardProvider {
       signal: options.signal,
       keepalive: true
     });
-  }
-
-  // 如果客户端发来 OpenAI 格式但上游是 Anthropic，可在这里调用或经由网关转换
-  async callChat(payload) {
-    return new Response(JSON.stringify({ error: { message: "Direct chat not supported on raw Anthropic provider" } }), { status: 400 });
   }
 
   async getBalance() {

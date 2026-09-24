@@ -76,6 +76,13 @@ export class ProviderFleet {
     }
     try {
       const res = await provider.getBalance();
+      // 余额形态归一：无数值 balance（如 openai 的 {success,data}）视为不支持，
+      // success:false 而非静默 balance:0 + success:true。
+      if (res?.success === true && typeof res.balance !== "number") {
+        const value = { success: false, balance: 0, total: 0, unit: res.unit || "积分", error: "Upstream balance not available" };
+        cacheBalance(providerId, { at: now, value });
+        return value;
+      }
       const value = {
         success: !!res.success,
         balance: res.balance ?? 0,
@@ -128,20 +135,37 @@ export class ProviderFleet {
 }
 
 // 单例获取 Fleet，复用 Provider 实例减少无谓的对象重新分配。
-// 判等优先用 config_version：getConfig 每 60s 刷新会产生新对象（内容不变），
-// 按引用判等会导致 provider 实例每分钟重建一次（含各 adapter 构造开销）。
-// 注意：Admin API 已删除，KV 直行写入配置时必须手动 bump config_version，
-// 否则版本号不变会导致 fleet 沿用旧实例、新配置不生效；无版本号时回退引用判等。
+// 判等优先用 config_version，但版本号是人工 bump、易忘：同时比对 providers 指纹
+//（id/type/enabled/region+账号结构），只加 provider 不 bump 时也能重建；
+// env 身份轮换（KV 绑定变化）同样触发重建，避免 provider 持有旧 env。
+// 注意：KV 直行写入配置时仍建议 bump config_version；无版本号时回退引用判等。
+function providersFingerprint(config) {
+  try {
+    const list = Array.isArray(config?.providers) ? config.providers : Object.values(config?.providers || {});
+    return JSON.stringify(list.map((p) => ({
+      id: p?.id, type: p?.type, enabled: p?.enabled,
+      region: p?.config?.region,
+      accounts: (p?.config?.accounts || []).map((a) => ({ id: a?.id, enabled: a?.enabled, userId: a?.userId }))
+    })));
+  } catch (e) {
+    return "";
+  }
+}
+let cachedFleetProvidersHash = "";
+let cachedFleetEnv = null;
 export function getProviderFleet(config, env) {
   const version = config?.config_version;
+  const hash = providersFingerprint(config);
   const same = cachedFleet && (version !== undefined
-    ? cachedFleetVersion === version
-    : cachedFleetConfigRef === config);
+    ? (cachedFleetVersion === version && cachedFleetProvidersHash === hash && cachedFleetEnv === env)
+    : (cachedFleetConfigRef === config && cachedFleetEnv === env));
   if (same) {
     return cachedFleet;
   }
   cachedFleet = new ProviderFleet(config, env);
   cachedFleetConfigRef = config;
   cachedFleetVersion = version;
+  cachedFleetProvidersHash = hash;
+  cachedFleetEnv = env;
   return cachedFleet;
 }

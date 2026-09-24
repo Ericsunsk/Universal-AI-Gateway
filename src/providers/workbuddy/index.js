@@ -37,14 +37,14 @@ function warnNoCredential(providerId, account) {
 
 // 同一账号归因渲染 seam：所有上游透传响应的 X-Gateway-Account 收敛一处，
 // 五处调用点不再手写归因头，避免漏标/错标漂移。
-function accountResponse(account, { body, status, statusText, headers, contentType }) {
+// 账号归因仅对 master 下发（options.principal?.isMaster），客户端 key 不暴露账号 ID。
+function accountResponse(account, { body, status, statusText, headers, contentType }, exposeAccount = false) {
   return new Response(body, {
     status,
     statusText,
     headers: buildResponseHeaders(headers, {
       ...(contentType ? { "Content-Type": contentType } : {}),
-      "X-Gateway-Account": account.id || "account",
-      "X-Gateway-Account-Id": account.id || "account"
+      ...(exposeAccount ? { "X-Gateway-Account": account.id || "account" } : {})
     })
   });
 }
@@ -70,7 +70,7 @@ export function affinityKeyForCall(payload, options = {}) {
   return null;
 }
 
-// Region 端点表：CN 现状冻结；intl 格子待凭证实测后填（TODO-intl）。
+// Region 端点表：CN 现状冻结；intl 已实测（2026-09-14，见下）。
 // provider 配置 config.region: "intl" 即切整组端点 + Origin/Referer；默认 "cn" 行为零变化。
 export function normalizeWorkbuddyRegion(value) {
   return String(value || "").toLowerCase() === "intl" ? "intl" : "cn";
@@ -83,7 +83,6 @@ export function resolveWorkbuddyEndpoints(region) {
     // chat/billing/checkin 同 path 在鉴权墙后（401）。与 CN 同构，唯 host 与 Origin 不同。
     return {
       region: "intl",
-      probed: true,
       refresh: "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
       chat: "https://www.codebuddy.ai/v2/chat/completions",
       billing: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
@@ -95,7 +94,6 @@ export function resolveWorkbuddyEndpoints(region) {
   }
   return {
     region: "cn",
-    probed: true,
     refresh: "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
     chat: "https://copilot.tencent.com/v2/chat/completions",
     billing: "https://www.codebuddy.cn/v2/billing/meter/get-user-resource",
@@ -113,8 +111,7 @@ export class WorkBuddyProvider {
     this.type = "workbuddy";
     this.env = env;
     this.config = config.config || {};
-    // region 决定整组端点：默认 cn；配 config.region: "intl" 切国际站。
-    // 构造永不抛错：intl 未实测前首次实际调用才报缺端点，避免一条未就绪配置拖垮整个网关。
+    // region 决定整组端点：默认 cn；配 config.region: "intl" 切国际站（两地均已实测）。
     this.region = normalizeWorkbuddyRegion(this.config.region);
     this.endpoints = resolveWorkbuddyEndpoints(this.region);
     // 能力声明：上游非流式 JSON 可能是 200 业务错误包，调用方须强制 stream=true。
@@ -126,14 +123,8 @@ export class WorkBuddyProvider {
     return this.env.GATEWAY_KV || this.env.WORKBUDDY_KV;
   }
 
-  // 取可用端点表：intl 未实测时抛明确错误（而不是静默打错域名）。
+  // 取可用端点表（构造时已按 region 解析，恒可用）。
   ep() {
-    if (!this.endpoints?.probed) {
-      throw new Error(
-        `WorkBuddy provider "${this.id}" region "${this.region}" endpoints not probed yet — ` +
-        `fill resolveWorkbuddyEndpoints() with measured intl paths first`
-      );
-    }
     return this.endpoints;
   }
 
@@ -346,6 +337,8 @@ export class WorkBuddyProvider {
 
     const accountLabel = account.name || account.id;
     const delay = retryDelayMs(this.env);
+    // 账号归因头仅对 master 下发；调用方经 options.principal 传入身份。
+    const exposeAccount = options?.principal?.isMaster === true;
 
     // 单一映射点：把一次 resp 解释为恰好一个 outcome。5xx → retry，成功 → done，
     // 其余失败 → switch（交 driver 分类）。doRequestWithRefresh 已把 401 重放包在这一层内。
@@ -361,7 +354,7 @@ export class WorkBuddyProvider {
           response: accountResponse(account, {
             body: errText, status: resp.status,
             headers: resp.headers, contentType: "application/json"
-          })
+          }, exposeAccount)
         } };
       }
 
@@ -381,7 +374,7 @@ export class WorkBuddyProvider {
                 response: accountResponse(account, {
                   body: JSON.stringify(resJson), status: 200,
                   headers: resp.headers, contentType: "application/json"
-                })
+                }, exposeAccount)
               } };
             }
           } catch (e) {}
@@ -390,7 +383,7 @@ export class WorkBuddyProvider {
         return { kind: "done", response: accountResponse(account, {
           body: resp.body, status: resp.status,
           statusText: resp.statusText, headers: resp.headers
-        }) };
+        }, exposeAccount) };
       }
 
       // 失败收口：429 / 403 / 额度耗尽 / 其余 4xx 统一交驱动器分类
@@ -402,16 +395,17 @@ export class WorkBuddyProvider {
         response: accountResponse(account, {
           body: errText, status,
           headers: resp.headers, contentType: "application/json"
-        })
+        }, exposeAccount)
       } };
     };
 
     try {
       const { resp, refreshed } = await this.doRequestWithRefresh(account, makeRequest);
-      if (resp.status === 401 && !refreshed) {
-        // 刷新失败：直接切换下一账号（不计入冷却 streak，401 通常是 token 过期而非额度问题）
-        console.warn(`[WorkBuddy] Account "${accountLabel}" 401 token refresh failed, skipping...`);
-        return { kind: "skip", reason: "refresh-failed" };
+      if (resp.status === 401) {
+        // 401 一律切换下一账号：刷新失败是 token 过期，刷新后仍 401 是凭证失效，
+        // 都不计入冷却 streak，绝不 fatal 中断整池。
+        console.warn(`[WorkBuddy] Account "${accountLabel}" 401${refreshed ? " even after refresh" : " token refresh failed"}, skipping...`);
+        return { kind: "skip", reason: refreshed ? "auth-rejected-after-refresh" : "refresh-failed" };
       }
       return await mapResponse(resp);
     } catch (err) {

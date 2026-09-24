@@ -124,7 +124,8 @@ Vercel 原生支持 Git 仓库持续集成，关联后每次代码推送会自�
 - **协议类型**：`Anthropic`
 
 #### 注入余额查询脚本（即时展示剩余积分）：
-在 CC-Switch 供应商卡片的高级设置或余额脚本中填入：
+> 余额接口仅 master / admin key 可查（普通客户端 key 调 `/v1/usage` 返回 403）。
+> 在 CC-Switch 供应商卡片的高级设置或余额脚本中填入（API Key 填 `MASTER_KEY`）：
 ```javascript
 ({
   request: {
@@ -185,10 +186,10 @@ claude
 | `/v1/messages` | `POST` | Virtual Key / Master Key | 标准 Anthropic Messages 接口（适配 Claude Code） |
 | `/v1/chat/completions` | `POST` | Virtual Key / Master Key | 标准 OpenAI 对话接口（适配 Cursor / NextChat） |
 | `/v1/models` | `GET` | Virtual Key / Master Key | 返回 `routes` 中显式声明的模型列表（透明直通下默认为空；未声明的模型仍可直接调用） |
-| `/v1/usage` | `GET` | Virtual Key / Master Key | CC-Switch 专用的实时积分/额度查询接口 |
-| `/status` | `GET` | 公开 | 服务存活状态（仅 service/version，不含余额等敏感数据） |
+| `/v1/usage` | `GET` | Master / Admin Key | 实时积分/额度查询（普通客户端 key 403） |
+| `/status` | `GET` | Virtual Key / Master Key | 服务状态（version/kvEnabled，需鉴权） |
 | `/checkin` | `POST/GET` | Master Key / Cron Secret | 执行每日签到领积分与 Token 自动保活 |
-| `/healthz` | `GET` | 公开 | 服务存活心跳探测 |
+| `/healthz` | `GET` | 公开 | 存活心跳（仅 status/time，无版本与运营数据） |
 
 ---
 
@@ -222,6 +223,9 @@ claude
 ]
 ```
 每天 UTC 01:00（北京时间 **09:00**）由 Vercel 自动发起请求执行签到并刷新 Token，无需人工干预。
+> 注意：Vercel Cron 不发 `Authorization` 头。若设置了 `CRON_SECRET`，需用外部 cron 带密钥触发
+>（`GET /checkin?secret=<CRON_SECRET>` 或 `x-cron-secret` 头）；`vercel.json` 内建 cron 无密钥，
+> 设置 `CRON_SECRET` 后它会 401，应改用外部触发或留空 `CRON_SECRET` 并仅用 `MASTER_KEY` 手动触发。
 </details>
 
 <details>

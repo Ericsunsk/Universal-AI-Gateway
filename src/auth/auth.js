@@ -21,10 +21,10 @@ export function authenticateAccess(request, config, { model = null, requireMaste
   const xApiKey = request.headers.get("x-api-key") || "";
 
   let token = "";
+  // 严格 token 提取：只认 `Bearer ` 前缀与 `x-api-key`。裸 Authorization
+  //（无 Bearer 前缀）一律落到 Missing API Key 401，避免误记录与误命中面。
   if (authHeader.startsWith("Bearer ")) {
     token = authHeader.substring(7).trim();
-  } else if (authHeader) {
-    token = authHeader.trim();
   } else if (xApiKey) {
     token = xApiKey.trim();
   }
@@ -64,7 +64,7 @@ export function authenticateAccess(request, config, { model = null, requireMaste
 
   // 2. 验证虚拟客户端密钥
   const virtualKeys = config.virtual_keys || {};
-  const keyObj = virtualKeys[token];
+  const keyObj = Object.hasOwn(virtualKeys, token) ? virtualKeys[token] : undefined;
   if (keyObj) {
     if (!keyObj.enabled) {
       return {
@@ -77,7 +77,10 @@ export function authenticateAccess(request, config, { model = null, requireMaste
     }
 
     if (model && Array.isArray(keyObj.models) && !keyObj.models.includes("*")) {
-      if (!keyObj.models.includes(model)) {
+      // 鉴权门与路由一致：推理后缀（model[high]）先剥离再判白名单，
+      // 否则允许名单中的干净模型加后缀即 403。
+      const clean = String(model).replace(/(\[[^\]]*\]\s*)+$/, "").trim();
+      if (!keyObj.models.includes(model) && !keyObj.models.includes(clean)) {
         return {
           ok: false,
           response: new Response(JSON.stringify({ error: { message: `Model "${model}" is not permitted for this API Key` } }), {

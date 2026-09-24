@@ -4,6 +4,7 @@
 //   npm run bench -- --only=a      只要 SSE 首字节
 //   npm run bench -- --only=b      只要故障转移（含 KV 计数）
 //   npm run bench -- --only=c      只要持续吞吐
+//   npm run bench -- --only=d      只要 502-jitter 故障转移
 //   RETRY_BASE_MS=50 npm run bench -- --only=b   对照睡眠旋钮效果
 // 用法：改动前后各跑一遍，对 P50/P99 与 KV ops。
 import { performance } from "node:perf_hooks";

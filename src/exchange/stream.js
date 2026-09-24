@@ -33,7 +33,8 @@ export function isUpstreamError(parsed) {
 }
 
 // 纯函数：从已解析的 usage 中提取 token 计数，返回 { input, output }（缺失保留原值）。
-export function extractUsage(parsed, current = { input: 20, output: 1 }) {
+// 默认回退为 0（未知即 0，不伪造）：调用方在已知上下文中显式传入估算值。
+export function extractUsage(parsed, current = { input: 0, output: 0 }) {
   const u = parsed?.usage;
   if (!u) return current;
   return {
@@ -85,15 +86,18 @@ export function reduceOpenAIChunkAll(parsed) {
     return [{ kind: "error", message: extractErrorMessage(parsed) || "Unknown error" }];
   }
   const delta = parsed.choices?.[0]?.delta;
-  if (!delta) return [];
+  const finishReason = parsed.choices?.[0]?.finish_reason;
   const out = [];
+  // 终局 finish_reason 可能不带 delta（如纯 stop 标记）：先收 finish，再判 delta。
+  const hasFinish = !!finishReason;
+  if (!delta && !hasFinish) return [];
   // 思维链增量（兼容 DeepSeek 的 reasoning_content 与通用 reasoning 字段）
-  const reasoningDelta = delta.reasoning_content || delta.reasoning;
+  const reasoningDelta = delta?.reasoning_content || delta?.reasoning;
   if (reasoningDelta) out.push({ kind: "thinking", text: reasoningDelta });
   // 正文增量
-  if (delta.content) out.push({ kind: "text", text: delta.content });
+  if (delta?.content) out.push({ kind: "text", text: delta.content });
   // 工具调用：同一 chunk 内可能携带多个 tool_call
-  if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+  if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) {
     out.push({
       kind: "tool_use",
       calls: delta.tool_calls.map(tc => ({
@@ -105,7 +109,6 @@ export function reduceOpenAIChunkAll(parsed) {
       stopReason: "tool_use"
     });
   }
-  const finishReason = parsed.choices?.[0]?.finish_reason;
   if (finishReason) out.push({ kind: "finish", finishReason });
   return out;
 }
@@ -182,7 +185,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         model: requestedModel || "claude-3-5-sonnet-20241022",
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 15, output_tokens: 1 }
+        usage: { input_tokens: 0, output_tokens: 0 }
       }
     })}\n\n`));
     } catch (e) {
@@ -216,6 +219,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     };
 
     try {
+      let badLineWarns = 0;
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -331,6 +335,25 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
                   })}\n\n`));
                 }
                 if (tc.args) {
+                  // 纯 args 碎片先到且无活动 tool_use 块：先开一个匿名块，
+                  // 避免发出非法 index:-1。
+                  if (currentBlockIndex < 0 || currentBlockType !== "tool_use") {
+                    await closeCurrentBlock();
+                    currentBlockIndex = Math.max(0, currentBlockIndex + 1);
+                    currentBlockType = "tool_use";
+                    currentToolId = tc.id || ("call_" + Math.random().toString(36).substring(2, 9));
+                    currentToolName = tc.name || "tool";
+                    await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
+                      type: "content_block_start",
+                      index: currentBlockIndex,
+                      content_block: {
+                        type: "tool_use",
+                        id: currentToolId,
+                        name: currentToolName,
+                        input: {}
+                      }
+                    })}\n\n`));
+                  }
                   await writer.write(textEncoder.encode(
                     `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(tc.args)}}}\n\n`
                   ));
@@ -338,11 +361,13 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
               }
             }
 
-            else if (emission.kind === "finish" && emission.finishReason === "tool_calls") {
+            else if (emission.kind === "finish" && finishReasonToAnthropic(emission.finishReason) === "tool_use") {
               finalStopReason = "tool_use";
             }
             }
-          } catch (e) {}
+          } catch (e) {
+            if (badLineWarns++ < 3) console.warn("[Stream] Skipping malformed SSE line:", String(jsonStr).slice(0, 120));
+          }
         }
         buffer = pos > 0 ? buffer.slice(pos) : buffer;
       }
@@ -455,12 +480,13 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   let accumulatedToolCalls = [];
   const sseToolFrags = new Map(); // tool id -> { id, name, args }，SSE 分片在此按 id 拼接
   let buffer = "";
-  let inputTokens = 20;
-  let outputTokens = 1;
+  let inputTokens = 0;
+  let outputTokens = 0;
   let accumulatedFinishReason = null;
   let maxCachedTokens = 0;
 
   try {
+    let badLineWarns = 0;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -486,15 +512,21 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
             } else if (emission.kind === "text") {
               accumulated += emission.text;
             } else if (emission.kind === "tool_use") {
-              for (const c of emission.calls) {
-                if (!c.id) continue;
-                const prev = sseToolFrags.get(c.id);
+              // 按 index 定址合并：续片通常只带 index+arguments、无 id。
+              // emission.calls 与 delta.tool_calls 同序，chunk 内序号即 index。
+              const frags = Array.from(sseToolFrags.values());
+              for (let ci = 0; ci < emission.calls.length; ci++) {
+                const c = emission.calls[ci];
+                const key = c.id || frags[ci]?.id || `__idx_${sseToolFrags.size}`;
+                const prev = sseToolFrags.get(key);
                 if (prev) {
                   if (typeof c.args === "string") prev.args += c.args;
                   if (c.name && c.name !== "tool") prev.name = c.name;
+                  if (c.id && !prev.id.startsWith("__idx_")) prev.id = c.id;
+                  else if (c.id) { prev.id = c.id; sseToolFrags.delete(key); sseToolFrags.set(c.id, prev); }
                 } else {
-                  sseToolFrags.set(c.id, {
-                    id: c.id, name: c.name,
+                  sseToolFrags.set(key, {
+                    id: c.id || key, name: c.name,
                     args: typeof c.args === "string" ? c.args : ""
                   });
                 }
@@ -508,7 +540,9 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
           outputTokens = usage.output;
           const cached = extractCachedTokens(parsed);
           if (cached > maxCachedTokens) maxCachedTokens = cached;
-        } catch (e) {}
+        } catch (e) {
+          if (badLineWarns++ < 3) console.warn("[Stream] Skipping malformed SSE line (non-streaming):", String(jsonStr).slice(0, 120));
+        }
       }
       buffer = pos > 0 ? buffer.slice(pos) : buffer;
     }
@@ -556,7 +590,8 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
 
   // SSE 分片 tools 落袋：拼接后的 args 与单包形态走同一解析路径
   for (const t of sseToolFrags.values()) {
-    accumulatedToolCalls.push({ id: t.id, name: t.name, args: t.args });
+    const id = (t.id && !String(t.id).startsWith("__idx_")) ? t.id : ("call_" + Math.random().toString(36).substring(2, 10));
+    accumulatedToolCalls.push({ id, name: t.name, args: t.args });
   }
 
   accumulated = accumulated || " ";
@@ -579,7 +614,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
         try {
           toolInput = JSON.parse(rawArgs);
         } catch (e) {
-          toolInput = {};
+          toolInput = { _raw: rawArgs };
         }
       }
       content.push({

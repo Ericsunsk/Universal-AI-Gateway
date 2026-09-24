@@ -15,14 +15,20 @@ function makeEnv() {
   };
 }
 
-test("/status does not leak balance or operational data", async () => {
+test("/status requires auth and stays free of operational data", async () => {
   const env = makeEnv();
-  const req = new Request("https://x/status");
+  // 未鉴权：401
+  const anon = await handler.fetch(new Request("https://x/status"), env);
+  assert.equal(anon.status, 401);
+
+  const req = new Request("https://x/status", {
+    headers: { Authorization: "Bearer sk-test" }
+  });
   const resp = await handler.fetch(req, env);
   assert.equal(resp.status, 200);
   const body = await resp.json();
 
-  // 只允许无害字段
+  // 持 key 可见无害字段
   assert.equal(body.service, "universal-ai-gateway");
   assert.ok(body.version);
   assert.equal(typeof body.kvEnabled, "boolean");
@@ -33,12 +39,16 @@ test("/status does not leak balance or operational data", async () => {
   assert.equal("lastRefresh" in body, false, "lastRefresh must not leak");
 });
 
-test("/healthz also stays harmless", async () => {
+test("/healthz is minimal: status + time only", async () => {
   const env = makeEnv();
   const resp = await handler.fetch(new Request("https://x/healthz"), env);
   const body = await resp.json();
   assert.equal(body.status, "ok");
+  assert.ok(body.time);
   assert.equal("balance" in body, false);
+  assert.equal("version" in body, false, "version must not leak publicly");
+  assert.equal("providers_active" in body, false);
+  assert.equal("models_available" in body, false);
 });
 
 test("/healthz degrades to 503 when zero providers/routes configured", async () => {
@@ -50,6 +60,21 @@ test("/healthz degrades to 503 when zero providers/routes configured", async () 
   const body = await resp.json();
   assert.equal(resp.status, 503);
   assert.equal(body.status, "degraded");
+});
+
+test("/usage is master/admin only: client keys get 403", async () => {
+  const env = makeEnv();
+  await getConfig(env, true);
+  const client = await handler.fetch(new Request("https://x/v1/usage", {
+    headers: { Authorization: "Bearer sk-test" }
+  }), env);
+  assert.equal(client.status, 403);
+  const master = await handler.fetch(new Request("https://x/v1/usage", {
+    headers: { Authorization: "Bearer sk-master" }
+  }), env);
+  assert.equal(master.status, 200);
+  const body = await master.json();
+  assert.equal(body.code, 0);
 });
 
 test("getConfig singleflights concurrent refreshes into one KV read", async () => {
@@ -69,7 +94,7 @@ test("getConfig singleflights concurrent refreshes into one KV read", async () =
     getConfig(env, true), getConfig(env, true), getConfig(env, true),
     getConfig(env, true), getConfig(env, true)
   ]);
-  assert.equal(kvGets, 1, "5 concurrent refreshes must trigger a single KV read");
+  assert.equal(kvGets <= 2, true, "5 concurrent refreshes must trigger at most one KV read + one pre-write guard read");
   for (const r of results) assert.equal(r, results[0], "all callers share the same config");
 });
 

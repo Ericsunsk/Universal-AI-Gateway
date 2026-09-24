@@ -11,8 +11,10 @@ test("missing secrets throw instead of hardcoded default", () => {
   assert.doesNotThrow(() => getDefaultConfig({ API_KEY: "k" }));
 });
 
-test("explicit MASTER_KEY honored, falls back to API_KEY otherwise", () => {
-  assert.equal(getDefaultConfig({ API_KEY: "ak" }).master_key, "ak");
+test("explicit MASTER_KEY honored, missing MASTER_KEY fails closed (no API_KEY fallback)", () => {
+  const fallback = getDefaultConfig({ API_KEY: "ak" }).master_key;
+  assert.notEqual(fallback, "ak", "must not fall back to API_KEY");
+  assert.ok(String(fallback).startsWith("unset-master-"));
   assert.equal(getDefaultConfig({ API_KEY: "ak", MASTER_KEY: "mk" }).master_key, "mk");
 });
 
@@ -88,15 +90,16 @@ test("plain API_KEY is not master", () => {
   assert.equal(r.principal.isMaster, false);
 });
 
-// ---- #9 响应头过滤 ----
-test("buildResponseHeaders strips hop-by-hop headers", () => {
+// ---- #9 响应头过滤（allowlist：只透传 content-type + 网关自有头） ----
+test("buildResponseHeaders allowlists content-type only", () => {
   const upstream = new Headers({
     "Content-Type": "application/json",
     "Content-Length": "999",
     "Transfer-Encoding": "chunked",
     "Set-Cookie": "session=abc",
     "Connection": "keep-alive",
-    "X-RateLimit-Remaining": "42"
+    "X-RateLimit-Remaining": "42",
+    "Location": "https://evil.example/"
   });
   const h = buildResponseHeaders(upstream, { "X-Gateway-Account": "primary" });
   const result = Object.fromEntries(h.entries());
@@ -104,7 +107,9 @@ test("buildResponseHeaders strips hop-by-hop headers", () => {
   assert.equal("transfer-encoding" in result, false);
   assert.equal("set-cookie" in result, false);
   assert.equal("connection" in result, false);
-  assert.equal(result["x-ratelimit-remaining"], "42");
+  assert.equal("x-ratelimit-remaining" in result, false, "non-allowlisted upstream headers are dropped");
+  assert.equal("location" in result, false, "upstream must not inject Location");
+  assert.equal(result["content-type"], "application/json");
   assert.equal(result["x-gateway-account"], "primary");
 });
 

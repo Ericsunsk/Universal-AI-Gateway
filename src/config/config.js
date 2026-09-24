@@ -37,7 +37,15 @@ export function requireSecret(env, name) {
 export function getDefaultConfig(env) {
   // 拒绝硬编码兜底：缺失即抛错，避免默认主密钥等于公开字面量
   const defaultApiKey = requireSecret(env, "API_KEY");
-  const masterKey = env.MASTER_KEY ? requireSecret(env, "MASTER_KEY") : defaultApiKey;
+  // MASTER_KEY 缺失即 fail-closed：随机生成并告警，绝不回退为 API_KEY
+  //（回退会让所有客户端 key 拥有 master 权限）。
+  let masterKey = null;
+  if (env.MASTER_KEY) {
+    masterKey = requireSecret(env, "MASTER_KEY");
+  } else {
+    masterKey = "unset-master-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    console.warn("[Config] MASTER_KEY is not set; generated an ephemeral value. Set MASTER_KEY to enable admin/cron endpoints.");
+  }
   // 国际站凭证同样走 secrets（与 CN 的 USER_ID 三件套同模式）；缺失即保持 disabled
   const readEnv = (name) => env?.[name] || (typeof process !== "undefined" ? process.env?.[name] : undefined);
   const intlUserId = readEnv("INTL_USER_ID") || "";
@@ -162,7 +170,9 @@ async function refreshConfig(env) {
         // 存量 KV 可能落后于代码默认路由：内存中回填缺失项（不写 KV，无版本冲突）。
         try {
           backfillMissingRoutes(parsed, defaults);
-        } catch (e) {}
+        } catch (e) {
+          console.warn("[Config] backfillMissingRoutes failed:", e?.message || e);
+        }
         // 环境变量兜底：master_key、cron_secret 与默认 API_KEY 永不因 KV 缺失或脱敏而失效
         if (!parsed.master_key) parsed.master_key = defaults.master_key;
         if (!parsed.cron_secret) parsed.cron_secret = defaults.cron_secret;
@@ -190,9 +200,10 @@ async function refreshConfig(env) {
       console.error("[Config] GATEWAY_CONFIG remote read failed; refusing to regenerate/write initial config");
       // 有真实缓存则优先复用（陈旧但真实 > 默认值覆盖远端）；否则退默认但绝不写 KV。
       const fallback = cachedConfig || getDefaultConfig(env);
-      // 更新时间戳，避免每个请求都重试打远端；缓存 TTL 到期后仍会重试以自愈。
+      // 失败回退用短 TTL（10s），成功才用 60s：KV 抖动恢复后快速自愈，
+      // 而不是污染缓存整整一个 TTL 窗口。
       cachedConfig = fallback;
-      cachedConfigTimestamp = now;
+      cachedConfigTimestamp = now - (CONFIG_CACHE_TTL_MS - 10 * 1000);
       return fallback;
     }
   }
@@ -201,8 +212,24 @@ async function refreshConfig(env) {
   const initialConfig = getDefaultConfig(env);
   if (kv) {
     try {
-      await kv.put("GATEWAY_CONFIG", JSON.stringify(initialConfig, null, 2));
-    } catch (e) {}
+      // 冷启动双写护栏：写前重读一次，若已有配置则放弃写入，
+      // 避免并发冷启动以后写者覆盖先到的管理员编辑（KV 无 NX 语义下的最佳努力）。
+      let stillEmpty = (raw === null);
+      if (stillEmpty && typeof kv.get === "function") {
+        try {
+          const recheck = await kv.get("GATEWAY_CONFIG");
+          stillEmpty = (recheck === null || recheck === undefined);
+        } catch (e) {
+          console.warn("[Config] Pre-write recheck failed; skipping initial write to avoid clobbering");
+          stillEmpty = false;
+        }
+      }
+      if (stillEmpty) {
+        await kv.put("GATEWAY_CONFIG", JSON.stringify(initialConfig, null, 2));
+      }
+    } catch (e) {
+      console.warn("[Config] Failed to write initial GATEWAY_CONFIG:", e?.message || e);
+    }
   }
 
   cachedConfig = initialConfig;

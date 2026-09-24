@@ -24,7 +24,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **account** — one WorkBuddy credential inside a provider's `accounts` pool (`{ id, userId, accessToken, refreshToken }`). Multi-account round-robin happens at the account level, *below* the provider level.
 
-- **account scheduler** — the pure-function module (`src/core/scheduler.js`) that owns account selection, exponential backoff, and error classification. Its functions (`orderAccounts`, `computeCooldown`, `classify`, `businessErrorCode`) have no I/O side effects; cooldown state is passed in as a `Map` and mutated by the caller (`workbuddy.js`).
+- **account scheduler** — the pure-function module (`src/core/scheduler.js`) that owns account selection, exponential backoff, and error classification. Its functions (`orderAccounts`, `computeCooldown`, `classify`, `businessErrorCode`) have no I/O side effects; cooldown state is passed in as a `Map` and mutated by the caller (`workbuddy/index.js`).
 
 - **cooldown** — a per-account exponential-backoff record (`{ expiresAt, streak }`). `streak` increments on each punishable failure; backoff = `2^(streak-1)` minutes, capped at 8. A cooled-down account is skipped until `expiresAt` passes.
 
@@ -34,7 +34,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 Module layout: `transform.js` (request-side: transform / normalize / prune), `stream.js` (response-side: reduce / shared extractors / streaming + non-streaming translators), `dispatch.js` (route resolution and failover). `exchange.js` is a re-export facade; import from it to stay decoupled from the layout.
 
-- **exchange / dispatch** — the layer that translates between the client-facing protocol (Anthropic or OpenAI) and the upstream protocol, in both directions.
+- **exchange / dispatch** — the layer that translates between the client-facing protocol (Anthropic or OpenAI) and the upstream protocol, in both directions. Debug attribution (`X-Gateway-Account/Model/Fallback`) is master-gated: `dispatchExchange` takes the caller `principal` and only emits these headers for `isMaster`; the WorkBuddy `accountResponse` seam honors the same flag via `options.principal`.
 
 - **sanitize** — rewriting Claude-Code / client fingerprints to bypass upstream keyword filters (Tencent error `11128`). In `src/exchange/sanitizer.js`.
 

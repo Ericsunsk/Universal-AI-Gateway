@@ -1,6 +1,12 @@
 {
   "version": 2,
   "installCommand": "npm install --omit=dev --ignore-scripts",
+  "functions": {
+    "api/*.js": {
+      "maxDuration": 300,
+      "memory": 1024
+    }
+  },
   "rewrites": [
     {
       "source": "/(.*)",

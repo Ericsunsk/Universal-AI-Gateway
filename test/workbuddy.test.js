@@ -117,10 +117,8 @@ test("callChat cools the punished account and fails over to the next", async () 
   assert.equal(accountCooldownRecord.has("t7b"), false, "healthy account must not cool");
 });
 
-test("network-error retry success keeps X-Gateway-Account attribution header (L6)", async () => {
-  // 第一次 chat 抛网络错（触发 catch 内的抖动重试），第二次成功 → 返回必须走 accountResponse。
-  // 注意：本用例经 callChat 会推进模块级 roundRobinCounter，故置于其余 callChat 用例之后，
-  // 避免扰动更早用例的账号排序（测试文件本就依赖定义顺序）。
+test("X-Gateway-Account attribution is master-only (client keys see nothing)", async () => {
+  // master：归因头完整下发（含 retry 路径）
   let calls = 0;
   globalThis.fetch = async (url) => {
     if (String(url).includes("/auth/token/refresh")) throw new Error("unexpected refresh call");
@@ -128,16 +126,26 @@ test("network-error retry success keeps X-Gateway-Account attribution header (L6
     if (calls === 1) throw new Error("socket hang up");
     return new Response("recovered", { status: 200 });
   };
-  const account = acc("t6b");
   const p = new WorkBuddyProvider(
-    { id: "wb-t6b", config: { accounts: [account] } },
+    { id: "wb-t6b", config: { accounts: [acc("t6b")] } },
     { RETRY_BASE_MS: "0" }
   );
-  const res = await p.callChat({ messages: [] }, {});
-  assert.equal(res.status, 200);
-  assert.equal(res.headers.get("X-Gateway-Account"), "t6b", "retry path must stamp attribution");
-  assert.equal(res.headers.get("X-Gateway-Account-Id"), "t6b");
-  assert.equal(await res.text(), "recovered");
+  const masterRes = await p.callChat({ messages: [] }, { principal: { isMaster: true, role: "admin" } });
+  assert.equal(masterRes.status, 200);
+  assert.equal(masterRes.headers.get("X-Gateway-Account"), "t6b", "retry path must stamp attribution for master");
+  assert.equal(masterRes.headers.get("X-Gateway-Account-Id"), null, "redundant Account-Id duplicate is gone");
+  assert.equal(await masterRes.text(), "recovered");
+
+  // 普通客户端：无任何账号归因头
+  globalThis.fetch = async () => new Response("served", { status: 200 });
+  const p2 = new WorkBuddyProvider(
+    { id: "wb-t6c", config: { accounts: [acc("t6c")] } },
+    { RETRY_BASE_MS: "0" }
+  );
+  const clientRes = await p2.callChat({ messages: [] }, { principal: { isMaster: false, role: "client" } });
+  assert.equal(clientRes.status, 200);
+  assert.equal(clientRes.headers.get("X-Gateway-Account"), null, "client must not see account id");
+  assert.equal(await clientRes.text(), "served");
 });
 
 test("retryDelayMs honors env override with safe fallback (Q6)", () => {
@@ -221,17 +229,15 @@ test("affinityKeyForCall prefers session header, falls back to system+tools fing
   assert.equal(affinityKeyForCall({ messages: [] }, {}), null, "no signal falls back to round-robin");
 });
 
-test("workbuddy region table: cn frozen, intl explicit-unprobed, env fallback cn-only", async () => {
+test("workbuddy region table: cn and intl endpoints frozen", async () => {
   const { WorkBuddyProvider, normalizeWorkbuddyRegion, resolveWorkbuddyEndpoints } =
     await import("../src/providers/workbuddy/index.js");
   assert.equal(normalizeWorkbuddyRegion(undefined), "cn");
   assert.equal(normalizeWorkbuddyRegion("INTL"), "intl");
   assert.equal(normalizeWorkbuddyRegion("xx"), "cn");
   const cn = resolveWorkbuddyEndpoints("cn");
-  assert.equal(cn.probed, true);
   assert.ok(cn.chat.includes("copilot.tencent.com"));
   const intl = resolveWorkbuddyEndpoints("intl");
-  assert.equal(intl.probed, true);
   assert.ok(intl.chat.includes("www.codebuddy.ai"));
   assert.ok(intl.refresh.includes("/plugin/auth/token/refresh"));
   const env = { USER_ID: "u", ACCESS_TOKEN: "a", REFRESH_TOKEN: "r" };

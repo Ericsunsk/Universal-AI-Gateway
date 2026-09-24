@@ -4,12 +4,36 @@ import { optimizeToolOutput } from "./sanitizer.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { parseMaxContextTurns } from "../config/config.js";
 
+// tool_result 内容展平为 string：string / 文本块数组 / 任意对象统一口径。
+// normalize 孤儿包、Anthropic→OpenAI 映射、prune 三处共用，不再各写一遍。
+export function toolResultBlockText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map(c => typeof c === "string" ? c : (c?.text || JSON.stringify(c))).join("\n");
+  }
+  return JSON.stringify(content ?? "");
+}
+
+// /compact 总结请求的意图标记：Anthropic 形（body.system + 末条文本）与 OpenAI 形
+//（messages[0] system + 末条）两处探测共用同一标记表，不再各写一份。
+const COMPACT_MARKERS = ["Respond with TEXT ONLY", "<analysis>", "<summary>", "Do NOT use Read, Bash, Grep"];
+
+function containsCompactMarker(text) {
+  return typeof text === "string" && text !== "" && COMPACT_MARKERS.some(m => text.includes(m));
+}
+
+// 消息内容展平为文本（compact 探测用）：string / 文本块数组统一口径。
+function blockText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(c => typeof c === "string" ? c : (c?.text || "")).join(" ");
+  return "";
+}
+
 // 回合数归一化统一走 config.js parseMaxContextTurns（KV 存量可能绕过 getDefaultConfig，
 // 消费侧必须用同一口径兜底；此前本地 normalizeTurns 用 Number，与 parseInt 语义分叉）。
 
 // 内部协议工具：Tools 转换
-export function transformToolsToOpenAI(tools) {
-  if (!Array.isArray(tools) || tools.length === 0) return undefined;
+export function transformToolsToOpenAI(tools) {  if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => ({
     type: "function",
     function: {
@@ -43,7 +67,7 @@ export function normalizeOpenAIMessages(messages) {
       // 孤儿 tool 结果（前置无对应 assistant tool_calls），降级为 user 消息避免上游 11148 序列破坏
       result.push({
         role: "user",
-        content: `[Tool Result: ${m.content}]`
+        content: `[Tool Result: ${toolResultBlockText(m.content)}]`
       });
       continue;
     }
@@ -89,9 +113,7 @@ function pruneMessageContents(messages, isCompact) {
     const newContent = msg.content.map(part => {
       if (!part || typeof part !== "object") return part;
       if (part.type === "tool_result") {
-        let text = typeof part.content === "string" ? part.content : (
-          Array.isArray(part.content) ? part.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n") : JSON.stringify(part.content || "")
-        );
+        const text = toolResultBlockText(part.content);
         const optimized = optimizeToolOutput(text, turnAge, isCompact);
         if (optimized !== text) {
           modified = true;
@@ -111,22 +133,10 @@ function pruneMessageContents(messages, isCompact) {
  */
 export function isCompactOpenAIRequest(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return false;
-  const textOf = (m) => {
-    if (!m) return "";
-    if (typeof m.content === "string") return m.content;
-    if (Array.isArray(m.content)) return m.content.map(c => typeof c === "string" ? c : (c?.text || "")).join(" ");
-    return "";
-  };
   const first = messages[0];
-  const sysText = first?.role === "system" ? textOf(first) : "";
-  const lastText = textOf(messages[messages.length - 1]);
-  return (sysText.includes("Respond with TEXT ONLY") ||
-    sysText.includes("<analysis>") ||
-    sysText.includes("<summary>")) || (
-    lastText.includes("Respond with TEXT ONLY") ||
-    lastText.includes("Do NOT use Read, Bash, Grep") ||
-    lastText.includes("<analysis>")
-  );
+  const sysText = first?.role === "system" ? blockText(first.content) : "";
+  const lastText = blockText(messages[messages.length - 1]?.content);
+  return containsCompactMarker(sysText) || containsCompactMarker(lastText);
 }
 
 /**
@@ -197,20 +207,11 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   const rawMessages = Array.isArray(body.messages) ? body.messages : [];
   const totalMessages = rawMessages.length;
   const lastMsg = totalMessages > 0 ? rawMessages[totalMessages - 1] : null;
-  const lastText = lastMsg && typeof lastMsg.content === "string" ? lastMsg.content : (
-    Array.isArray(lastMsg?.content) ? lastMsg.content.map(c => c.text || "").join(" ") : ""
-  );
+  const lastText = blockText(lastMsg?.content);
 
-  // 检测是否为会话压缩 / 总结请求（如 Claude Code /compact）
-  const isCompact = (typeof body.system === "string" && (
-    body.system.includes("Respond with TEXT ONLY") ||
-    body.system.includes("<analysis>") ||
-    body.system.includes("<summary>")
-  )) || (
-    lastText.includes("Respond with TEXT ONLY") ||
-    lastText.includes("Do NOT use Read, Bash, Grep") ||
-    lastText.includes("<analysis>")
-  );
+  // 检测是否为会话压缩 / 总结请求（如 Claude Code /compact），与 OpenAI 形探测同标记表
+  const isCompact = (typeof body.system === "string" && containsCompactMarker(body.system)) ||
+    containsCompactMarker(lastText);
 
   // 动态上下文保留策略：Vercel / Node 环境下默认 0（完全不剪枝，长上下文全量保真）
   const maxTurns = parseMaxContextTurns(
@@ -304,22 +305,41 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
           content: textContent,
           tool_calls: toolCalls
         });
-      } else if (toolResultBlocks.length > 0) {
-        for (let i = 0; i < toolResultBlocks.length; i++) {
-          const rb = toolResultBlocks[i];
-          let resContent = "";
-          if (typeof rb.content === "string") {
-            resContent = rb.content;
-          } else if (Array.isArray(rb.content)) {
-            resContent = rb.content.map(c => typeof c === "string" ? c : (c.text || JSON.stringify(c))).join("\n");
-          } else {
-            resContent = JSON.stringify(rb.content || "");
+        // 同消息的 tool_result companion 不丢弃：以 tool 身份紧随其后发出。
+        for (const rb of toolResultBlocks) {
+          if (!rb.tool_use_id) {
+            const err = new Error("tool_result block is missing tool_use_id");
+            err.status = 400;
+            throw err;
           }
-
           openaiMessages.push({
             role: "tool",
             tool_call_id: rb.tool_use_id,
-            content: resContent
+            content: toolResultBlockText(rb.content)
+          });
+        }
+      } else if (toolResultBlocks.length > 0) {
+        // 同消息的 text companion 不丢弃：先发文本再发 tool 结果。
+        if (textBlocks.length > 0) {
+          const combined = textBlocks.map(b => b.text || "").join("\n");
+          if (combined) {
+            openaiMessages.push({
+              role: msg.role === "assistant" ? "assistant" : "user",
+              content: combined
+            });
+          }
+        }
+        for (let i = 0; i < toolResultBlocks.length; i++) {
+          const rb = toolResultBlocks[i];
+          if (!rb.tool_use_id) {
+            const err = new Error("tool_result block is missing tool_use_id");
+            err.status = 400;
+            throw err;
+          }
+          openaiMessages.push({
+            role: "tool",
+            tool_call_id: rb.tool_use_id,
+            content: toolResultBlockText(rb.content)
           });
         }
       } else {

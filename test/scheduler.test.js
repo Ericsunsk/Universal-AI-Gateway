@@ -4,7 +4,6 @@ import {
   backoffMinutesForStreak,
   orderAccounts,
   computeCooldown,
-  classify,
   classifyFailure,
   businessErrorCode,
   isModelLevelError,
@@ -79,64 +78,64 @@ test("computeCooldown increments streak and advances expiry", () => {
 });
 
 // ---- 错误分类 ----
-test("classify: 429 → cooldown", () => {
-  assert.equal(classify(429), "cooldown");
+test("classifyFailure: 429 → cooldown", () => {
+  assert.equal(classifyFailure({ status: 429 }), "cooldown");
 });
 
-test("classify: 5xx → retry (no punishment)", () => {
-  assert.equal(classify(500), "retry");
-  assert.equal(classify(503), "retry");
-  assert.equal(classify(502), "retry");
+test("classifyFailure: 5xx → retry (no punishment)", () => {
+  assert.equal(classifyFailure({ status: 500 }), "retry");
+  assert.equal(classifyFailure({ status: 503 }), "retry");
+  assert.equal(classifyFailure({ status: 502 }), "retry");
 });
 
-test("classify: 403 and quota/safety keywords → cooldown", () => {
-  assert.equal(classify(403), "cooldown");
-  assert.equal(classify(200, "error 11140"), "cooldown");
-  assert.equal(classify(200, "error 11128"), "cooldown");
-  assert.equal(classify(200, "error 6004"), "cooldown");
-  assert.equal(classify(200, "error 14018"), "cooldown");
-  assert.equal(classify(200, "insufficient quota"), "cooldown");
-  assert.equal(classify(200, "rate limit exceeded"), "cooldown");
-  assert.equal(classify(200, "too many requests"), "cooldown");
-  assert.equal(classify(200, "service overloaded"), "cooldown");
-  assert.equal(classify(200, "service unavailable"), "cooldown");
-  assert.equal(classify(200, "endpoint is unavailable"), "cooldown");
-  assert.equal(classify(200, "FreeUsageLimitError"), "cooldown");
-  assert.equal(classify(200, "触发频率限制"), "cooldown");
-  assert.equal(classify(200, "账户欠费"), "cooldown");
-  assert.equal(classify(200, "余额不足"), "cooldown");
-  assert.equal(classify(200, "安全审核拦截"), "cooldown");
+test("classifyFailure: 403 and quota/safety keywords → cooldown", () => {
+  assert.equal(classifyFailure({ status: 403 }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "error 11140" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "error 11128" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "error 6004" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "error 14018" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "insufficient quota" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "rate limit exceeded" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "too many requests" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "service overloaded" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "service unavailable" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "endpoint is unavailable" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "FreeUsageLimitError" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "触发频率限制" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "账户欠费" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "余额不足" }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "安全审核拦截" }), "cooldown");
 });
 
-test("classify: other errors → fatal", () => {
-  assert.equal(classify(400), "fatal");
-  assert.equal(classify(404), "fatal");
-  assert.equal(classify(200, "some normal message"), "fatal");
+test("classifyFailure: other errors → fatal", () => {
+  assert.equal(classifyFailure({ status: 400 }), "fatal");
+  assert.equal(classifyFailure({ status: 404 }), "fatal");
+  assert.equal(classifyFailure({ status: 200, text: "some normal message" }), "fatal");
 });
 
-test("classify: generic keyword in a 4xx-non-402/403/429 body does NOT punish the account", () => {
+test("classifyFailure: generic keyword in a 4xx-non-402/403/429 body does NOT punish the account", () => {
   // 4xx 是客户端错误，body 可能回显用户输入/代码片段；通用词不得触发账号退避（M4 回归）
   // 例外：402 与 403 同等放行（Payment Required 恒为余额问题，无 body 也冷却）
-  assert.equal(classify(400, '{"message":"unknown field quota"}'), "fatal");
-  assert.equal(classify(400, "quota exceeded"), "fatal");
-  assert.equal(classify(422, "overloaded"), "fatal");
-  assert.equal(classify(401, "rate limit"), "fatal");
-  assert.equal(classify(402, "anything without quota words"), "cooldown", "402 always cools like 403");
-  assert.equal(classify(402, "余额不足"), "cooldown", "402 quota cools");
+  assert.equal(classifyFailure({ status: 400, text: '{"message":"unknown field quota"}' }), "fatal");
+  assert.equal(classifyFailure({ status: 400, text: "quota exceeded" }), "fatal");
+  assert.equal(classifyFailure({ status: 422, text: "overloaded" }), "fatal");
+  assert.equal(classifyFailure({ status: 401, text: "rate limit" }), "fatal");
+  assert.equal(classifyFailure({ status: 402, text: "anything without quota words" }), "cooldown", "402 always cools like 403");
+  assert.equal(classifyFailure({ status: 402, text: "余额不足" }), "cooldown", "402 quota cools");
 });
 
-test("classify: explicit Tencent code still cools down even on a 4xx", () => {
+test("classifyFailure: explicit Tencent code still cools down even on a 4xx", () => {
   // 显式腾讯业务码无歧义，即便被包在 400 里仍是上游额度/风控信号
-  assert.equal(classify(400, "bad request: 11128"), "cooldown");
-  assert.equal(classify(400, "error 11140"), "cooldown");
-  assert.equal(classify(400, "error 14018"), "cooldown");
-  assert.equal(classify(400, "error 6004"), "cooldown");
+  assert.equal(classifyFailure({ status: 400, text: "bad request: 11128" }), "cooldown");
+  assert.equal(classifyFailure({ status: 400, text: "error 11140" }), "cooldown");
+  assert.equal(classifyFailure({ status: 400, text: "error 14018" }), "cooldown");
+  assert.equal(classifyFailure({ status: 400, text: "error 6004" }), "cooldown");
 });
 
-test("classify: 5xx semantics unchanged by the 4xx keyword narrowing", () => {
-  assert.equal(classify(429, "anything"), "cooldown");
-  assert.equal(classify(503, "service unavailable"), "retry");
-  assert.equal(classify(500, "insufficient quota"), "retry");
+test("classifyFailure: 5xx semantics unchanged by the 4xx keyword narrowing", () => {
+  assert.equal(classifyFailure({ status: 429, text: "anything" }), "cooldown");
+  assert.equal(classifyFailure({ status: 503, text: "service unavailable" }), "retry");
+  assert.equal(classifyFailure({ status: 500, text: "insufficient quota" }), "retry");
 });
 
 test("isModelLevelError detects model-identity errors only", () => {
@@ -150,16 +149,16 @@ test("isModelLevelError detects model-identity errors only", () => {
   assert.equal(isModelLevelError(null), false);
 });
 
-test("classify: structured business code takes priority over text", () => {
+test("classifyFailure: structured business code takes priority over text", () => {
   // 已知惩罚码 → cooldown
-  assert.equal(classify(200, "", { code: 11140 }), "cooldown");
-  assert.equal(classify(200, "", { code: 11128 }), "cooldown");
-  assert.equal(classify(200, "", { code: 6004 }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "", json: { code: 11140 } }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "", json: { code: 11128 } }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "", json: { code: 6004 } }), "cooldown");
   // 未知非零业务码 → retry（切换但不惩罚；惩罚只给已知码）
-  assert.equal(classify(200, "", { code: 99999 }), "retry");
+  assert.equal(classifyFailure({ status: 200, text: "", json: { code: 99999 } }), "retry");
   // code 0 = 无业务错误，回退到状态码/文本判定
-  assert.equal(classify(200, "some normal message", { code: 0 }), "fatal");
-  assert.equal(classify(200, "insufficient quota", { code: 0 }), "cooldown");
+  assert.equal(classifyFailure({ status: 200, text: "some normal message", json: { code: 0 } }), "fatal");
+  assert.equal(classifyFailure({ status: 200, text: "insufficient quota", json: { code: 0 } }), "cooldown");
 });
 
 test("businessErrorCode extracts Tencent code from 200 JSON", () => {
@@ -206,11 +205,11 @@ test("isWAFChallenge detects captcha/WAF pages only", () => {
   assert.equal(isWAFChallenge(null), false);
 });
 
-test("classify: WAF challenge cools down even on misleading status", () => {
-  assert.equal(classify(403, "<html>aliyun_waf</html>"), "cooldown");
-  assert.equal(classify(302, "redirect to _____tmd_____/punish?x5secdata=1"), "cooldown");
-  assert.equal(classify(400, "<html>aliyun_waf</html>"), "cooldown");
-  assert.equal(classify(400, "bad request"), "fatal", "plain 400 stays fatal");
+test("classifyFailure: WAF challenge cools down even on misleading status", () => {
+  assert.equal(classifyFailure({ status: 403, text: "<html>aliyun_waf</html>" }), "cooldown");
+  assert.equal(classifyFailure({ status: 302, text: "redirect to _____tmd_____/punish?x5secdata=1" }), "cooldown");
+  assert.equal(classifyFailure({ status: 400, text: "<html>aliyun_waf</html>" }), "cooldown");
+  assert.equal(classifyFailure({ status: 400, text: "bad request" }), "fatal", "plain 400 stays fatal");
 });
 
 // ---- Candidate 02：classifyFailure 是失败分类的唯一边界 ----
@@ -230,7 +229,7 @@ test("classifyFailure accepts pre-parsed json as evidence (avoids double parse)"
   assert.equal(classifyFailure({ status: 400, text: "unknown field 'quota'", json: null }), "fatal");
 });
 
-test("classifyFailure matches classify() for the same evidence (alias equivalence)", () => {
+test("classifyFailure is self-consistent on raw-text evidence (no alias)", () => {
   const cases = [
     { status: 429, text: "rate limited" },
     { status: 503, text: "overloaded" },
@@ -238,17 +237,18 @@ test("classifyFailure matches classify() for the same evidence (alias equivalenc
     { status: 200, text: '{"code":6004,"msg":"risk"}' },
     { status: 403, text: "" },
     { status: 402, text: "insufficient credits" },
-    // 以下用例专门覆盖“仅靠 JSON 解析才能得出动作、且 code 不是文本关键词”的场景：
-    // 若别名的 json 默认值退回 null（不解析），这些会与 classifyFailure 分叉而失败。
+    // 以下用例专门覆盖“仅靠 JSON 解析才能得出动作、且 code 不是文本关键词”的场景
     { status: 200, text: '{"code":9999,"msg":"weird"}' },   // 未知业务码 → retry
     { status: 200, text: '{"code":11140,"msg":"quota"}' }    // 已知业务码 → cooldown
   ];
-  for (const c of cases) {
-    assert.equal(classifyFailure(c), classify(c.status, c.text), `mismatch for ${JSON.stringify(c)}`);
-  }
-  // 显式传 null 表示“确认无结构体”，与缺省（自解析）语义不同，但两者对同一文本的
-  // 最终动作在真实证据下应一致；这里锁死 classify(s,t) 缺省 == classifyFailure({s,t})。
-  assert.equal(classify(200, '{"code":9999}'), classifyFailure({ status: 200, text: '{"code":9999}' }));
+  const expected = ["cooldown", "retry", "fatal", "cooldown", "cooldown", "cooldown", "retry", "cooldown"];
+  cases.forEach((c, i) => {
+    assert.equal(classifyFailure(c), expected[i], `mismatch for ${JSON.stringify(c)}`);
+  });
+  // 缺省自解析出未知业务码 → retry；显式传 null（确认无结构体、不解析）→ fatal。
+  // 两者语义不同，此处锁死各自结果。
+  assert.equal(classifyFailure({ status: 200, text: '{"code":9999}' }), "retry");
+  assert.equal(classifyFailure({ status: 200, text: '{"code":9999}', json: null }), "fatal");
 });
 
 test("classifyFailure tolerates malformed / non-JSON text without throwing", () => {

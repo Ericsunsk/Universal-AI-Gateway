@@ -1,10 +1,12 @@
 import { Readable } from "node:stream";
-import worker from "../src/index.js";
+import worker, { MAX_BODY_BYTES } from "../src/index.js";
 import { createKvFromEnv } from "../src/kv/index.js";
 
 export const config = {
   maxDuration: 300, // 允许最大 300 秒执行时长（适配长时间思考模型与深度代码审计）
 };
+
+export const maxDuration = 300;
 
 // 网关只读取白名单内的环境变量/密钥，其余进程环境变量不可达
 // （导出供测试锁定覆盖率：src/ 与 api/ 消费的每个 env 键必须在此出现，见 test/entry.test.js）。
@@ -64,7 +66,10 @@ function getTrustedHosts() {
 
 function resolveUrl(req) {
   const trustedHosts = getTrustedHosts();
-  const actualHost = req.headers.host || "localhost";
+  // Host 头攻击者可控：不在白名单时回退 VERCEL_URL/默认，不采信它做基址与日志。
+  const rawHost = req.headers.host || "localhost";
+  const vercelHost = (process.env.VERCEL_URL || "").replace(/^https?:\/\//, "");
+  const actualHost = trustedHosts.has(rawHost) ? rawHost : (vercelHost || "localhost");
 
   // 安全：x-forwarded-host 只有在等于实际 host 或白名单域名时才被信任，否则忽略，防止伪造
   const forwardedHost = req.headers["x-forwarded-host"];
@@ -116,7 +121,15 @@ async function handleNodeRequest(req, res) {
     let body = undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
       const chunks = [];
+      let size = 0;
       for await (const chunk of req) {
+        size += chunk.length;
+        if (size > MAX_BODY_BYTES) {
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "Request body too large" } }));
+          try { req.destroy(); } catch (e) {}
+          return;
+        }
         chunks.push(chunk);
       }
       body = Buffer.concat(chunks);
@@ -170,7 +183,7 @@ async function handleNodeRequest(req, res) {
     console.error("[Vercel Gateway Error]", err);
     if (!res.headersSent) {
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: err.message || "Internal Server Error" } }));
+      res.end(JSON.stringify({ error: { message: "Internal Server Error" } }));
     } else {
       res.end();
     }

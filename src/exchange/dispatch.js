@@ -3,9 +3,9 @@
 import { corsHeaders } from "../http/headers.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { isModelLevelError } from "../core/scheduler.js";
-import { hasCallChat, hasCallMessages, wantsStreamedChat } from "../core/contract.js";
+import { hasCallChat, hasCallMessages, wantsStreamedChat, needsReasoningScrub } from "../core/contract.js";
 import { runFailover } from "../core/failover.js";
-import { transformAnthropicToOpenAI, pruneOpenAIMessages, isCompactOpenAIRequest } from "./transform.js";
+import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
 
 /**
@@ -26,7 +26,8 @@ export async function dispatchExchange({
   body,
   fleet,
   config,
-  request
+  request,
+  principal = null
 }) {
   const isAnthropic = protocol === "anthropic";
   const routes = config.routes || {};
@@ -81,9 +82,9 @@ export async function dispatchExchange({
     onRetryable: async (candidate, action, fail) => {
       console.warn(`[Fallback] Provider "${candidate.provider}" (${candidate.model}) returned ${fail.status}, retrying next candidate...`);
     },
-    renderExhausted: ({ lastError }) => new Response(JSON.stringify({
+    renderExhausted: ({ lastError, lastFail }) => new Response(JSON.stringify({
       error: {
-        message: `All available providers for model "${model}" failed. Last error: ${lastError ? lastError.message : "none"}`
+        message: `All available providers for model "${model}" failed. Last error: ${lastError?.message || (lastFail ? `${lastFail.status ?? ""} ${String(lastFail.text || "").slice(0, 300)}`.trim() : "none")}`
       }
     }), {
       status: 502,
@@ -105,13 +106,13 @@ export async function dispatchExchange({
       try {
         if (isAnthropic && nativeAnthropic) {
           const anthropicPayload = applyReasoningToPayload({ ...body, model: candidate.model }, reasoningIntent, "anthropic", candidate.model);
-          upstreamRes = await provider.callMessages(anthropicPayload, { signal: request?.signal, request });
+          upstreamRes = await provider.callMessages(anthropicPayload, { signal: request?.signal, request, principal });
         } else if (hasCallChat(provider)) {
           let openaiPayload;
           try {
             openaiPayload = isAnthropic
               ? transformAnthropicToOpenAI(body, candidate.model, config, reasoningIntent)
-              : { ...body, model: candidate.model, messages: pruneOpenAIMessages(body.messages, isCompactOpenAIRequest(body.messages)) };
+              : { ...body, model: candidate.model, messages: normalizeOpenAIMessages(pruneOpenAIMessages(body.messages, isCompactOpenAIRequest(body.messages))) };
           } catch (err) {
             // 参数校验失败（400 / 404）：直接返回，不进行故障转移
             if (err.status === 400 || err.status === 404) {
@@ -122,16 +123,18 @@ export async function dispatchExchange({
           // 推理适配恰好一次：transformAnthropicToOpenAI 的输出已是 OpenAI 方言（含映射，幂等，
           // 无需二次 apply）；唯 WorkBuddy 上游拒收推理参数，需清洗一次。OpenAI 协议客户端
           // 直传 payload，未经过 transform，仍需按方言完整适配一次。
-          // 方言身份（workbuddy 清洗 vs openai 映射）集中判定于此，不再散落多处拼写。
-          if (!isAnthropic || provider.type === "workbuddy") {
-            applyReasoningToPayload(openaiPayload, reasoningIntent, provider.type === "workbuddy" ? "workbuddy" : "openai", candidate.model);
+          // 方言身份经能力谓词判定（needsReasoningScrub），不 switch provider.type。
+          const scrub = needsReasoningScrub(provider);
+          if (!isAnthropic || scrub) {
+            applyReasoningToPayload(openaiPayload, reasoningIntent, scrub ? "workbuddy" : "openai", candidate.model);
           }
           if (wantsStreamedChat(provider)) {
             openaiPayload.stream = true;
           }
-          upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal, request });
+          upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal, request, principal });
         } else {
-          throw new Error(`Provider "${candidate.provider}" implements neither callChat nor callMessages`);
+          // OpenAI 协议 + 纯 Anthropic 上游：网关暂不支持该组合，转 400 而非静默切换。
+          return { kind: "done", response: clientError(400, `Provider "${candidate.provider}" does not support OpenAI chat protocol`) };
         }
       } catch (err) {
         // 上游抛出的客户端错误（400 / 404）：直接返回，不进行故障转移
@@ -143,13 +146,15 @@ export async function dispatchExchange({
       }
 
       if (upstreamRes && upstreamRes.ok) {
+        // 归因头仅对 master 下发：账号 ID / 模型 / fallback 位不对客户端 key 暴露。
+        const exposeDebug = principal?.isMaster === true;
         const hitAccount = upstreamRes.headers.get("x-gateway-account") || "default";
         const isFallback = candidateIndex > 0;
-        const debugHeaders = {
+        const debugHeaders = exposeDebug ? {
           "X-Gateway-Account": hitAccount,
           "X-Gateway-Model": candidate.model,
           "X-Gateway-Fallback": isFallback ? "true" : "false"
-        };
+        } : {};
 
         if (isAnthropic && !nativeAnthropic) {
           if (body.stream !== false) {
@@ -172,15 +177,10 @@ export async function dispatchExchange({
       if (upstreamRes) {
         const status = upstreamRes.status;
         const errText = await upstreamRes.text();
-        // 分类由驱动器统一经 classifyFailure 完成：这里只交原始证据（status + text），
-        // JSON 解析不再在调用方重复一遍（那是分类内部的一步）。
-        // 模型身份级错误（上游说“此模型不可用”）且后面还有不同模型的候选：
-        // 对当前模型判 fatal 没有意义，强制切换，让备用模型接管。
-        // 可达性说明（审计 H3）：仅当上游返回 400/404 且正文命中 isModelLevelError 时生效。
-        // 真实 WorkBuddy 上游把模型不可用包成 200 业务码（经 callChat 的 200-业务错误路径
-        // 转成 fail），故此处对 workbuddy 几乎不触发；它主要服务 OpenAI/Anthropic 兼容上游
-        // （会真实返回 404 model_not_found）。保留是因为语义正确且对兼容上游生效，
-        // 若未来统一错误形态可移除此分支。
+        // 分类由驱动器统一经 classifyFailure 完成：这里只交原始证据（status + text）。
+        // 模型身份级错误（400/404 + isModelLevelError）且后面还有不同模型的候选时，
+        // 对当前模型判 fatal 无意义，force 切换让备用模型接管（主要服务兼容上游的
+        // 真实 404；WorkBuddy 走 200-业务错误路径，此处几乎不触发）。
         const laterModelsDiffer = (status === 400 || status === 404) &&
           isModelLevelError(errText) &&
           candidates.slice(candidateIndex + 1).some(c => c.model !== candidate.model);

@@ -52,11 +52,22 @@ export function parseReasoningIntent({ model = "", body = {} } = {}) {
   let cleanModel = String(model || "").trim();
   let rawSuffix = null;
 
-  // 1. 匹配并提取模型名末尾的方括号语法，如 [high], [low], [off], [200k], [1M]
-  const suffixMatch = cleanModel.match(/\[(.*?)\]$/);
+  // 1. 匹配并提取模型名末尾的方括号后缀，如 [high]、[low]、[off]。
+  // 容量后缀（[200k]/[1M]）仅做剥离，不产生 budget 语义。
+  // 支持多层叠加（如 model[high][200k]），循环剥离直到无后缀；
+  // 最后一个命中的推理档位/关闭词生效。
+  const suffixMatch = cleanModel.match(/\[([^\[\]]*)\]$/);
   if (suffixMatch) {
-    rawSuffix = suffixMatch[1].toLowerCase().trim();
-    cleanModel = cleanModel.replace(/\[.*?\]$/, "").trim();
+    let guard = 0;
+    let m = cleanModel.match(/\[([^\[\]]*)\]$/);
+    while (m && guard++ < 5) {
+      const cand = m[1].toLowerCase().trim();
+      if (REASONING_LEVELS.includes(cand) || cand === "mid" || DISABLE_KEYWORDS.includes(cand)) {
+        rawSuffix = cand;
+      }
+      cleanModel = cleanModel.replace(/\[[^\[\]]*\]$/, "").trim();
+      m = cleanModel.match(/\[([^\[\]]*)\]$/);
+    }
   }
 
   let enabled = true;
@@ -148,6 +159,7 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
       };
       // Anthropic 规范：开启 Extended Thinking 时 temperature 必须为 1.0 或不传
       if (payload.temperature !== undefined && payload.temperature !== 1.0) {
+        console.debug(`[Reasoning] Overriding temperature ${payload.temperature} to 1.0 for Anthropic thinking`);
         payload.temperature = 1.0;
       }
     }

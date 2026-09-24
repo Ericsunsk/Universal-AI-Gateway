@@ -83,13 +83,18 @@ export async function runFailover(items, {
           await waitOrAbort(outcome.delayMs ?? retryDelayMs, signal);
           continue;
         }
-        // 预算耗尽：把这次瞬时失败降格为一条 switch 记录，照常走 classify。
-        lastFail = outcome.fail ?? lastFail;
-        lastFailureKind = lastFail ? "fail" : lastFailureKind;
-        if (lastFail) {
+        // 预算耗尽：把这次瞬时失败升级为 switch 记录。fail 为空（传输错误）时
+        // 记为传输失败的 lastError，不借用陈旧 lastFail 做 classify。
+        if (outcome.fail) {
+          lastFail = outcome.fail;
+          lastFailureKind = "fail";
           const action = classifyFailure(lastFail);
           if (action === "fatal" && lastFail.force !== "retry") return lastFail.response;
           if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, lastFail);
+        } else {
+          lastError = lastError || new Error("Upstream transport failed after retry budget exhausted");
+          lastFailureKind = "error";
+          if (onRetryable) await onRetryable(item, "retry", { status: 0, text: lastError.message });
         }
         break;
       }
