@@ -23,6 +23,7 @@ export const ENV_ALLOWLIST = new Set([
   "REDIS_REST_API_URL", "REDIS_REST_API_TOKEN",
   "VERCEL_URL", "VERCEL_PROJECT_DOMAINS",
   "DEBUG",
+  "LOG_LEVEL", "LOG_FORMAT", "NODE_ENV",
 ]);
 
 function getEnvContext() {

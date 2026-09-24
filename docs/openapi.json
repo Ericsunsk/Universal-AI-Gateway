@@ -1,0 +1,594 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Universal AI Gateway",
+    "version": "2.5.1",
+    "description": "高性能通用 AI 网关，支持 Anthropic ⟷ OpenAI 双向协议转译、多提供商 Failover、WorkBuddy 自动签到与 Token 续签",
+    "contact": {
+      "name": "GitHub Repository",
+      "url": "https://github.com/Ericsunsk/Universal-AI-Gateway"
+    },
+    "license": {
+      "name": "MIT",
+      "url": "https://github.com/Ericsunsk/Universal-AI-Gateway/blob/main/LICENSE"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://your-gateway.vercel.app",
+      "description": "生产环境（替换为您的 Vercel 域名）"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "本地开发环境"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": []
+    },
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "summary": "健康检查",
+        "description": "公开端点，返回服务存活状态（无版本与运营信息）",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "服务正常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "服务降级（无可用 provider）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "summary": "服务状态",
+        "description": "需要鉴权，返回版本号与 KV 可用性",
+        "responses": {
+          "200": {
+            "description": "状态详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "summary": "Anthropic Messages API",
+        "description": "标准 Anthropic Messages 接口（适配 Claude Code / CC-Switch）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnthropicMessagesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "流式响应（SSE）或 JSON 响应",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Server-Sent Events 流"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicMessagesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitExceeded"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "OpenAI Chat Completions API",
+        "description": "标准 OpenAI 对话接口（适配 Cursor / NextChat / OpenAI SDK）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenAIChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "流式响应（SSE）或 JSON 响应",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIChatResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimitExceeded"
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "模型列表",
+        "description": "返回显式配置的模型（透明直通模式下默认为空）",
+        "responses": {
+          "200": {
+            "description": "模型列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/usage": {
+      "get": {
+        "summary": "余额查询",
+        "description": "仅 Master / Admin 角色可访问",
+        "security": [
+          {
+            "MasterKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "余额详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/checkin": {
+      "post": {
+        "summary": "每日签到与 Token 保活",
+        "description": "需要 Master Key 或 Cron Secret，触发 WorkBuddy 签到与 Token 刷新",
+        "security": [
+          {
+            "MasterKeyAuth": []
+          },
+          {
+            "CronSecretAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "签到结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckinResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API Key 或 Master Key（格式: Bearer sk-xxx）"
+      },
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "API Key（替代 Authorization header）"
+      },
+      "MasterKeyAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Master Key（仅管理端点）"
+      },
+      "CronSecretAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-cron-secret",
+        "description": "Cron Secret（定时任务触发器）"
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["ok", "degraded"]
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string",
+            "example": "universal-ai-gateway"
+          },
+          "version": {
+            "type": "string",
+            "example": "2.5.1"
+          },
+          "kvEnabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AnthropicMessagesRequest": {
+        "type": "object",
+        "required": ["model", "messages", "max_tokens"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "claude-sonnet-4-20250514"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": ["user", "assistant"]
+                },
+                "content": {
+                  "oneOf": [
+                    {"type": "string"},
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "max_tokens": {
+            "type": "integer",
+            "example": 4096
+          },
+          "system": {
+            "type": "string"
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "AnthropicMessagesResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "example": "message"
+          },
+          "role": {
+            "type": "string",
+            "example": "assistant"
+          },
+          "content": {
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "stop_reason": {
+            "type": "string"
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "input_tokens": {"type": "integer"},
+              "output_tokens": {"type": "integer"}
+            }
+          }
+        }
+      },
+      "OpenAIChatRequest": {
+        "type": "object",
+        "required": ["model", "messages"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "example": "deepseek-v4.1-flash"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "stream": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OpenAIChatResponse": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "object": {"type": "string", "example": "chat.completion"},
+          "created": {"type": "integer"},
+          "model": {"type": "string"},
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "properties": {
+          "object": {
+            "type": "string",
+            "example": "list"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "object": {"type": "string", "example": "model"},
+                "created": {"type": "integer"},
+                "owned_by": {"type": "string"}
+              }
+            }
+          }
+        }
+      },
+      "UsageResponse": {
+        "type": "object",
+        "properties": {
+          "code": {"type": "integer", "example": 0},
+          "data": {
+            "type": "object",
+            "properties": {
+              "balance": {"type": "number"},
+              "total": {"type": "number"},
+              "unit": {"type": "string", "example": "积分"}
+            }
+          }
+        }
+      },
+      "CheckinResponse": {
+        "type": "object",
+        "properties": {
+          "success": {"type": "boolean"},
+          "results": {"type": "array"},
+          "refreshes": {"type": "array"}
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "message": {"type": "string"},
+              "type": {"type": "string"},
+              "code": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "未授权（缺失或无效的 API Key）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "message": "Missing API Key"
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "禁止访问（权限不足）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "message": "Forbidden"
+              }
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "请求参数错误",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "请求体过大（超过 8MB）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "message": "Request body too large"
+              }
+            }
+          }
+        }
+      },
+      "RateLimitExceeded": {
+        "description": "请求频率超限",
+        "headers": {
+          "Retry-After": {
+            "description": "建议重试间隔（秒）",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          "X-RateLimit-Limit": {
+            "description": "速率限制容量",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          "X-RateLimit-Remaining": {
+            "description": "剩余请求次数",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          "X-RateLimit-Reset": {
+            "description": "限制重置时间（Unix timestamp）",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "example": {
+              "error": {
+                "message": "Too Many Requests",
+                "type": "rate_limit_exceeded",
+                "retry_after": 10
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "内部服务器错误",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}

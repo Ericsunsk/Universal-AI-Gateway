@@ -3,6 +3,7 @@ import { authenticateAccess, timingSafeEqual } from "./auth/auth.js";
 import { corsHeaders } from "./http/headers.js";
 import { dispatchExchange } from "./exchange/exchange.js";
 import { getProviderFleet } from "./core/fleet.js";
+import { checkRateLimit, RATE_LIMIT_PRESETS, extractRateLimitKey, rateLimitResponse } from "./ratelimit/ratelimit.js";
 
 // 未鉴权请求不解析 body：Content-Length 预检，超限直接 413。
 // 单一来源：api/index.js（Node 层流式累积）复用同一值。
@@ -136,6 +137,15 @@ export default {
       // 模型白名单需 body.model，解析后再做第二道门。
       const preAuth = authenticateAccess(request, config);
       if (!preAuth.ok) return preAuth.response;
+
+      // 限流检查（已认证用户）：标准限流（60 req/min）
+      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+      const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
+      const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
+      if (!rateLimitResult.allowed) {
+        return rateLimitResponse(rateLimitResult, corsHeaders);
+      }
+
       if (bodyTooLarge(request)) {
         return new Response(JSON.stringify({ error: { message: "Request body too large" } }), {
           status: 413,
@@ -174,6 +184,15 @@ export default {
       }
       const preAuth = authenticateAccess(request, config);
       if (!preAuth.ok) return preAuth.response;
+
+      // 限流检查（已认证用户）：标准限流（60 req/min）
+      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+      const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
+      const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
+      if (!rateLimitResult.allowed) {
+        return rateLimitResponse(rateLimitResult, corsHeaders);
+      }
+
       if (bodyTooLarge(request)) {
         return new Response(JSON.stringify({ error: { message: "Request body too large" } }), {
           status: 413,
