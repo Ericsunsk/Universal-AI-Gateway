@@ -9,7 +9,8 @@
     "dev": "vercel dev",
     "deploy": "vercel --prod",
     "test": "node --test",
-    "bench": "node scripts/bench.mjs"
+    "bench": "node scripts/bench.mjs",
+    "probe": "node scripts/probe-agent.mjs"
   },
   "keywords": [
     "ai-gateway",

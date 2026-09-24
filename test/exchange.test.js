@@ -596,6 +596,7 @@ test("streamOpenAIToAnthropic reports real output_tokens from upstream usage (L1
   const events = await readAnthropicEvents(streamOpenAIToAnthropic(upstream, "m"));
   const msgDelta = events.find(e => e.event === "message_delta");
   assert.equal(msgDelta.data.usage.output_tokens, 7, "must use upstream completion_tokens, not hardcoded 60");
+  assert.equal(msgDelta.data.usage.input_tokens, 12, "must report upstream prompt_tokens as input_tokens");
   assert.notEqual(msgDelta.data.usage.output_tokens, 60);
 });
 

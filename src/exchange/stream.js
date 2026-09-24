@@ -206,6 +206,9 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     // 真实输出 token 数：优先采信上游 usage.completion_tokens（终局 chunk 常带），
     // 上游从不报 usage 时回退字符数/4 估算，取代此前的硬编码 60。
     let reportedOutputTokens = 0;
+    // 真实输入 token 数：优先采信上游 usage.prompt_tokens（透传/翻译路径均可能携带），
+    // 上游从不报 usage 时保持 0 —— Anthropic 线协议不允许凭空估算输入长度。
+    let reportedInputTokens = 0;
     let emittedChars = 0;
 
     const closeCurrentBlock = async () => {
@@ -242,8 +245,9 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 
             // 与非流式路径同源采信上游 usage（逐 chunk 覆盖，终局值胜出）；
             // 缺失 usage 的 chunk 保留原值，最终由字符数估算兜底。
-            const chunkUsage = extractUsage(parsed, { input: 0, output: reportedOutputTokens });
+            const chunkUsage = extractUsage(parsed, { input: reportedInputTokens, output: reportedOutputTokens });
             reportedOutputTokens = chunkUsage.output;
+            reportedInputTokens = chunkUsage.input;
 
             // 全部分类走 reducer seam：同一 chunk 的 thinking/text/tool/finish 按序发射，
             // 不再各写一遍字段读取（error 独占，与旧语义一致）。
@@ -416,11 +420,12 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 
       // message_delta.usage.output_tokens 是 Anthropic 线协议字段，客户端会读；
       // 取上游 usage 与字符估算的较大值（与非流式 formatOpenAIToAnthropicJson 口径一致）。
+      // input_tokens 采信上游 usage.prompt_tokens：缺失时为 0（不估算输入长度）。
       const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(emittedChars / 4));
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
         delta: { stop_reason: finalStopReason, stop_sequence: null },
-        usage: { output_tokens: finalOutputTokens }
+        usage: { input_tokens: reportedInputTokens, output_tokens: finalOutputTokens }
       })}\n\n`));
 
       await writer.write(EVENT_MSG_STOP_BYTES);
@@ -449,7 +454,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
           type: "message_delta",
           delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: { output_tokens: errOutputTokens }
+          usage: { input_tokens: reportedInputTokens, output_tokens: errOutputTokens }
         })}\n\n`));
         await writer.write(EVENT_MSG_STOP_BYTES);
       } catch (e) {}
