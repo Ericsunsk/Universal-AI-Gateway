@@ -1,4 +1,4 @@
-import { sanitizeMessages } from "./sanitize.js";
+import { sanitizeMessages, sanitizeWorkbuddyPayload } from "./sanitize.js";
 import { buildResponseHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
 import { runFailover, buildFail } from "../../core/failover.js";
@@ -282,16 +282,15 @@ export class WorkBuddyProvider {
     // 先水合其他 isolate 写入的冷却记录，再做健康度筛选
     await hydrateCooldowns(this.env, allAccounts);
 
+    // 针对腾讯上游 WAF 与渠道规则进行完整 Payload 规范化与脱敏（防 11128 unapproved channel）
+    payload = sanitizeWorkbuddyPayload(payload);
+
     // 账号排序委托给纯函数调度器：有粘性键时固定落点，无键时 round-robin，冷却账号按到期时间兜底
     const accounts = orderAccounts(
       allAccounts, accountCooldownRecord, Date.now(), roundRobinCounter,
       affinityKeyForCall(payload, options)
     );
     roundRobinCounter += 1;
-
-    if (payload.messages) {
-      payload.messages = sanitizeMessages(payload.messages);
-    }
 
     const serializedPayload = JSON.stringify(payload);
 

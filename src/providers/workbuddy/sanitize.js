@@ -66,12 +66,17 @@ export function sanitizeMessages(messages) {
     // - assistant：由大模型自身生成的内容，也绝不会包含客户端注入的系统提示词或计费头
     if (msg.role === "tool" || msg.role === "assistant") return msg;
 
+    // 上游 role 白名单没有 developer（OpenAI 推理模型方言），等价归一为 system
+    const isDeveloper = typeof msg.role === "string" && msg.role.toLowerCase() === "developer";
+    const targetRole = isDeveloper ? "system" : msg.role;
+
     if (typeof msg.content === "string") {
       const sanitized = sanitizeText(msg.content);
-      return sanitized === msg.content ? msg : { ...msg, content: sanitized };
+      if (sanitized === msg.content && !isDeveloper) return msg;
+      return { ...msg, role: targetRole, content: sanitized };
     }
     if (Array.isArray(msg.content)) {
-      let changed = false;
+      let changed = isDeveloper;
       const newContent = msg.content.map(part => {
         if (part && typeof part === "object" && typeof part.text === "string") {
           const sanitized = sanitizeText(part.text);
@@ -82,8 +87,91 @@ export function sanitizeMessages(messages) {
         }
         return part;
       });
-      return changed ? { ...msg, content: newContent } : msg;
+      return changed ? { ...msg, role: targetRole, content: newContent } : msg;
     }
-    return msg;
+    return isDeveloper ? { ...msg, role: targetRole } : msg;
   });
+}
+
+export const DEFAULT_WORKBUDDY_SYSTEM_PROMPT = "You are a helpful AI assistant.";
+
+// 确保首条消息必须是 system（腾讯 11128 / first message is not system prompt 硬性要求）
+export function ensureSystemFirstMessage(messages, defaultPrompt = DEFAULT_WORKBUDDY_SYSTEM_PROMPT) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  const first = messages[0];
+  const firstRole = first && typeof first === "object" ? String(first.role || "").toLowerCase() : "";
+  if (firstRole !== "system") {
+    return [
+      { role: "system", content: defaultPrompt },
+      ...messages
+    ];
+  }
+  return messages;
+}
+
+/**
+ * 针对腾讯 WorkBuddy 上游 WAF / 渠道检测的完整 Payload 规范化与脱敏清洗：
+ * 1. 消息列表脱敏：角色归一化 (developer -> system) + Claude Code 指纹改写 + 确保首条为 system
+ * 2. 字段兼容：max_completion_tokens -> max_tokens
+ * 3. 剔除上游拒收的 OpenAI 扩展参数（避免触发 11128 unapproved channel）
+ * 4. 归一化 tool_choice（对象形式转字符串，避免 400）
+ * 5. 清除 tools 中的 strict 限制字段
+ */
+export function sanitizeWorkbuddyPayload(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const clean = { ...payload };
+
+  if (Array.isArray(clean.messages)) {
+    clean.messages = ensureSystemFirstMessage(sanitizeMessages(clean.messages));
+  }
+
+  // 1. max_completion_tokens (OpenAI o-series / new spec) -> max_tokens
+  if (clean.max_completion_tokens !== undefined) {
+    if (clean.max_tokens === undefined) {
+      clean.max_tokens = clean.max_completion_tokens;
+    }
+    delete clean.max_completion_tokens;
+  }
+
+  // 2. 剥离腾讯上游不识别或视为非官方渠道标识的 OpenAI 扩展字段
+  delete clean.stream_options;
+  delete clean.store;
+  delete clean.parallel_tool_calls;
+  delete clean.prompt_cache_key;
+  delete clean.prompt_cache_retention;
+  delete clean.user;
+
+  // 3. 归一化 tool_choice（上游只接受字符串 "auto"/"none" 或函数名，对象会报 400）
+  if (clean.tool_choice !== undefined) {
+    if (typeof clean.tool_choice === "object" && clean.tool_choice !== null) {
+      const type = String(clean.tool_choice.type || "").toLowerCase();
+      if (type === "none") {
+        delete clean.tool_choice;
+        delete clean.tools;
+      } else if (type === "auto" || type === "required") {
+        clean.tool_choice = type;
+      } else if (type === "function") {
+        const fnName = clean.tool_choice.function?.name || clean.tool_choice.name;
+        clean.tool_choice = fnName ? String(fnName) : "auto";
+      } else {
+        clean.tool_choice = "auto";
+      }
+    } else if (typeof clean.tool_choice === "string" && clean.tool_choice.toLowerCase() === "none") {
+      delete clean.tool_choice;
+      delete clean.tools;
+    }
+  }
+
+  // 4. 清洗 tools 中上游不认识的 strict 字段
+  if (Array.isArray(clean.tools)) {
+    clean.tools = clean.tools.map(tool => {
+      if (tool && tool.type === "function" && tool.function && "strict" in tool.function) {
+        const { strict, ...restFn } = tool.function;
+        return { ...tool, function: restFn };
+      }
+      return tool;
+    });
+  }
+
+  return clean;
 }
