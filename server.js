@@ -1,5 +1,6 @@
 import http from "node:http";
 import handler from "./api/index.js";
+import { log } from "./src/logging/logger.js";
 
 const port = Number(process.env.PORT) || 3000;
 const host = "0.0.0.0";
@@ -9,11 +10,11 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`[Universal AI Gateway] Server running at http://${host}:${port}`);
+  log.info("Server running", { url: `http://${host}:${port}` });
 });
 
 process.on("SIGTERM", () => {
-  console.log("[Universal AI Gateway] Received SIGTERM, shutting down gracefully...");
+  log.info("Received SIGTERM, shutting down gracefully");
   server.close(() => {
     process.exit(0);
   });

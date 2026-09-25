@@ -1,6 +1,7 @@
 // 账号冷却持久层 —— 内存写穿缓存 + KV 跨 isolate 落盘 + 退避标记的唯一写入口。
 // 调度决策（选谁、退避多久）在 scheduler.js；这里只管状态的存取。
 import { computeCooldown, backoffMinutesForStreak } from "../../core/scheduler.js";
+import { log } from "../../logging/logger.js";
 
 // 账号 429 / 额度耗尽动态退避记录: accountId -> { expiresAt: number, streak: number }
 // 进程内为写穿缓存；跨 isolate 的真实状态落在 KV，否则每个 isolate 各退避各的，冷却形同虚设。
@@ -54,7 +55,7 @@ async function persistCooldown(env, accountId, record) {
   try {
     await kv.put(`${COOLDOWN_KV_PREFIX}${accountId}`, JSON.stringify(record), { expirationTtl: ttlS });
   } catch (e) {
-    console.error(`Failed to persist cooldown for ${accountId}:`, e);
+    log.error("Failed to persist cooldown", { account: accountId, error: e?.message || String(e) });
   }
 }
 
@@ -63,7 +64,7 @@ async function markAccountRateLimited(account, env) {
   accountCooldownRecord.set(account.id, record);
   // 可靠落盘 KV 冷却记录（await 确保写入完成），跨 isolate 立即可见
   await persistCooldown(env, account.id, record);
-  console.warn(`[WorkBuddy] Account "${account.name || account.id}" 429/rate-limited (streak ${record.streak}), cooling down for ${backoffMinutesForStreak(record.streak)}m...`);
+  log.warn("Account rate-limited, cooling down", { account: account.name || account.id, streak: record.streak, backoff_min: backoffMinutesForStreak(record.streak) });
 }
 
 async function clearAccountCooldown(account, env) {
@@ -77,7 +78,7 @@ async function clearAccountCooldown(account, env) {
     try {
       await kv.delete(`${COOLDOWN_KV_PREFIX}${account.id}`);
     } catch (e) {
-      console.error(`Failed to clear cooldown for ${account.id}:`, e);
+      log.error("Failed to clear cooldown", { account: account.id, error: e?.message || String(e) });
     }
   }
 }

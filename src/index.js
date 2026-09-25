@@ -4,6 +4,7 @@ import { corsHeaders } from "./http/headers.js";
 import { dispatchExchange } from "./exchange/exchange.js";
 import { getProviderFleet } from "./core/fleet.js";
 import { checkRateLimit, RATE_LIMIT_PRESETS, extractRateLimitKey, rateLimitResponse } from "./ratelimit/ratelimit.js";
+import { runWithLogger, extractTraceId, generateTraceId, log } from "./logging/logger.js";
 
 // 未鉴权请求不解析 body：Content-Length 预检，超限直接 413。
 // 单一来源：api/index.js（Node 层流式累积）复用同一值。
@@ -15,11 +16,21 @@ function bodyTooLarge(request) {
 
 export default {
   // HTTP 请求核心分发入口
+  // 整个请求在 ALS 作用域内运行：任意深度的 log.* 自动携带 trace_id。
+  // trace_id 优先取客户端/上游透传的 x-trace-id，无则新生成，便于跨服务串联。
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
+    const traceId = extractTraceId(request) || generateTraceId();
+    return runWithLogger({ trace_id: traceId }, () => handleRequest(request, env));
+  }
+};
 
+// 处理链主体：所有分支共享同一个 ALS 作用域。
+// trace_id 不经参数传入 —— 作用域内的 log.* 直接从 ALS 读取。
+async function handleRequest(request, env) {
+  {
     const url = new URL(request.url);
     const path = url.pathname;
     const config = await getConfig(env);
@@ -169,7 +180,7 @@ export default {
           principal: auth.principal
         });
       } catch (err) {
-        console.error("[Gateway] Anthropic dispatch failed:", err?.message || err);
+        log.error("Anthropic dispatch failed", { error: err?.message || String(err) });
         return new Response(JSON.stringify({ error: { message: "Internal Server Error" } }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders }
@@ -216,7 +227,7 @@ export default {
           principal: auth.principal
         });
       } catch (err) {
-        console.error("[Gateway] OpenAI dispatch failed:", err?.message || err);
+        log.error("OpenAI dispatch failed", { error: err?.message || String(err) });
         return new Response(JSON.stringify({ error: { message: "Internal Server Error" } }), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders }
@@ -229,4 +240,4 @@ export default {
       headers: { "Content-Type": "application/json", ...corsHeaders }
     });
   }
-};
+}

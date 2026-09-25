@@ -10,10 +10,14 @@
 | 功能 | 状态 | 测试覆盖 | 文档 |
 |------|------|---------|------|
 | Rate Limiting（限流） | ✅ 完成 | 10 个测试 | OpenAPI |
-| 结构化日志 | ✅ 完成 | 8 个测试 | 内联注释 |
+| 结构化日志 | ✅ 完成（已接入请求链） | 8 个测试 | 内联注释 + ADR 0002 |
 | OpenAPI 文档 | ✅ 完成 | N/A | `docs/openapi.json` |
 
-**总测试数**: 203/203 通过 (100%)
+**总测试数**: 234/234 通过 (100%)
+
+> 更正：结构化日志原实现仅含模块与测试，**未接入任何生产路径**（45 处 `console.*`
+> 散落各处，无 trace_id、无脱敏）。现已经 `AsyncLocalStorage` 全量接入，详见
+> `docs/adr/0002-request-scoped-structured-logging.md`。
 
 ---
 
@@ -112,10 +116,10 @@ test/
 ### **核心 API**
 
 ```javascript
-import { createLogger, extractTraceId, sanitize } from "./logging/logger.js";
+import { createLogger, extractTraceId, generateTraceId, sanitize } from "./logging/logger.js";
 
-// 提取或生成 trace_id
-const traceId = extractTraceId(request);
+// 提取 trace_id（缺头返回 null，由调用方生成）
+const traceId = extractTraceId(request) || generateTraceId();
 
 // 创建日志器
 const logger = createLogger({ trace_id: traceId, user_id: "alice" });
@@ -167,8 +171,8 @@ NODE_ENV=production|development
 
 ### **脱敏规则**
 
-默认脱敏字段（大小写不敏感）:
-- `token`, `password`, `apiKey`, `secret`, `authorization`
+默认脱敏字段（归一化后匹配，去 `_-`、小写）:
+- `token`, `password`, `apikey`（覆盖 `api_key`/`x-api-key`/`apiKey`）, `secret`, `authorization`, `credential`, 精确 `key`
 
 保留前 4 字符 + `****`:
 ```javascript
@@ -294,26 +298,12 @@ const rateLimitResult = await checkRateLimit(
 
 ```javascript
 // src/index.js
-import { createLogger, extractTraceId } from "./logging/logger.js";
+import { extractTraceId, generateTraceId, runWithLogger } from "./logging/logger.js";
 
 export default {
   async fetch(request, env) {
-    const traceId = extractTraceId(request);
-    const logger = createLogger({ trace_id: traceId });
-    
-    logger.info("Request received", {
-      method: request.method,
-      path: new URL(request.url).pathname
-    });
-    
-    try {
-      const response = await handleRequest(request, env, logger);
-      logger.info("Request completed", { status: response.status });
-      return response;
-    } catch (err) {
-      logger.error("Request failed", { error: err.message });
-      throw err;
-    }
+    const traceId = extractTraceId(request) || generateTraceId();
+    return runWithLogger({ trace_id: traceId }, () => handleRequest(request, env));
   }
 };
 ```
@@ -330,4 +320,4 @@ export default {
 ---
 
 **实施工程师**: Claude Opus 5.5  
-**测试通过率**: 100% (203/203)
+**测试通过率**: 100% (234/234)

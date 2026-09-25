@@ -1,4 +1,5 @@
 // KV Module —— 网关唯一的持久化 seam。
+import { log } from "../logging/logger.js";
 //
 // Interface（调用方与测试穿越的是同一道 seam）：
 //   kv.get(key, type?) -> value | null  —— miss / 过期 / 远端失败一律回 null，永不抛错
@@ -121,7 +122,7 @@ export function createUpstashKv({ url, token, timeoutMs = DEFAULT_REST_TIMEOUT_M
       }
     } catch (e) {
       remoteOk = false;
-      console.error(`[Upstash KV] GET ${key} failed:`, e?.message || e);
+      log.error("KV GET failed", { key, error: e?.message || String(e) });
     }
     // 远端未命中/失败时读内存兜底（同 isolate 写后即读一致）
     if (val === null || val === undefined) {
@@ -158,7 +159,7 @@ export function createUpstashKv({ url, token, timeoutMs = DEFAULT_REST_TIMEOUT_M
           : ["SET", key, valStr];
         await restCall(command);
       } catch (e) {
-        console.error(`[Upstash KV] PUT ${key} failed:`, e?.message || e);
+        log.error("KV PUT failed", { key, error: e?.message || String(e) });
       }
     },
     async delete(key) {
@@ -166,7 +167,7 @@ export function createUpstashKv({ url, token, timeoutMs = DEFAULT_REST_TIMEOUT_M
       try {
         await restCall(["DEL", key]);
       } catch (e) {
-        console.error(`[Upstash KV] DEL ${key} failed:`, e?.message || e);
+        log.error("KV DEL failed", { key, error: e?.message || String(e) });
       }
     },
   };

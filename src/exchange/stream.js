@@ -2,6 +2,7 @@
 // 流式与非流式共享 extractors，两处不再各自拼装；路由见 ./dispatch.js。
 import { corsHeaders } from "../http/headers.js";
 import { recordUpstreamCache } from "../core/cacheStats.js";
+import { log } from "../logging/logger.js";
 
 // 模块级单例 Encoder / Decoder 与预编码静态 Buffer（零 GC 内存分配）
 const textEncoder = new TextEncoder();
@@ -97,14 +98,17 @@ export function reduceOpenAIChunkAll(parsed) {
   // 正文增量
   if (delta?.content) out.push({ kind: "text", text: delta.content });
   // 工具调用：同一 chunk 内可能携带多个 tool_call
+  // index 必须透出：稀疏分片（每 chunk 只带一个 index）下，合并方需按 index 定址，
+  // 不能按 chunk 内序号 ci 推断，否则并行调用的碎片会交叉污染。
   if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) {
     out.push({
       kind: "tool_use",
-      calls: delta.tool_calls.map(tc => ({
+      calls: delta.tool_calls.map((tc, i) => ({
         id: tc.id || null,
         name: tc.function?.name || "tool",
         args: tc.function?.arguments || "",
-        ident: !!(tc.id || tc.function?.name)
+        ident: !!(tc.id || tc.function?.name),
+        index: Number.isInteger(tc.index) ? tc.index : null
       })),
       stopReason: "tool_use"
     });
@@ -117,6 +121,254 @@ export function reduceOpenAIChunkAll(parsed) {
 // 主动收尾而不是让客户端挂到平台超时。只看“无字节”时长，持续吐 token 的慢模型不受影响。
 // options.stallMs 供测试注入小值；生产默认 180s（< Vercel 300s 上限，远大于实测最慢模型的 118s）。
 const UPSTREAM_STALL_MS = 180 * 1000;
+
+// ---------------------------------------------------------------------------
+// tool_call 分片 → 累积器（非流式落袋的唯一合并点，按 index 定址）
+// ---------------------------------------------------------------------------
+
+/**
+ * 非流式落袋的 tool_call 分片合并（按 index 定址，缺 id 用占位槽位）。
+ *
+ * OpenAI 把一次工具调用拆成多个 chunk 增量下发：首个增量通常带 id/name，后续只带
+ * arguments 片段。但**部分兼容上游的首片也不带 id**（reduceOpenAIChunkAll 已将
+ * `id: tc.id || null` 显式建模），此时必须先建占位槽位，待 id 到达后把占位键迁移到真实 id ——
+ * 否则同一次调用会占两个槽位，最终产出重复的 tool_use block。
+ *
+ * 定址必须用 `c.index`（上游原始序号），不能用 chunk 内序号 ci：稀疏分片下每 chunk
+ * 只带一个 index（如 index:1 的续片位于 calls[0]），按 ci 查 order[0] 会污染首槽位。
+ * 占位键按 `__idx_${index}` 确定性命名，使跨 chunk 的同 index 碎片总能直达同一槽位。
+ *
+ * 迁移的实现要点：占位态必须显式记录（`slot.ident === false`），不能靠键名推断 ——
+ * 续片到达时 key 取 c.id，而占位槽位键是 `__idx_N`，两者不等，按 id 查必然落空。
+ * 故此处先按 index 定位占位槽位再迁移，而非先按 id 查。
+ *
+ * @param {Map} frags - tool id（或占位键）-> { key, id, name, args, ident }
+ * @param {Array} calls - 本 chunk 的 emission.calls（每项含 index）
+ */
+export function mergeSseToolFrags(frags, calls) {
+  if (!Array.isArray(calls)) return frags;
+  for (let ci = 0; ci < calls.length; ci++) {
+    const c = calls[ci];
+    if (!c) continue;
+    const pos = Number.isInteger(c.index) ? c.index : ci;
+    const placeholderKey = `__idx_${pos}`;
+    // 无 index 的不规范上游按到达序回落：取实时插入序（非快照，避免同循环内污染）。
+    // 有显式 index 时只认确定性占位键，不回落插入序（否则乱序到达会污染他槽）。
+    const live = Number.isInteger(c.index) ? undefined : Array.from(frags.values());
+
+    if (c.id) {
+      // 有 id：优先按 id 命中；未命中时尝试接管同 index 的占位槽位（首片无 id 的场景）。
+      let slot = frags.get(c.id);
+      let fromKey = c.id;
+      if (!slot) {
+        const cand = frags.get(placeholderKey) ?? live?.[pos];
+        if (cand && !cand.ident) {
+          slot = cand;
+          fromKey = cand.key;
+        }
+      }
+      if (slot) {
+        if (typeof c.args === "string") slot.args += c.args;
+        if (c.name && c.name !== "tool") slot.name = c.name;
+        if (!slot.ident) {
+          // 占位槽位首次拿到真实 id：迁移键，使后续分片能按 id 直达。
+          frags.delete(fromKey);
+          slot.id = c.id;
+          slot.ident = true;
+          slot.key = c.id;
+          frags.set(c.id, slot);
+        }
+      } else {
+        frags.set(c.id, { key: c.id, id: c.id, name: c.name, args: typeof c.args === "string" ? c.args : "", ident: true });
+      }
+    } else {
+      // 无 id 的分片：按 index 定址回填；无 index 的不规范续片按实时插入序回落到同位槽位。
+      const cand = frags.get(placeholderKey) ?? live?.[pos];
+      if (cand) {
+        if (typeof c.args === "string") cand.args += c.args;
+        if (c.name && c.name !== "tool") cand.name = c.name;
+      } else {
+        frags.set(placeholderKey, { key: placeholderKey, id: placeholderKey, name: c.name, args: typeof c.args === "string" ? c.args : "", ident: false });
+      }
+    }
+  }
+  return frags;
+}
+
+/**
+ * 流式 content block 状态机 —— 封装 Anthropic「同一时刻至多一个开放 block」的约束。
+ *
+ * 抽出的理由：SSE 读循环内原本用 6 个散落的可变变量（blockIndex/blockType/toolId/toolName/
+ * emittedChars/stopReason）维护状态，导致读循环圈复杂度达 64。把状态与其转移规则收进此处后，
+ * 读循环只表达「解码 → 分派」，不再承担状态转移的分支判断。
+ *
+ * 所有 `*Frame()` 方法返回**待写出的 SSE 帧字符串数组**（可能为空），不发 IO ——
+ * 调用方负责 `await writer.write()`，从而本类可脱离流做纯单测。
+ */
+export class StreamBlockState {
+  constructor() {
+    this.blockIndex = -1;
+    this.blockType = null;   // null | "thinking" | "text" | "tool_use"
+    this.toolId = null;
+    this.toolName = null;
+    this.emittedChars = 0;
+    this.stopReason = "end_turn";
+  }
+
+  #frame(event, payload) {
+    return `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+  }
+
+  #stopFrame() {
+    if (this.blockType === null || this.blockIndex < 0) return [];
+    const f = this.#frame("content_block_stop", { type: "content_block_stop", index: this.blockIndex });
+    this.blockType = null;
+    return [f];
+  }
+
+  /**
+   * 打开指定类型的新 block（若已有开放 block 则先关闭）。
+   * @returns {string[]} 关闭帧 + 开启帧
+   */
+  open(kind, { toolId = null, toolName = null } = {}) {
+    const out = this.#stopFrame();
+    this.blockIndex += 1;
+    this.blockType = kind;
+    if (kind === "tool_use") {
+      this.toolId = toolId;
+      this.toolName = toolName;
+      out.push(this.#frame("content_block_start", {
+        type: "content_block_start",
+        index: this.blockIndex,
+        content_block: { type: "tool_use", id: toolId, name: toolName, input: {} }
+      }));
+    } else {
+      const contentBlock = kind === "thinking" ? { type: "thinking", thinking: "" } : { type: "text", text: "" };
+      out.push(this.#frame("content_block_start", {
+        type: "content_block_start",
+        index: this.blockIndex,
+        content_block: contentBlock
+      }));
+    }
+    return out;
+  }
+
+  /** thinking 增量帧；计入 emittedChars，与非流式 output_tokens 口径一致（含 thinking）。 */
+  thinkingDelta(text) {
+    if (this.blockType !== "thinking") return [];
+    this.emittedChars += text.length;
+    return [this.#frame("content_block_delta", {
+      type: "content_block_delta", index: this.blockIndex,
+      delta: { type: "thinking_delta", thinking: text }
+    })];
+  }
+
+  /** 正文增量帧；自动累计 emittedChars（供字符数/4 回退估算）。 */
+  textDelta(text) {
+    if (this.blockType !== "text") return [];
+    this.emittedChars += text.length;
+    return [this.#frame("content_block_delta", {
+      type: "content_block_delta", index: this.blockIndex,
+      delta: { type: "text_delta", text }
+    })];
+  }
+
+  /** 工具入参增量帧（partial_json）。 */
+  inputJsonDelta(partialJson) {
+    if (this.blockType !== "tool_use") return [];
+    return [this.#frame("content_block_delta", {
+      type: "content_block_delta", index: this.blockIndex,
+      delta: { type: "input_json_delta", partial_json: partialJson }
+    })];
+  }
+
+  /**
+   * 把一个 emission（reduceOpenAIChunkAll 的产物）转为待写出的 SSE 帧。
+   * 分派逻辑收在这里，使读循环只表达「解码 → 交给状态机 → 写出」，
+   * 不再承担 if/else-if 长链（原本 5 个 kind 分支占读循环复杂度的大头）。
+   *
+   * @param {Object} emission - { kind, text?, calls?, finishReason? }
+   * @returns {string[]} 待写帧
+   */
+  applyEmission(emission) {
+    if (!emission) return [];
+    switch (emission.kind) {
+      case "thinking": {
+        const out = this.blockType !== "thinking" ? this.open("thinking") : [];
+        return [...out, ...this.thinkingDelta(emission.text)];
+      }
+      case "text": {
+        const out = this.blockType !== "text" ? this.open("text") : [];
+        return [...out, ...this.textDelta(emission.text)];
+      }
+      case "tool_use": {
+        this.setStopReason("tool_use");
+        const out = [];
+        for (const tc of emission.calls || []) {
+          const toolId = () => tc.id || ("call_" + Math.random().toString(36).substring(2, 9));
+          if (tc.ident) out.push(...this.open("tool_use", { toolId: toolId(), toolName: tc.name }));
+          if (tc.args) {
+            // 纯 args 碎片先到且无活动 tool_use 块：先开匿名块，避免发出非法 index:-1。
+            if (this.blockIndex < 0 || this.blockType !== "tool_use") {
+              out.push(...this.open("tool_use", { toolId: toolId(), toolName: tc.name || "tool" }));
+            }
+            out.push(...this.inputJsonDelta(tc.args));
+          }
+        }
+        return out;
+      }
+      case "finish":
+        if (finishReasonToAnthropic(emission.finishReason) === "tool_use") this.setStopReason("tool_use");
+        return [];
+      default:
+        return [];
+    }
+  }
+
+  /** 关闭当前 block（无论类型）。 */
+  close() {
+    return this.#stopFrame();
+  }
+
+  /** 记录终局 stop_reason（仅当当前仍是默认 end_turn 时才覆盖，避免被中途 chunk 降级）。 */
+  setStopReason(reason) {
+    if (reason && this.stopReason === "end_turn") this.stopReason = reason;
+  }
+}
+
+/**
+ * 累积的 tool_call 列表 → Anthropic `tool_use` content blocks。
+ * Anthropic 要求 input 是 object，而 OpenAI 的 arguments 是 JSON 字符串，需解析；
+ * 解析失败保留原文（`_raw`）而非丢弃 —— 客户端可归因，比静默丢调用好。
+ * 缺 id 时补 `call_` 随机 id（与 SSE 落袋口径一致），绝不产出 `id:null` 非法块。
+ *
+ * @param {Array} acc - 累积出的列表 [{ id, name, args }]
+ * @returns {Array} Anthropic tool_use blocks（空输入返回空数组）
+ */
+export function toolCallsToAnthropicBlocks(acc) {
+  if (!Array.isArray(acc) || acc.length === 0) return [];
+  const blocks = [];
+  for (const tc of acc) {
+    let toolInput = {};
+    const rawArgs = tc.args;
+    if (rawArgs && typeof rawArgs === "object") {
+      toolInput = rawArgs;
+    } else if (typeof rawArgs === "string" && rawArgs.trim()) {
+      try {
+        toolInput = JSON.parse(rawArgs);
+      } catch (e) {
+        toolInput = { _raw: rawArgs };
+      }
+    }
+    blocks.push({
+      type: "tool_use",
+      id: tc.id || ("call_" + Math.random().toString(36).substring(2, 10)),
+      name: tc.name || "tool",
+      input: toolInput
+    });
+  }
+  return blocks;
+}
 
 export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
   const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
@@ -139,7 +391,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       //（不 abort writer，否则下游收不到 message_stop）。客户端看到空内容而非无限挂起。
       if (!stalled && Date.now() - lastUpstreamByteAt > stallMs) {
         stalled = true;
-        console.warn(`[Stream Stall] No upstream bytes for ${stallMs}ms, closing stream for model "${requestedModel}"`);
+        log.warn("Upstream stalled, closing stream", { stall_ms: stallMs, model: requestedModel });
         clearInterval(pingInterval);
         try { upstreamReader?.cancel(new Error("Upstream stalled")); } catch (e) {}
         return;
@@ -196,11 +448,12 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     const streamDecoder = new TextDecoder();
     let buffer = "";
 
-    let currentBlockIndex = -1;
-    let currentBlockType = null;
-    let currentToolId = null;
-    let currentToolName = null;
-    let finalStopReason = "end_turn";
+    // block 状态机：取代此前散落的 currentBlockIndex/Type/ToolId/ToolName 四个可变变量。
+    const blockState = new StreamBlockState();
+    // 批量写出状态机产出的 SSE 帧（状态机本身不发 IO，便于纯单测）。
+    const writeAll = async (frames) => {
+      for (const f of frames) await writer.write(textEncoder.encode(f));
+    };
     // 本次响应见到的最大缓存命中 token 数（上游 usage 逐 chunk 到达，取最大记一次）
     let maxCachedTokens = 0;
     // 真实输出 token 数：优先采信上游 usage.completion_tokens（终局 chunk 常带），
@@ -209,17 +462,6 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     // 真实输入 token 数：优先采信上游 usage.prompt_tokens（透传/翻译路径均可能携带），
     // 上游从不报 usage 时保持 0 —— Anthropic 线协议不允许凭空估算输入长度。
     let reportedInputTokens = 0;
-    let emittedChars = 0;
-
-    const closeCurrentBlock = async () => {
-      if (currentBlockType !== null && currentBlockIndex >= 0) {
-        await writer.write(textEncoder.encode(`event: content_block_stop\ndata: ${JSON.stringify({
-          type: "content_block_stop",
-          index: currentBlockIndex
-        })}\n\n`));
-        currentBlockType = null;
-      }
-    };
 
     try {
       let badLineWarns = 0;
@@ -255,129 +497,27 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             const errorEmission = emissions.find(e => e.kind === "error");
             if (errorEmission) {
               const errMsg = errorEmission.message;
-              console.warn(`[Stream Upstream Error] ${errMsg}`);
-              if (currentBlockType !== "text") {
-                await closeCurrentBlock();
-                currentBlockIndex = Math.max(0, currentBlockIndex + 1);
-                currentBlockType = "text";
-                await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-                  type: "content_block_start",
-                  index: currentBlockIndex,
-                  content_block: { type: "text", text: "" }
-                })}\n\n`));
-              }
-              // notice 文本同样计入 emittedChars，与正文增量同口径，避免 output_tokens 偏小
-              const noticeText = `\n[Upstream Notice: ${errMsg}]\n`;
-              emittedChars += noticeText.length;
-              await writer.write(textEncoder.encode(
-                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(noticeText)}}}\n\n`
-              ));
+              log.warn("Upstream stream error", { error: errMsg });
+              if (blockState.blockType !== "text") await writeAll(blockState.open("text"));
+              // notice 文本同样计入 emittedChars（textDelta 内部累计），与正文同口径，避免 output_tokens 偏小
+              await writeAll(blockState.textDelta(`\n[Upstream Notice: ${errMsg}]\n`));
               continue;
             }
 
-            const delta = parsed.choices?.[0]?.delta;
-            if (!delta) continue;
-
             for (const emission of emissions) {
-            // 思维链
-            if (emission.kind === "thinking") {
-              const reasoningChunk = emission.text;
-              emittedChars += reasoningChunk.length;
-              if (currentBlockType !== "thinking") {
-                await closeCurrentBlock();
-                currentBlockIndex++;
-                currentBlockType = "thinking";
-                await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-                  type: "content_block_start",
-                  index: currentBlockIndex,
-                  content_block: { type: "thinking", thinking: "" }
-                })}\n\n`));
-              }
-              await writer.write(textEncoder.encode(
-                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"thinking_delta","thinking":${JSON.stringify(reasoningChunk)}}}\n\n`
-              ));
-            }
-
-            // 正文内容
-            else if (emission.kind === "text") {
-              const textChunk = emission.text;
-              emittedChars += textChunk.length;
-              if (currentBlockType !== "text") {
-                await closeCurrentBlock();
-                currentBlockIndex++;
-                currentBlockType = "text";
-                await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-                  type: "content_block_start",
-                  index: currentBlockIndex,
-                  content_block: { type: "text", text: "" }
-                })}\n\n`));
-              }
-              await writer.write(textEncoder.encode(
-                `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(textChunk)}}}\n\n`
-              ));
-            }
-
-            // 工具调用
-            else if (emission.kind === "tool_use") {
-              finalStopReason = "tool_use";
-              for (const tc of emission.calls) {
-                if (tc.ident) {
-                  await closeCurrentBlock();
-                  currentBlockIndex++;
-                  currentBlockType = "tool_use";
-                  currentToolId = tc.id || ("call_" + Math.random().toString(36).substring(2, 9));
-                  currentToolName = tc.name;
-                  await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-                    type: "content_block_start",
-                    index: currentBlockIndex,
-                    content_block: {
-                      type: "tool_use",
-                      id: currentToolId,
-                      name: currentToolName,
-                      input: {}
-                    }
-                  })}\n\n`));
-                }
-                if (tc.args) {
-                  // 纯 args 碎片先到且无活动 tool_use 块：先开一个匿名块，
-                  // 避免发出非法 index:-1。
-                  if (currentBlockIndex < 0 || currentBlockType !== "tool_use") {
-                    await closeCurrentBlock();
-                    currentBlockIndex = Math.max(0, currentBlockIndex + 1);
-                    currentBlockType = "tool_use";
-                    currentToolId = tc.id || ("call_" + Math.random().toString(36).substring(2, 9));
-                    currentToolName = tc.name || "tool";
-                    await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-                      type: "content_block_start",
-                      index: currentBlockIndex,
-                      content_block: {
-                        type: "tool_use",
-                        id: currentToolId,
-                        name: currentToolName,
-                        input: {}
-                      }
-                    })}\n\n`));
-                  }
-                  await writer.write(textEncoder.encode(
-                    `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"input_json_delta","partial_json":${JSON.stringify(tc.args)}}}\n\n`
-                  ));
-                }
-              }
-            }
-
-            else if (emission.kind === "finish" && finishReasonToAnthropic(emission.finishReason) === "tool_use") {
-              finalStopReason = "tool_use";
-            }
+            // 分派收进状态机：读循环只表达「解码 → 分派 → 写出」，不再承载 kind 长链。
+            // 无 delta 的纯 finish 终局块同样经此处设置 stop_reason，不得用 delta 守卫跳过。
+            await writeAll(blockState.applyEmission(emission));
             }
           } catch (e) {
-            if (badLineWarns++ < 3) console.warn("[Stream] Skipping malformed SSE line:", String(jsonStr).slice(0, 120));
+            if (badLineWarns++ < 3) log.warn("Skipping malformed SSE line", { line: String(jsonStr).slice(0, 120) });
           }
         }
         buffer = pos > 0 ? buffer.slice(pos) : buffer;
       }
 
       // 若流结束时 buffer 尚存非 SSE 格式内容（如上游返回单一 JSON）
-      if (currentBlockIndex === -1 && buffer.trim()) {
+      if (blockState.blockIndex === -1 && buffer.trim()) {
         try {
           const parsed = JSON.parse(buffer.trim());
           const text = parsed.choices?.[0]?.message?.content ||
@@ -386,71 +526,47 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
                        parsed.msg ||
                        (parsed.code ? `Upstream error ${parsed.code}` : buffer.trim());
           if (text) {
-            emittedChars += text.length;
-            currentBlockIndex = 0;
-            currentBlockType = "text";
-            await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-              type: "content_block_start",
-              index: 0,
-              content_block: { type: "text", text: "" }
-            })}\n\n`));
-            await writer.write(textEncoder.encode(
-              `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(text)}}}\n\n`
-            ));
+            await writeAll(blockState.open("text"));
+            await writeAll(blockState.textDelta(text));
           }
         } catch (e) {}
       }
 
       // 核心协议保障：若整个流未产生任何 content_block，强制合成 1 个空 text 块闭环，绝不让 Claude Code 触发 ph.length === 0 的流式回退报警
       // 停滞熔断触发时带一句明示，避免客户端把“上游卡死”误读成“模型回了空答案”。
-      if (currentBlockIndex === -1) {
-        currentBlockIndex = 0;
-        await writer.write(textEncoder.encode(`event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`));
+      if (blockState.blockIndex === -1) {
+        await writeAll(blockState.open("text"));
         if (stalled) {
-          const stallText = `\n[Gateway Warning: Upstream stalled, no data for ${Math.round(stallMs / 1000)}s]\n`;
-          emittedChars += stallText.length;
-          await writer.write(textEncoder.encode(
-            `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":${JSON.stringify(stallText)}}}\n\n`
-          ));
+          await writeAll(blockState.textDelta(`\n[Gateway Warning: Upstream stalled, no data for ${Math.round(stallMs / 1000)}s]\n`));
         }
-        await writer.write(textEncoder.encode(`event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n`));
+        await writeAll(blockState.close());
       } else {
-        await closeCurrentBlock();
+        await writeAll(blockState.close());
       }
 
       // message_delta.usage.output_tokens 是 Anthropic 线协议字段，客户端会读；
       // 取上游 usage 与字符估算的较大值（与非流式 formatOpenAIToAnthropicJson 口径一致）。
       // input_tokens 采信上游 usage.prompt_tokens：缺失时为 0（不估算输入长度）。
-      const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(emittedChars / 4));
+      const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
-        delta: { stop_reason: finalStopReason, stop_sequence: null },
+        delta: { stop_reason: blockState.stopReason, stop_sequence: null },
         usage: { input_tokens: reportedInputTokens, output_tokens: finalOutputTokens }
       })}\n\n`));
 
       await writer.write(EVENT_MSG_STOP_BYTES);
     } catch (err) {
-      console.error("[Stream Error]", err);
+      log.error("Stream error", { error: err?.message || String(err) });
       // 容灾输出：即使网络或上游异常断流，也输出结构化友好提示并优雅闭环，不直接 crash 客户端
       try {
-        if (currentBlockType !== "text") {
-          await closeCurrentBlock();
-          currentBlockIndex = Math.max(0, currentBlockIndex + 1);
-          currentBlockType = "text";
-          await writer.write(textEncoder.encode(`event: content_block_start\ndata: ${JSON.stringify({
-            type: "content_block_start",
-            index: currentBlockIndex,
-            content_block: { type: "text", text: "" }
-          })}\n\n`));
+        if (blockState.blockType !== "text") {
+          await writeAll(blockState.open("text"));
         }
         const interruptText = `\n[Gateway Warning: Upstream stream interrupted (${err.message || "EOF"})]\n`;
-        emittedChars += interruptText.length;
-        await writer.write(textEncoder.encode(
-          `event: content_block_delta\ndata: {"type":"content_block_delta","index":${currentBlockIndex},"delta":{"type":"text_delta","text":${JSON.stringify(interruptText)}}}\n\n`
-        ));
-        await closeCurrentBlock();
+        await writeAll(blockState.textDelta(interruptText));
+        await writeAll(blockState.close());
         // 错误路径同样发射真实计数（含警告文本），与正常闭环保持一致，避免硬编码漂移。
-        const errOutputTokens = Math.max(reportedOutputTokens, Math.ceil(emittedChars / 4));
+        const errOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
         await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
           type: "message_delta",
           delta: { stop_reason: "end_turn", stop_sequence: null },
@@ -519,23 +635,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
             } else if (emission.kind === "tool_use") {
               // 按 index 定址合并：续片通常只带 index+arguments、无 id。
               // emission.calls 与 delta.tool_calls 同序，chunk 内序号即 index。
-              const frags = Array.from(sseToolFrags.values());
-              for (let ci = 0; ci < emission.calls.length; ci++) {
-                const c = emission.calls[ci];
-                const key = c.id || frags[ci]?.id || `__idx_${sseToolFrags.size}`;
-                const prev = sseToolFrags.get(key);
-                if (prev) {
-                  if (typeof c.args === "string") prev.args += c.args;
-                  if (c.name && c.name !== "tool") prev.name = c.name;
-                  if (c.id && !prev.id.startsWith("__idx_")) prev.id = c.id;
-                  else if (c.id) { prev.id = c.id; sseToolFrags.delete(key); sseToolFrags.set(c.id, prev); }
-                } else {
-                  sseToolFrags.set(key, {
-                    id: c.id || key, name: c.name,
-                    args: typeof c.args === "string" ? c.args : ""
-                  });
-                }
-              }
+              mergeSseToolFrags(sseToolFrags, emission.calls);
             } else if (emission.kind === "finish") {
               accumulatedFinishReason = emission.finishReason;
             }
@@ -546,7 +646,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
           const cached = extractCachedTokens(parsed);
           if (cached > maxCachedTokens) maxCachedTokens = cached;
         } catch (e) {
-          if (badLineWarns++ < 3) console.warn("[Stream] Skipping malformed SSE line (non-streaming):", String(jsonStr).slice(0, 120));
+          if (badLineWarns++ < 3) log.warn("Skipping malformed SSE line (non-streaming)", { line: String(jsonStr).slice(0, 120) });
         }
       }
       buffer = pos > 0 ? buffer.slice(pos) : buffer;
@@ -594,8 +694,9 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   }
 
   // SSE 分片 tools 落袋：拼接后的 args 与单包形态走同一解析路径
+  // 占位态（ident=false，上游始终没给 id）才需要补生成 id；已迁移到真实 id 的直接用。
   for (const t of sseToolFrags.values()) {
-    const id = (t.id && !String(t.id).startsWith("__idx_")) ? t.id : ("call_" + Math.random().toString(36).substring(2, 10));
+    const id = t.ident && t.id ? t.id : ("call_" + Math.random().toString(36).substring(2, 10));
     accumulatedToolCalls.push({ id, name: t.name, args: t.args });
   }
 
@@ -609,26 +710,9 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
 
   // 工具调用：映射 OpenAI tool_calls 到 Anthropic tool_use content blocks
   // Anthropic tool_use.input 必须是 object；OpenAI arguments 是 JSON 字符串，需解析
+  // accumulatedToolCalls 到 Anthropic tool_use content blocks
   if (Array.isArray(accumulatedToolCalls) && accumulatedToolCalls.length > 0) {
-    for (const tc of accumulatedToolCalls) {
-      let toolInput = {};
-      const rawArgs = tc.args;
-      if (rawArgs && typeof rawArgs === "object") {
-        toolInput = rawArgs;
-      } else if (typeof rawArgs === "string" && rawArgs.trim()) {
-        try {
-          toolInput = JSON.parse(rawArgs);
-        } catch (e) {
-          toolInput = { _raw: rawArgs };
-        }
-      }
-      content.push({
-        type: "tool_use",
-        id: tc.id,
-        name: tc.name || "tool",
-        input: toolInput
-      });
-    }
+    content.push(...toolCallsToAnthropicBlocks(accumulatedToolCalls));
   }
 
   content.push({ type: "text", text: accumulated });

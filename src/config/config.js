@@ -1,4 +1,5 @@
 export const VERSION = "2.5.0";
+import { log } from "../logging/logger.js";
 
 let cachedConfig = null;
 let cachedConfigTimestamp = 0;
@@ -44,7 +45,7 @@ export function getDefaultConfig(env) {
     masterKey = requireSecret(env, "MASTER_KEY");
   } else {
     masterKey = "unset-master-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    console.warn("[Config] MASTER_KEY is not set; generated an ephemeral value. Set MASTER_KEY to enable admin/cron endpoints.");
+    log.warn("MASTER_KEY is not set; generated an ephemeral value. Set MASTER_KEY to enable admin/cron endpoints");
   }
   // 国际站凭证同样走 secrets（与 CN 的 USER_ID 三件套同模式）；缺失即保持 disabled
   const readEnv = (name) => env?.[name] || (typeof process !== "undefined" ? process.env?.[name] : undefined);
@@ -131,7 +132,7 @@ export function backfillMissingRoutes(stored, defaults) {
   }
   // 路由回填完成（生产环境已移除日志，避免启动噪音）
   if (added > 0 && process.env.DEBUG === "true") {
-    console.log(`[Config] Backfilled ${added} missing route(s) from code defaults`);
+    log.info("Backfilled missing routes from code defaults", { added });
   }
   return stored;
 }
@@ -174,7 +175,7 @@ async function refreshConfig(env) {
         try {
           backfillMissingRoutes(parsed, defaults);
         } catch (e) {
-          console.warn("[Config] backfillMissingRoutes failed:", e?.message || e);
+          log.warn("backfillMissingRoutes failed", { error: e?.message || String(e) });
         }
         // 环境变量兜底：master_key、cron_secret 与默认 API_KEY 永不因 KV 缺失或脱敏而失效
         if (!parsed.master_key) parsed.master_key = defaults.master_key;
@@ -194,13 +195,13 @@ async function refreshConfig(env) {
       // 读抛错（而非显式返回 ok=false）也必须视为“读失败”，否则 readOk 仍为 true，
       // 会落到下方初始配置写入分支，用默认模板 clobber 远端真实存量配置。
       readOk = false;
-      console.error("Failed to read GATEWAY_CONFIG from KV:", e);
+      log.error("Failed to read GATEWAY_CONFIG from KV", { error: e?.message || String(e) });
     }
 
     // 读失败（显式 ok=false，或上面 catch 里的抛错）：绝不能当作“无配置”，
     // 否则会用默认模板覆盖远端真实存量配置（写放大即数据丢失）。此处只读不写。
     if (!readOk) {
-      console.error("[Config] GATEWAY_CONFIG remote read failed; refusing to regenerate/write initial config");
+      log.error("GATEWAY_CONFIG remote read failed; refusing to regenerate/write initial config");
       // 有真实缓存则优先复用（陈旧但真实 > 默认值覆盖远端）；否则退默认但绝不写 KV。
       const fallback = cachedConfig || getDefaultConfig(env);
       // 失败回退用短 TTL（10s），成功才用 60s：KV 抖动恢复后快速自愈，
@@ -223,7 +224,7 @@ async function refreshConfig(env) {
           const recheck = await kv.get("GATEWAY_CONFIG");
           stillEmpty = (recheck === null || recheck === undefined);
         } catch (e) {
-          console.warn("[Config] Pre-write recheck failed; skipping initial write to avoid clobbering");
+          log.warn("Pre-write recheck failed; skipping initial write to avoid clobbering");
           stillEmpty = false;
         }
       }
@@ -231,7 +232,7 @@ async function refreshConfig(env) {
         await kv.put("GATEWAY_CONFIG", JSON.stringify(initialConfig, null, 2));
       }
     } catch (e) {
-      console.warn("[Config] Failed to write initial GATEWAY_CONFIG:", e?.message || e);
+      log.warn("Failed to write initial GATEWAY_CONFIG", { error: e?.message || String(e) });
     }
   }
 

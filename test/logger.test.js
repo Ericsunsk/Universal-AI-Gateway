@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateTraceId, extractTraceId, createLogger, sanitize, LogLevel } from "../src/logging/logger.js";
+import { generateTraceId, extractTraceId, createLogger, sanitize, LogLevel, setLogSink, runWithLogger, log } from "../src/logging/logger.js";
 
 test("generateTraceId returns 32-char hex string", () => {
   const id = generateTraceId();
@@ -11,7 +11,7 @@ test("generateTraceId returns 32-char hex string", () => {
   assert.notEqual(id, id2, "should generate unique IDs");
 });
 
-test("extractTraceId prioritizes headers over generation", () => {
+test("extractTraceId prioritizes headers, returns null when absent", () => {
   const req1 = new Request("https://x/y", {
     headers: { "x-trace-id": "custom-trace-123" }
   });
@@ -23,16 +23,14 @@ test("extractTraceId prioritizes headers over generation", () => {
   assert.equal(extractTraceId(req2), "req-456");
 
   const req3 = new Request("https://x/y");
-  const id3 = extractTraceId(req3);
-  assert.equal(id3.length, 32, "should generate new ID when no header");
+  assert.equal(extractTraceId(req3), null, "absent headers return null; caller generates");
 });
 
 test("createLogger outputs structured logs", () => {
   const logs = [];
-  const origLog = console.log;
   const origFormat = process.env.LOG_FORMAT;
   const origNodeEnv = process.env.NODE_ENV;
-  console.log = (msg) => logs.push(msg);
+  setLogSink((line) => logs.push(line));
   process.env.LOG_FORMAT = "json"; // 强制 JSON 输出
   process.env.NODE_ENV = "production";
 
@@ -48,7 +46,7 @@ test("createLogger outputs structured logs", () => {
     assert.equal(entry.user, "alice");
     assert.ok(entry.timestamp);
   } finally {
-    console.log = origLog;
+    setLogSink(null);
     if (origFormat !== undefined) process.env.LOG_FORMAT = origFormat;
     else delete process.env.LOG_FORMAT;
     if (origNodeEnv !== undefined) process.env.NODE_ENV = origNodeEnv;
@@ -58,11 +56,10 @@ test("createLogger outputs structured logs", () => {
 
 test("createLogger respects LOG_LEVEL", () => {
   const logs = [];
-  const origLog = console.log;
   const origEnv = process.env.LOG_LEVEL;
   const origFormat = process.env.LOG_FORMAT;
   const origNodeEnv = process.env.NODE_ENV;
-  console.log = (msg) => logs.push(msg);
+  setLogSink((line) => logs.push(line));
   process.env.LOG_LEVEL = "WARN";
   process.env.LOG_FORMAT = "json";
   process.env.NODE_ENV = "production";
@@ -80,7 +77,7 @@ test("createLogger respects LOG_LEVEL", () => {
     assert.equal(warn.message, "warn msg");
     assert.equal(err.message, "error msg");
   } finally {
-    console.log = origLog;
+    setLogSink(null);
     if (origEnv !== undefined) process.env.LOG_LEVEL = origEnv;
     else delete process.env.LOG_LEVEL;
     if (origFormat !== undefined) process.env.LOG_FORMAT = origFormat;
@@ -92,10 +89,9 @@ test("createLogger respects LOG_LEVEL", () => {
 
 test("createLogger.child inherits parent context", () => {
   const logs = [];
-  const origLog = console.log;
   const origFormat = process.env.LOG_FORMAT;
   const origNodeEnv = process.env.NODE_ENV;
-  console.log = (msg) => logs.push(msg);
+  setLogSink((line) => logs.push(line));
   process.env.LOG_FORMAT = "json";
   process.env.NODE_ENV = "production";
 
@@ -108,7 +104,7 @@ test("createLogger.child inherits parent context", () => {
     assert.equal(entry.trace_id, "parent");
     assert.equal(entry.request_id, "child");
   } finally {
-    console.log = origLog;
+    setLogSink(null);
     if (origFormat !== undefined) process.env.LOG_FORMAT = origFormat;
     else delete process.env.LOG_FORMAT;
     if (origNodeEnv !== undefined) process.env.NODE_ENV = origNodeEnv;
@@ -155,4 +151,71 @@ test("sanitize handles short sensitive strings", () => {
   const input = { password: "ab" };
   const output = sanitize(input);
   assert.equal(output.password, "****");
+});
+
+test("sanitize normalizes snake/kebab keys and exact key", () => {
+  const output = sanitize({ api_key: "sk-1234567890", "x-api-key": "abc", key: "sk-xyz123456", credential: "secret123", monkey: "banana" });
+  assert.ok(!output.api_key.includes("1234567890"));
+  assert.equal(output["x-api-key"], "****");
+  assert.ok(output.key.startsWith("sk-x"));
+  assert.ok(!output.credential.includes("secret123"));
+  assert.equal(output.monkey, "banana", "monkey must not be killed by substring key");
+});
+
+test("runWithLogger propagates trace_id through async depth without threading params", async () => {
+  const logs = [];
+  setLogSink((line) => logs.push(line));
+  try {
+    // 中间层刻意不接收任何 logger 参数，验证 ALS 自动传播
+    const deep = async () => { await new Promise((r) => setTimeout(r, 1)); log.warn("deep", { k: 1 }); };
+    const mid = async () => { await deep(); };
+    await runWithLogger({ trace_id: "TRACE12345678" }, async () => { await mid(); });
+  } finally {
+    setLogSink(null);
+  }
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].includes("TRACE123"), "trace_id must reach deep async frames");
+});
+
+test("log outside any scope falls back to root logger without throwing", () => {
+  const logs = [];
+  setLogSink((line) => logs.push(line));
+  try {
+    assert.doesNotThrow(() => log.info("outside scope", { a: 1 }));
+  } finally {
+    setLogSink(null);
+  }
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].includes("outside scope"));
+});
+
+test("log redacts credentials on the fields path", () => {
+  const logs = [];
+  setLogSink((line) => logs.push(line));
+  try {
+    log.error("boom", { authorization: "Bearer sk-secret123", apiKey: "sk-ant-xyz", ok: 1 });
+  } finally {
+    setLogSink(null);
+  }
+  assert.ok(!logs[0].includes("sk-secret123"), "raw bearer token must not be logged");
+  assert.ok(!logs[0].includes("sk-ant-xyz"), "raw api key must not be logged");
+  assert.ok(logs[0].includes("ok"));
+});
+
+test("log level is resolved at emit time, not construction time", () => {
+  const logs = [];
+  const orig = process.env.DEBUG;
+  setLogSink((line) => logs.push(line));
+  try {
+    // rootLogger 在模块加载时已建立；此处改变 DEBUG 后仍应生效
+    delete process.env.DEBUG;
+    log.debug("should be suppressed");
+    process.env.DEBUG = "true";
+    log.debug("should now appear");
+  } finally {
+    setLogSink(null);
+    if (orig !== undefined) process.env.DEBUG = orig; else delete process.env.DEBUG;
+  }
+  assert.equal(logs.length, 1, "only the post-toggle debug line should emit");
+  assert.ok(logs[0].includes("should now appear"));
 });

@@ -9,7 +9,11 @@ import path from "node:path";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 
 function runScenario(body) {
+  // 子进程的日志走 stderr（setLogSink），stdout 只留测试自身的 JSON：
+  // 否则 config 模块的结构化日志会污染 JSON.parse。
   const script = `
+import { setLogSink } from ${JSON.stringify(path.join(dir, "../src/logging/logger.js"))};
+setLogSink((line) => process.stderr.write(line + "\\n"));
 import { getConfig } from ${JSON.stringify(path.join(dir, "../src/config/config.js"))};
 ${body}
 `;

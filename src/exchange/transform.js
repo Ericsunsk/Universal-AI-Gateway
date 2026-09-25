@@ -4,14 +4,127 @@ import { optimizeToolOutput } from "./sanitizer.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { parseMaxContextTurns } from "../config/config.js";
 
+// tool_result 单块展平为 string 的唯一口径：string / text 块 / 其余 JSON.stringify。
+// toolResultBlockText（整体）与 toolResultSplit（逐块，图片另走）共用，不再各写一份。
+function toolResultChunkText(c) {
+  if (typeof c === "string") return c;
+  if (c && typeof c === "object" && c.text) return c.text;
+  return JSON.stringify(c);
+}
+
 // tool_result 内容展平为 string：string / 文本块数组 / 任意对象统一口径。
 // normalize 孤儿包、Anthropic→OpenAI 映射、prune 三处共用，不再各写一遍。
 export function toolResultBlockText(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    return content.map(c => typeof c === "string" ? c : (c?.text || JSON.stringify(c))).join("\n");
+    return content.map(toolResultChunkText).join("\n");
   }
   return JSON.stringify(content ?? "");
+}
+
+// Anthropic image 块 -> OpenAI image_url part（唯一映射点，别处不再各写一份）：
+//   - source.type "base64" → data URI（media_type 按 Anthropic 规范必填，缺失不猜、直接 400）
+//   - source.type "url"    → 原样透传（由上游去取，本仓库不 fetch，故不套 providers/urlGuard）
+// 非法 source 属客户端错误：抛 400 让 dispatch short-circuit，既不静默丢图也不进故障转移。
+export function imageBlockToImagePart(block) {
+  const fail = (why) => {
+    const err = new Error(`Invalid image block: ${why}`);
+    err.status = 400;
+    throw err;
+  };
+  const src = block?.source;
+  if (!src || typeof src !== "object") fail("image.source must be an object");
+  if (src.type === "base64") {
+    if (typeof src.media_type !== "string" || !src.media_type) fail("image.source.media_type must be a string");
+    if (typeof src.data !== "string" || !src.data) fail("image.source.data must be a base64 string");
+    return { type: "image_url", image_url: { url: `data:${src.media_type};base64,${src.data}` } };
+  }
+  if (src.type === "url") {
+    if (typeof src.url !== "string" || !src.url) fail("image.source.url must be a string");
+    return { type: "image_url", image_url: { url: src.url } };
+  }
+  fail(`image.source.type must be "base64" or "url" (got ${JSON.stringify(src.type ?? null)})`);
+}
+
+// tool_result 内容拆成「文本」+「图片 parts」：OpenAI 的 tool 消息 content 只能是文本，
+// 若按 toolResultBlockText 整体序列化，工具返回的截图（Claude Code Read 图片正是这条路径）
+// 会把几 MB base64 当成 JSON 灌进 token。图片由此抽出，由调用方作为紧随的 user 消息发出。
+// 文本口径复用 toolResultChunkText，与 toolResultBlockText 逐块一致。
+export function toolResultSplit(content) {
+  if (typeof content === "string") return { text: content, images: [] };
+  if (Array.isArray(content)) {
+    const texts = [];
+    const images = [];
+    for (const c of content) {
+      if (c && typeof c === "object" && c.type === "image") {
+        images.push(imageBlockToImagePart(c));
+      } else {
+        texts.push(toolResultChunkText(c));
+      }
+    }
+    return { text: texts.join("\n"), images };
+  }
+  return { text: JSON.stringify(content ?? ""), images: [] };
+}
+
+// 含图片的普通消息：按原序编排为 OpenAI 多模态 parts（text + image_url）。
+// tool_use / tool_result 不进 parts（各自分支已发为独立消息）；图片用已映射的 imageParts
+// 按出现顺序取用，保证文本与图片的相对顺序与 Anthropic 请求体一致。
+function buildOpenAIContentParts(content, imageParts) {
+  const parts = [];
+  let imgIdx = 0;
+  for (const b of content) {
+    if (!b) continue;
+    if (b.type === "image") {
+      const part = imageParts[imgIdx++];
+      if (part) parts.push(part);
+    } else if (b.type !== "tool_use" && b.type !== "tool_result") {
+      parts.push({ type: "text", text: typeof b.text === "string" ? b.text : "" });
+    }
+  }
+  return parts;
+}
+
+// assistant 消息携带 image 块属于协议外输入（Anthropic 只允许 user 发图）。
+// OpenAI 方言的 assistant 消息也放不下图片 part —— 若默默丢弃，客户端会以为图已送达。
+// 与「本仓库不静默丢图」的原则一致：这里显式 400 让客户端可归因。
+function assertNoAssistantImages(role, content) {
+  if (role !== "assistant" || !Array.isArray(content)) return;
+  if (!content.some(b => b && b.type === "image")) return;
+  const err = new Error("image blocks are not allowed in assistant messages");
+  err.status = 400;
+  throw err;
+}
+
+// tool_result 块组 → OpenAI tool 消息，返回其中抽出的图片 parts。
+// tool 消息 content 只能是文本，图片放不进去（整体序列化会把 base64 灌进 token），
+// 因此这里只发文本，图片交调用方由 pushTrailingImageMessage 补发。
+// tool_use_id 缺失在这里统一 400（原本两个分支各校验一次）。
+function pushToolResultMessages(openaiMessages, toolResultBlocks) {
+  const images = [];
+  for (const rb of toolResultBlocks) {
+    if (!rb.tool_use_id) {
+      const err = new Error("tool_result block is missing tool_use_id");
+      err.status = 400;
+      throw err;
+    }
+    const split = toolResultSplit(rb.content);
+    for (const p of split.images) images.push(p);
+    openaiMessages.push({
+      role: "tool",
+      tool_call_id: rb.tool_use_id,
+      content: split.text
+    });
+  }
+  return images;
+}
+
+// 图片统一以紧随其后的 user 多模态消息补发：OpenAI 要求 tool 消息紧跟 assistant tool_calls，
+// 图片插在中间会打断工具调用序列（上游 11148）；tool 消息自身又装不下图片。
+function pushTrailingImageMessage(openaiMessages, imageParts, toolImages) {
+  const images = toolImages.length > 0 ? [...imageParts, ...toolImages] : imageParts;
+  if (images.length === 0) return;
+  openaiMessages.push({ role: "user", content: images });
 }
 
 // /compact 总结请求的意图标记：Anthropic 形（body.system + 末条文本）与 OpenAI 形
@@ -113,6 +226,26 @@ function pruneMessageContents(messages, isCompact) {
     const newContent = msg.content.map(part => {
       if (!part || typeof part !== "object") return part;
       if (part.type === "tool_result") {
+        // 含图片块的 tool_result 绝不整体序列化：base64 会被当文本清洗/折叠，图片永久降级成 JSON 垃圾。
+        // 改为逐块处理——文本块照常 optimize，图片块原样保留（真正的映射在 transformAnthropicToOpenAI）。
+        if (Array.isArray(part.content) && part.content.some(c => c && typeof c === "object" && c.type === "image")) {
+          let innerModified = false;
+          const inner = part.content.map(c => {
+            if (typeof c === "string") {
+              const optimized = optimizeToolOutput(c, turnAge, isCompact);
+              if (optimized !== c) { innerModified = true; return optimized; }
+              return c;
+            }
+            if (c && typeof c === "object" && c.type !== "image" && typeof c.text === "string") {
+              const optimized = optimizeToolOutput(c.text, turnAge, isCompact);
+              if (optimized !== c.text) { innerModified = true; return { ...c, text: optimized }; }
+              return c;
+            }
+            return c; // image 块与未知块原样保留
+          });
+          if (innerModified) modified = true;
+          return innerModified ? { ...part, content: inner } : part;
+        }
         const text = toolResultBlockText(part.content);
         const optimized = optimizeToolOutput(text, turnAge, isCompact);
         if (optimized !== text) {
@@ -253,6 +386,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   for (let mIdx = 0; mIdx < messages.length; mIdx++) {
     const msg = messages[mIdx];
     if (!msg) continue;
+    assertNoAssistantImages(msg.role, msg.content);
 
     if (typeof msg.content === "string") {
       openaiMessages.push({
@@ -263,25 +397,16 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
       const toolUseBlocks = [];
       const toolResultBlocks = [];
       const textBlocks = [];
-      let imageBlocks = 0;
+      // 本消息内抽出的图片（含 tool_result 内嵌图片），保持出现顺序
+      const imageParts = [];
 
       for (let i = 0; i < msg.content.length; i++) {
         const b = msg.content[i];
         if (!b) continue;
         if (b.type === "tool_use") toolUseBlocks.push(b);
         else if (b.type === "tool_result") toolResultBlocks.push(b);
-        else if (b.type === "image") { imageBlocks++; }
+        else if (b.type === "image") imageParts.push(imageBlockToImagePart(b));
         else textBlocks.push(b);
-      }
-
-      // 显式拒绝图片块：上游不支持图片时返回 400，而不是静默丢弃
-      if (imageBlocks > 0) {
-        const err = new Error(
-          `Image content blocks are not supported by the target upstream provider. ` +
-          `Please use a model/provider that supports multimodal input.`
-        );
-        err.status = 400;
-        throw err;
       }
 
       if (msg.role === "assistant" && toolUseBlocks.length > 0) {
@@ -306,18 +431,8 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
           tool_calls: toolCalls
         });
         // 同消息的 tool_result companion 不丢弃：以 tool 身份紧随其后发出。
-        for (const rb of toolResultBlocks) {
-          if (!rb.tool_use_id) {
-            const err = new Error("tool_result block is missing tool_use_id");
-            err.status = 400;
-            throw err;
-          }
-          openaiMessages.push({
-            role: "tool",
-            tool_call_id: rb.tool_use_id,
-            content: toolResultBlockText(rb.content)
-          });
-        }
+        const toolImages = pushToolResultMessages(openaiMessages, toolResultBlocks);
+        pushTrailingImageMessage(openaiMessages, imageParts, toolImages);
       } else if (toolResultBlocks.length > 0) {
         // 同消息的 text companion 不丢弃：先发文本再发 tool 结果。
         if (textBlocks.length > 0) {
@@ -329,19 +444,8 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
             });
           }
         }
-        for (let i = 0; i < toolResultBlocks.length; i++) {
-          const rb = toolResultBlocks[i];
-          if (!rb.tool_use_id) {
-            const err = new Error("tool_result block is missing tool_use_id");
-            err.status = 400;
-            throw err;
-          }
-          openaiMessages.push({
-            role: "tool",
-            tool_call_id: rb.tool_use_id,
-            content: toolResultBlockText(rb.content)
-          });
-        }
+        const toolImages = pushToolResultMessages(openaiMessages, toolResultBlocks);
+        pushTrailingImageMessage(openaiMessages, imageParts, toolImages);
       } else {
         let combined = "";
         if (textBlocks.length === 1) {
@@ -351,7 +455,8 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         }
         openaiMessages.push({
           role: msg.role === "assistant" ? "assistant" : "user",
-          content: combined
+          // 无图片时保持 string content（与历史输出逐字节一致）；含图片才切成多模态 parts
+          content: imageParts.length > 0 ? buildOpenAIContentParts(msg.content, imageParts) : combined
         });
       }
     }

@@ -1,5 +1,6 @@
 import { createProvider } from "../providers/index.js";
 import { hasGetBalance, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
+import { log } from "../logging/logger.js";
 
 let cachedFleet = null;
 let cachedFleetConfigRef = null;
@@ -38,7 +39,7 @@ export class ProviderFleet {
             this._instances.set(pConf.id, instance);
           }
         } catch (e) {
-          console.warn(`[Fleet] Skipping unavailable provider "${pConf?.id}": ${e.message}`);
+          log.warn("Skipping unavailable provider", { provider: pConf?.id, error: e.message });
         }
       }
     }

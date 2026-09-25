@@ -3,8 +3,10 @@
 import { corsHeaders } from "../http/headers.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { isModelLevelError } from "../core/scheduler.js";
+import { log } from "../logging/logger.js";
 import { hasCallChat, hasCallMessages, wantsStreamedChat, needsReasoningScrub } from "../core/contract.js";
 import { runFailover } from "../core/failover.js";
+import { redactUpstreamText } from "../http/redact.js";
 import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
 
@@ -19,6 +21,16 @@ function clientError(status, message) {
     status,
     headers: { "Content-Type": "application/json", ...corsHeaders }
   });
+}
+// 上游响应体未经校验，可能含内部端点 / 账号标识 / 配额信息 —— 回吐前脱敏。
+// 本模块自身的参数校验文案（模型不存在、协议不支持）是可信的，直接透传，不必过这里。
+// 上游错误回执的唯一出口：4xx 与 5xx 同一脱敏口径、同一 JSON 信封；日志只记脱敏后文本。
+function upstreamErrorResponse(status, text, providerId) {
+  const redacted = redactUpstreamText(text);
+  if (providerId !== undefined) {
+    log.warn("Upstream rejected request", { provider: providerId, status, text: redacted });
+  }
+  return clientError(status, redacted);
 }
 export async function dispatchExchange({
   protocol,
@@ -80,11 +92,11 @@ export async function dispatchExchange({
     retryBudget: 0,
     signal: request?.signal,
     onRetryable: async (candidate, action, fail) => {
-      console.warn(`[Fallback] Provider "${candidate.provider}" (${candidate.model}) returned ${fail.status}, retrying next candidate...`);
+      log.warn("Provider returned error, trying next candidate", { provider: candidate.provider, model: candidate.model, status: fail.status });
     },
     renderExhausted: ({ lastError, lastFail }) => new Response(JSON.stringify({
       error: {
-        message: `All available providers for model "${model}" failed. Last error: ${lastError?.message || (lastFail ? `${lastFail.status ?? ""} ${String(lastFail.text || "").slice(0, 300)}`.trim() : "none")}`
+        message: `All available providers for model "${model}" failed. Last error: ${lastError?.message || (lastFail ? `${lastFail.status ?? ""} ${redactUpstreamText(String(lastFail.text || ""))}`.trim() : "none")}`
       }
     }), {
       status: 502,
@@ -94,7 +106,7 @@ export async function dispatchExchange({
       const provider = fleet.getProvider(candidate.provider);
       if (!provider) {
         // 明确报错：路由指向了不存在的 provider，而不是静默跳过
-        console.error(`[Exchange] Route candidate "${candidate.provider}" not found in provider fleet`);
+        log.error("Route candidate not found in provider fleet", { provider: candidate.provider });
         throw new Error(`Provider "${candidate.provider}" not configured`);
       }
 
@@ -141,7 +153,7 @@ export async function dispatchExchange({
         if (err.status === 400 || err.status === 404) {
           return { kind: "done", response: clientError(err.status, err.message) };
         }
-        console.warn(`[Fallback] Provider "${candidate.provider}" failed: ${err.message}, retrying next candidate...`);
+        log.warn("Provider threw, trying next candidate", { provider: candidate.provider, error: err.message });
         throw err;
       }
 
@@ -185,16 +197,15 @@ export async function dispatchExchange({
           isModelLevelError(errText) &&
           candidates.slice(candidateIndex + 1).some(c => c.model !== candidate.model);
         if (laterModelsDiffer) {
-          console.warn(`[Fallback] Provider "${candidate.provider}" model "${candidate.model}" unavailable, failing over to a different model...`);
+          log.warn("Model unavailable, failing over to a different model", { provider: candidate.provider, model: candidate.model });
         }
         return { kind: "switch", fail: {
           status,
           text: errText,
           ...(laterModelsDiffer ? { force: "retry" } : {}),
-          response: new Response(errText, {
-            status: status,
-            headers: { "Content-Type": "application/json", ...corsHeaders }
-          })
+          // 原始 errText 只作为分类证据留在 text 字段；回吐给客户端的那份必须脱敏。
+          // 4xx 与 5xx 同一出口：5xx 裸传 errText 会泄内部端点/凭据（单候选时 driver 直接返回 fail.response）。
+          response: upstreamErrorResponse(status, errText, candidate.provider)
         } };
       }
 

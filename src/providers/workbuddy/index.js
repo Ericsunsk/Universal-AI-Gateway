@@ -2,7 +2,9 @@ import { sanitizeMessages } from "./sanitize.js";
 import { buildResponseHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
 import { runFailover } from "../../core/failover.js";
+import { redactUpstreamText } from "../../http/redact.js";
 import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./cooldown.js";
+import { log } from "../../logging/logger.js";
 
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
@@ -32,7 +34,7 @@ function warnNoCredential(providerId, account) {
   const key = `${providerId}_${account?.id}`;
   if (noCredentialWarned.has(key)) return;
   noCredentialWarned.add(key);
-  console.warn(`[WorkBuddy] Account "${account?.name || account?.id}" has no credentials, skipping (env fallback only applies to single-account config)`);
+  log.warn("Account has no credentials, skipping (env fallback only applies to single-account config)", { account: account?.name || account?.id });
 }
 
 // 同一账号归因渲染 seam：所有上游透传响应的 X-Gateway-Account 收敛一处，
@@ -236,7 +238,7 @@ export class WorkBuddyProvider {
         return newAccess;
       }
     } catch (e) {
-      console.error(`[WorkBuddy:${account.name || account.id}] Token refresh failed:`, e);
+      log.error("Token refresh failed", { account: account.name || account.id, error: e?.message || String(e) });
     }
     return null;
   }
@@ -291,11 +293,11 @@ export class WorkBuddyProvider {
         const label = account.name || account.id;
         if (action === "retry") {
           // 5xx 服务端瞬时故障：切换下一账号，不惩罚当前账号
-          console.warn(`[WorkBuddy] Account "${label}" returned ${fail.status}, auto-switching to next account...`);
+          log.warn("Account returned error, auto-switching to next account", { account: label, status: fail.status });
           return;
         }
         // 429 / 403 / 额度 / 风控：惩罚性退避后切换下一账号
-        console.warn(`[WorkBuddy] Account "${label}" quota/safety filter triggered (${fail.status}: ${String(fail.text).substring(0, 80)}), cooling down and auto-switching to next account...`);
+        log.warn("Account quota/safety filter triggered, cooling down and auto-switching", { account: label, status: fail.status, text: redactUpstreamText(String(fail.text || "")).slice(0, 80) });
         await setAccountCooldown(account, this.env, "cooldown");
       },
       renderExhausted: () => new Response(JSON.stringify({ error: { message: "All WorkBuddy accounts in pool failed" } }), { status: 502, headers: { "Content-Type": "application/json" } }),
@@ -346,13 +348,13 @@ export class WorkBuddyProvider {
     const mapResponse = async (resp) => {
       // 502 / 503 / 504：服务端瞬时抖动，请求 driver 原地重试（预算与延迟归 driver）。
       if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
-        console.warn(`[WorkBuddy] Account "${accountLabel}" hit ${resp.status}, requesting in-place retry...`);
+        log.warn("Account returned error, requesting in-place retry", { account: accountLabel, status: resp.status });
         const errText = await resp.text();
         return { kind: "retry", delayMs: delay, fail: {
           status: resp.status,
           text: errText,
           response: accountResponse(account, {
-            body: errText, status: resp.status,
+            body: redactUpstreamText(errText), status: resp.status,
             headers: resp.headers, contentType: "application/json"
           }, exposeAccount)
         } };
@@ -372,7 +374,7 @@ export class WorkBuddyProvider {
                 text: resJson.msg || resJson.message || JSON.stringify(resJson),
                 json: resJson,
                 response: accountResponse(account, {
-                  body: JSON.stringify(resJson), status: 200,
+                  body: redactUpstreamText(JSON.stringify(resJson)), status: 200,
                   headers: resp.headers, contentType: "application/json"
                 }, exposeAccount)
               } };
@@ -393,7 +395,7 @@ export class WorkBuddyProvider {
         status,
         text: errText,
         response: accountResponse(account, {
-          body: errText, status,
+          body: redactUpstreamText(errText), status,
           headers: resp.headers, contentType: "application/json"
         }, exposeAccount)
       } };
@@ -404,7 +406,7 @@ export class WorkBuddyProvider {
       if (resp.status === 401) {
         // 401 一律切换下一账号：刷新失败是 token 过期，刷新后仍 401 是凭证失效，
         // 都不计入冷却 streak，绝不 fatal 中断整池。
-        console.warn(`[WorkBuddy] Account "${accountLabel}" 401${refreshed ? " even after refresh" : " token refresh failed"}, skipping...`);
+        log.warn("Account unauthorized, skipping", { account: accountLabel, after_refresh: !!refreshed });
         return { kind: "skip", reason: refreshed ? "auth-rejected-after-refresh" : "refresh-failed" };
       }
       return await mapResponse(resp);
@@ -412,7 +414,7 @@ export class WorkBuddyProvider {
       if (err.name === "AbortError") throw err; // 客户端主动中断，直接抛出终止
       // 传输错误：请求 driver 原地重试（预算与延迟归 driver）。fail 留空——
       // driver 在预算耗尽时会以该异常作为权威错误收尾。
-      console.warn(`[WorkBuddy] Account "${accountLabel}" network error: ${err.message}, requesting in-place retry...`);
+      log.warn("Account network error, requesting in-place retry", { account: accountLabel, error: err.message });
       return { kind: "retry", delayMs: delay, fail: null };
     }
   }
@@ -481,7 +483,7 @@ export class WorkBuddyProvider {
           };
         }
       } catch (e) {
-        console.error(`[WorkBuddy] Balance fetch error for ${account.name}:`, e);
+        log.error("Balance fetch error", { account: account.name, error: e?.message || String(e) });
       }
       return { id: account.id, name: account.name, balance: 0, total: 0, success: false };
     };

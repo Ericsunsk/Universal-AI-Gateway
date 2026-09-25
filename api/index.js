@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import worker, { MAX_BODY_BYTES } from "../src/index.js";
 import { createKvFromEnv } from "../src/kv/index.js";
+import { log } from "../src/logging/logger.js";
 
 export const config = {
   maxDuration: 300, // 允许最大 300 秒执行时长（适配长时间思考模型与深度代码审计）
@@ -180,12 +181,12 @@ async function handleNodeRequest(req, res) {
       }
     });
     nodeStream.on("error", (err) => {
-      console.error("[Vercel Stream Pipe Error]", err);
+      log.error("Stream pipe error", { error: err?.message || String(err) });
       res.destroy(err);
     });
     nodeStream.pipe(res);
   } catch (err) {
-    console.error("[Vercel Gateway Error]", err);
+    log.error("Gateway error", { error: err?.message || String(err) });
     if (!res.headersSent) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: "Internal Server Error" } }));

@@ -28,6 +28,8 @@
 // renderExhausted({ lastError, lastFail })。
 import { classifyFailure } from "./scheduler.js";
 import { corsHeaders } from "../http/headers.js";
+import { redactUpstreamText } from "../http/redact.js";
+import { log } from "../logging/logger.js";
 
 export async function runFailover(items, {
   attempt,
@@ -71,7 +73,7 @@ export async function runFailover(items, {
       if (outcome?.kind === "done") {
         // 防御：done 缺 response 是 adapter bug——退化为 skip（而非返回 undefined 到 HTTP 层），并告警。
         if (!outcome.response) {
-          console.warn(`[Failover] Item ${index} returned kind:"done" without a response; treating as skip`);
+          log.warn("Item returned done without a response; treating as skip", { index });
           break;
         }
         return outcome.response;
@@ -111,7 +113,7 @@ export async function runFailover(items, {
       // 未知/畸形 outcome：视为跳过，避免误判为失败；非空畸形必须告警，
       // 否则 adapter 拼错字段会静默丢失候选（null/undefined 视为历史遗留的 skip 写法，保持静默）。
       if (outcome !== null && outcome !== undefined) {
-        console.warn(`[Failover] Item ${index} returned malformed outcome; treating as skip:`, JSON.stringify(outcome)?.slice(0, 200));
+        log.warn("Item returned malformed outcome; treating as skip", { index, outcome: JSON.stringify(outcome)?.slice(0, 200) });
       }
       break;
     }
@@ -124,7 +126,7 @@ export async function runFailover(items, {
   if (lastFail?.response && !lastIsError) return lastFail.response;
   if (renderExhausted) return renderExhausted({ lastError, lastFail });
   return new Response(JSON.stringify({
-    error: { message: `All candidates failed. Last error: ${lastError?.message || lastFail?.text || "none"}` }
+    error: { message: `All candidates failed. Last error: ${lastError?.message || redactUpstreamText(String(lastFail?.text || "none"))}` }
   }), {
     status: 502,
     headers: { "Content-Type": "application/json", ...corsHeaders }

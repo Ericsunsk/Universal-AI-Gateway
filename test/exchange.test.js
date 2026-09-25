@@ -388,18 +388,174 @@ test("transformAnthropicToOpenAI accepts a pre-parsed intent (parse once)", () =
   assert.equal(withIntent.reasoning_effort, "high");
 });
 
-test("transformAnthropicToOpenAI rejects image blocks with 400", () => {
+test("transformAnthropicToOpenAI maps image blocks to OpenAI image_url parts", () => {
   const body = {
     model: "m",
-    messages: [{ role: "user", content: [{ type: "image", source: {} }] }]
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "look at this" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+        { type: "image", source: { type: "url", url: "https://example.com/x.png" } }
+      ]
+    }]
   };
-  try {
-    transformAnthropicToOpenAI(body, "m", {});
-    assert.fail("should throw for image blocks");
-  } catch (err) {
-    assert.equal(err.status, 400);
-    assert.ok(err.message.includes("Image content blocks"));
+  const out = transformAnthropicToOpenAI(body, "m", {});
+  const m = out.messages[0];
+  assert.equal(m.role, "user");
+  assert.equal(m.content.length, 3, "text and both images keep original order");
+  assert.deepEqual(m.content[0], { type: "text", text: "look at this" });
+  assert.deepEqual(m.content[1], { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } });
+  assert.deepEqual(m.content[2], { type: "image_url", image_url: { url: "https://example.com/x.png" } });
+});
+
+test("transformAnthropicToOpenAI rejects invalid image sources with 400", () => {
+  const cases = [
+    { type: "image" },
+    { type: "image", source: { type: "base64", data: "aGVsbG8=" } },
+    { type: "image", source: { type: "base64", media_type: "image/png" } },
+    { type: "image", source: { type: "file", data: "aGVsbG8=" } },
+    { type: "image", source: { type: "url" } }
+  ];
+  for (const block of cases) {
+    assert.throws(
+      () => transformAnthropicToOpenAI({ model: "m", messages: [{ role: "user", content: [block] }] }, "m", {}),
+      (err) => err.status === 400 && /image/i.test(err.message),
+      `should reject ${JSON.stringify(block)}`
+    );
   }
+});
+
+test("transformAnthropicToOpenAI keeps tool_result images out of tool text", () => {
+  const bigImage = { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "QUJDRA==" } };
+  const body = {
+    model: "m",
+    messages: [
+      { role: "user", content: "read the screenshot" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: ["file text", bigImage] }] }
+    ]
+  };
+  const out = transformAnthropicToOpenAI(body, "m", {});
+  const toolMsg = out.messages.find((msg) => msg.role === "tool");
+  assert.ok(toolMsg, "tool message exists");
+  assert.equal(toolMsg.content, "file text", "base64 never leaks into the tool token stream");
+  assert.equal(toolMsg.content.includes("QUJDRA=="), false);
+
+  const userMsgs = out.messages.filter((msg) => msg.role === "user");
+  const imageMsg = userMsgs[userMsgs.length - 1];
+  assert.ok(imageMsg, "trailing user message carries the image");
+  assert.deepEqual(imageMsg.content, [
+    { type: "image_url", image_url: { url: "data:image/jpeg;base64,QUJDRA==" } }
+  ]);
+});
+
+test("transformAnthropicToOpenAI leaves image-free payloads untouched", () => {
+  const body = {
+    model: "m",
+    messages: [{ role: "user", content: [{ type: "text", text: "plain" }] }]
+  };
+  const out = transformAnthropicToOpenAI(body, "m", {});
+  assert.deepEqual(out.messages[0], { role: "user", content: "plain" });
+});
+
+test("dispatchExchange forwards image input to the upstream instead of rejecting it", async () => {
+  let sentPayload = null;
+  const fakeFleet = {
+    getProvider: () => ({
+      type: "openai",
+      callChat: async (payload) => {
+        sentPayload = payload;
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: "ok" } }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    })
+  };
+  const res = await dispatchExchange({
+    protocol: "anthropic",
+    request: new Request("http://localhost/v1/messages", { method: "POST" }),
+    body: {
+      model: "m",
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } }]
+      }]
+    },
+    model: "m",
+    config: { routes: { m: [{ provider: "fake", model: "m" }] } },
+    fleet: fakeFleet
+  });
+  assert.equal(res.status, 200);
+  assert.ok(sentPayload, "image request reached the upstream");
+  assert.deepEqual(sentPayload.messages[0].content, [
+    { type: "image_url", image_url: { url: "data:image/png;base64,aGVsbG8=" } }
+  ]);
+});
+
+test("dispatchExchange surfaces upstream 400 for rejected image input (not 502)", async () => {
+  // 能力探针：上游不支持视觉时回 400，客户端不能被包成 502
+  const fakeFleet = {
+    getProvider: () => ({
+      type: "openai",
+      callChat: async () => new Response(
+        JSON.stringify({ error: { message: "image input is not supported by this model" } }),
+        { status: 400 }
+      )
+    })
+  };
+  const res = await dispatchExchange({
+    protocol: "anthropic",
+    request: new Request("http://localhost/v1/messages", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: [{ type: "image", source: { type: "url", url: "https://example.com/x.png" } }] }] },
+    model: "m",
+    config: { routes: { m: [{ provider: "fake", model: "m" }] } },
+    fleet: fakeFleet
+  });
+  assert.equal(res.status, 400);
+  const json = await res.json();
+  assert.ok(json.error.message.includes("image input is not supported"));
+});
+
+test("dispatchExchange redacts upstream endpoints and credentials from 4xx replies", async () => {
+  // 上游响应体不可信：内部端点 / key / 内网 IP 不得随 4xx 回吐给客户端。
+  const leaked = 'auth failed for key sk-ant-abcdef123456789 at https://internal.corp.local/v1 from 10.0.0.7';
+  const fakeFleet = {
+    getProvider: () => ({
+      type: "openai",
+      callChat: async () => new Response(JSON.stringify({ error: { message: leaked } }), { status: 400 })
+    })
+  };
+  const res = await dispatchExchange({
+    protocol: "anthropic",
+    request: new Request("http://localhost/v1/messages", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: "hi" }] },
+    model: "m",
+    config: { routes: { m: [{ provider: "fake", model: "m" }] } },
+    fleet: fakeFleet
+  });
+  assert.equal(res.status, 400);
+  const { error } = await res.json();
+  assert.ok(!error.message.includes("internal.corp.local"), "internal host must not leak");
+  assert.ok(!error.message.includes("sk-ant-abcdef123456789"), "credential must not leak");
+  assert.ok(!error.message.includes("10.0.0.7"), "internal IP must not leak");
+  assert.ok(error.message.includes("<url>") && error.message.includes("<credential>"));
+});
+
+test("transformAnthropicToOpenAI rejects image blocks on assistant messages with 400", () => {
+  // Anthropic 协议不允许 assistant 发图；OpenAI 方言也放不下。静默丢弃会让客户端以为图已送达。
+  assert.throws(
+    () => transformAnthropicToOpenAI({
+      model: "m",
+      messages: [{
+        role: "assistant",
+        content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } }]
+      }]
+    }),
+    (err) => err.status === 400 && /assistant messages/.test(err.message)
+  );
 });
 
 test("transformAnthropicToOpenAI validates system array with 400", () => {
@@ -428,21 +584,6 @@ test("streamOpenAIToAnthropic cancels upstream on client abort (no stranded pump
   await new Promise(r => setTimeout(r, 50));
   assert.equal(upstreamCancelled, true, "upstream reader must be cancelled on abort");
   reader.releaseLock();
-});
-
-test("dispatchExchange returns 400 (not 502) for image input", async () => {
-  const fakeFleet = { getProvider: () => ({ type: "openai", callChat: async () => { throw new Error("must not reach upstream"); } }) };
-  const res = await dispatchExchange({
-    protocol: "anthropic",
-    request: new Request("http://localhost/v1/messages", { method: "POST" }),
-    body: { model: "m", messages: [{ role: "user", content: [{ type: "image" }] }] },
-    model: "m",
-    config: { routes: { m: [{ provider: "fake", model: "m" }] } },
-    fleet: fakeFleet
-  });
-  assert.equal(res.status, 400);
-  const json = await res.json();
-  assert.ok(json.error.message.includes("Image content blocks"));
 });
 
 test("dispatchExchange fails over when upstream says model unavailable (different model next)", async () => {
@@ -554,11 +695,12 @@ test("extractCachedTokens reads OpenAI and Anthropic cache fields", async () => 
 });
 
 test("stream translator logs upstream prefix-cache hits", async () => {
+  // 经注入式 sink 观察日志，不再 monkey-patch console（曾污染子进程 stdout）。
   const lines = [];
-  const origLog = console.log;
+  const { setLogSink } = await import("../src/logging/logger.js");
   const origDebug = process.env.DEBUG;
   process.env.DEBUG = "true"; // 启用调试日志以通过测试
-  console.log = (...args) => { lines.push(args.join(" ")); };
+  setLogSink((line) => { lines.push(line); });
   try {
     const upstream = openAISseResponse([
       "data: " + JSON.stringify({ choices: [{ delta: { content: "hi" } }] }),
@@ -568,7 +710,7 @@ test("stream translator logs upstream prefix-cache hits", async () => {
     const resp = streamOpenAIToAnthropic(upstream, "m");
     await readAnthropicEvents(resp);
   } finally {
-    console.log = origLog;
+    setLogSink(null);
     if (origDebug !== undefined) process.env.DEBUG = origDebug;
     else delete process.env.DEBUG;
   }
@@ -817,4 +959,194 @@ test("pruneOpenAIMessages reduces old huge tool output but keeps fresh one intac
   assert.ok(oldMsg.content.length < huge.length, "old huge output annealed");
   assert.ok(oldMsg.content.includes("collapsed"), "anneal notice present");
   assert.equal(freshMsg.content, huge, "fresh output stays full-fidelity");
+});
+
+// --- stream.js tool_call 分片合并（按 index 定址的唯一合并点）---
+
+test("reduceOpenAIChunkAll preserves tool_call index for sparse fragments", async () => {
+  const { reduceOpenAIChunkAll } = await import("../src/exchange/stream.js");
+  const emissions = reduceOpenAIChunkAll({ choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: "x" } }] } }] });
+  assert.equal(emissions.length, 1);
+  assert.equal(emissions[0].calls[0].index, 1);
+});
+
+test("mergeSseToolFrags routes sparse fragments by index, not chunk position", async () => {
+  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const frags = new Map();
+  // 真实流式形态：每 chunk 只带一个 index 的碎片，calls 数组长度恒为 1
+  mergeSseToolFrags(frags, [{ index: 0, name: "f", args: '{"a":' }]);
+  mergeSseToolFrags(frags, [{ index: 1, name: "g", args: '{"b":' }]);
+  assert.equal(frags.size, 2, "sparse fragments must not collapse into the first slot");
+  assert.equal(frags.get("__idx_0").args, '{"a":');
+  assert.equal(frags.get("__idx_1").args, '{"b":');
+});
+
+test("toolCallsToAnthropicBlocks parses args and preserves unparseable raw", async () => {
+  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/stream.js");
+  const blocks = toolCallsToAnthropicBlocks([
+    { id: "c1", name: "search", args: '{"q":"x"}' },
+    { id: "c2", name: "broken", args: "{not json" },
+    { id: "c3", name: null, args: "" },
+  ]);
+  assert.equal(blocks.length, 3);
+  assert.deepEqual(blocks[0], { type: "tool_use", id: "c1", name: "search", input: { q: "x" } });
+  // 不可解析的 arguments 不能被静默丢弃：保留原文供客户端归因
+  assert.deepEqual(blocks[1].input, { _raw: "{not json" });
+  assert.equal(blocks[2].name, "tool", "missing name falls back to 'tool'");
+  assert.deepEqual(blocks[2].input, {});
+});
+
+test("toolCallsToAnthropicBlocks returns empty for empty input", async () => {
+  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/stream.js");
+  assert.deepEqual(toolCallsToAnthropicBlocks([]), []);
+  assert.deepEqual(toolCallsToAnthropicBlocks(null), []);
+});
+
+test("toolCallsToAnthropicBlocks generates an id when upstream omits it", async () => {
+  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/stream.js");
+  const [b] = toolCallsToAnthropicBlocks([{ id: null, name: "f", args: "{}" }]);
+  assert.ok(typeof b.id === "string" && b.id.startsWith("call_"), "must not emit id:null");
+});
+
+test("mergeSseToolFrags migrates placeholder key to real id when it arrives late", async () => {
+  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const frags = new Map();
+  // 首片无 id -> 建占位键
+  mergeSseToolFrags(frags, [{ name: "search", args: '{"a":' }]);
+  assert.equal(frags.size, 1);
+  // 续片带 id -> 占位键应迁移到真实 id，而不是新建槽位
+  mergeSseToolFrags(frags, [{ id: "call_x", args: "1}" }]);
+  assert.equal(frags.size, 1, "late id must migrate the placeholder, not add a slot");
+  const only = Array.from(frags.values())[0];
+  assert.equal(only.id, "call_x");
+  assert.equal(only.args, '{"a":1}');
+});
+
+test("mergeSseToolFrags keeps distinct ids in separate slots", async () => {
+  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const frags = new Map();
+  mergeSseToolFrags(frags, [{ id: "a", name: "f", args: "{" }]);
+  mergeSseToolFrags(frags, [{ id: "b", name: "g", args: "{" }]);
+  mergeSseToolFrags(frags, [{ id: "a", args: "}" }]);
+  assert.equal(frags.size, 2);
+  assert.equal(frags.get("a").args, "{}");
+  assert.equal(frags.get("b").args, "{");
+});
+
+test("mergeSseToolFrags handles parallel calls where only some carry ids", async () => {
+  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const frags = new Map();
+  // 第 0 个带 id，第 1 个无 id（首片）
+  mergeSseToolFrags(frags, [
+    { id: "call_1", name: "f", args: "{" },
+    { name: "g", args: "{" },
+  ]);
+  // 续片补上第 1 个的 id
+  mergeSseToolFrags(frags, [
+    { id: "call_1", args: "}" },
+    { id: "call_2", args: "}" },
+  ]);
+  assert.equal(frags.size, 2, "two parallel calls must occupy exactly two slots");
+  assert.equal(frags.get("call_1").args, "{}");
+  assert.equal(frags.get("call_2").args, "{}");
+  assert.equal(frags.get("call_1").ident, true);
+  assert.equal(frags.get("call_2").ident, true);
+});
+
+test("mergeSseToolFrags leaves placeholder when upstream never sends an id", async () => {
+  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const frags = new Map();
+  mergeSseToolFrags(frags, [{ name: "f", args: "{" }]);
+  mergeSseToolFrags(frags, [{ args: "}" }]);
+  assert.equal(frags.size, 1);
+  const only = Array.from(frags.values())[0];
+  assert.equal(only.ident, false, "unidentified call stays a placeholder for the consumer");
+  assert.equal(only.args, "{}");
+});
+
+// --- StreamBlockState：流式 content block 状态机（纯函数，不发 IO）---
+
+test("StreamBlockState opens a block and closes the previous one", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  // 首个 block：无前置关闭
+  const f1 = s.open("thinking");
+  assert.equal(f1.length, 1);
+  assert.ok(f1[0].includes("content_block_start"));
+  assert.ok(f1[0].includes("\"index\":0"));
+  // 切到 text：必须先发 content_block_stop(index 0) 再 start(index 1)
+  const f2 = s.open("text");
+  assert.equal(f2.length, 2, "must close previous block before opening next");
+  assert.ok(f2[0].includes("content_block_stop") && f2[0].includes("\"index\":0"));
+  assert.ok(f2[1].includes("content_block_start") && f2[1].includes("\"index\":1"));
+});
+
+test("StreamBlockState deltas are suppressed when block type does not match", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  // 未开块：任何 delta 都不应产出帧（否则会发出 index:-1 的非法帧）
+  assert.deepEqual(s.textDelta("x"), []);
+  assert.deepEqual(s.thinkingDelta("x"), []);
+  assert.deepEqual(s.inputJsonDelta("x"), []);
+  s.open("text");
+  assert.deepEqual(s.thinkingDelta("x"), [], "thinking delta into a text block must be dropped");
+  assert.equal(s.textDelta("x").length, 1);
+});
+
+test("StreamBlockState counts emitted chars for text and thinking deltas", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  s.open("text");
+  s.textDelta("hello");
+  s.textDelta(" world");
+  assert.equal(s.emittedChars, 11);
+  // thinking 计入 output token 估算，与非流式 output_tokens 口径一致
+  s.open("thinking");
+  s.thinkingDelta("reasoning counted");
+  assert.equal(s.emittedChars, 11 + "reasoning counted".length);
+});
+
+test("StreamBlockState setStopReason does not downgrade a set reason", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  assert.equal(s.stopReason, "end_turn", "default stop reason");
+  s.setStopReason("tool_use");
+  assert.equal(s.stopReason, "tool_use");
+  // 后续 chunk 若再报 end_turn，不应把 tool_use 降级（否则客户端会误判无工具调用）
+  s.setStopReason("end_turn");
+  assert.equal(s.stopReason, "tool_use");
+});
+
+test("StreamBlockState close is idempotent and no-ops when nothing is open", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  assert.deepEqual(s.close(), [], "closing with no open block emits nothing");
+  s.open("text");
+  assert.equal(s.close().length, 1);
+  assert.deepEqual(s.close(), [], "second close must not emit a duplicate stop");
+});
+
+test("StreamBlockState.applyEmission drives block transitions for each kind", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  const joined = (frames) => frames.join("");
+
+  const t = joined(s.applyEmission({ kind: "thinking", text: "think" }));
+  assert.ok(t.includes("thinking_delta") && t.includes("\"index\":0"));
+
+  const x = joined(s.applyEmission({ kind: "text", text: "hi" }));
+  assert.ok(x.includes("content_block_stop") && x.includes("\"index\":0"));
+  assert.ok(x.includes("text_delta") && x.includes("\"index\":1"));
+
+  const u = joined(s.applyEmission({ kind: "tool_use", calls: [{ ident: true, id: "call_1", name: "search", args: "{\"q\":1}" }] }));
+  assert.ok(u.includes("content_block_stop") && u.includes("\"index\":1"));
+  assert.ok(u.includes("tool_use") && u.includes("call_1") && u.includes("search"));
+  assert.ok(u.includes("input_json_delta"));
+  assert.equal(s.stopReason, "tool_use");
+
+  // finish 仅设置 stop_reason，不产出帧
+  assert.deepEqual(s.applyEmission({ kind: "finish", finishReason: "stop" }), []);
+  // 未知 kind 安全忽略
+  assert.deepEqual(s.applyEmission({ kind: "unknown" }), []);
+  assert.deepEqual(s.applyEmission(null), []);
 });

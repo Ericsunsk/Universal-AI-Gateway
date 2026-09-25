@@ -1,4 +1,5 @@
 // Token Bucket Rate Limiter
+import { log } from "../logging/logger.js";
 // 基于 KV 存储的分布式限流器，支持多实例共享状态
 
 const RATE_LIMIT_PREFIX = "ratelimit:";
@@ -39,7 +40,7 @@ export async function checkRateLimit(kv, key, config) {
     bucket = raw && typeof raw === "object" ? raw : null;
   } catch (e) {
     // KV 读取失败，fail-open
-    console.warn(`[RateLimit] KV read failed for ${key}:`, e?.message);
+    log.warn("KV read failed", { key, error: e?.message });
     return { allowed: true, remaining: capacity, resetAt: 0, retryAfter: 0 };
   }
 
@@ -66,7 +67,7 @@ export async function checkRateLimit(kv, key, config) {
 
   // 非阻塞写入：写入失败不影响当前请求判定（已在内存中完成计算）
   kv.put(kvKey, newBucket, { expirationTtl: ttl }).catch((e) => {
-    console.warn(`[RateLimit] KV write failed for ${key}:`, e?.message);
+    log.warn("KV write failed", { key, error: e?.message });
   });
 
   return {
