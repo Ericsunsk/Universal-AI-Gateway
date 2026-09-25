@@ -1,8 +1,8 @@
 import { sanitizeMessages } from "./sanitize.js";
 import { buildResponseHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
-import { runFailover } from "../../core/failover.js";
-import { redactUpstreamText } from "../../http/redact.js";
+import { runFailover, buildFail } from "../../core/failover.js";
+import { redactUpstreamText, errorBody, upstreamErrorBody } from "../../http/redact.js";
 import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./cooldown.js";
 import { log } from "../../logging/logger.js";
 
@@ -49,6 +49,19 @@ function accountResponse(account, { body, status, statusText, headers, contentTy
       ...(exposeAccount ? { "X-Gateway-Account": account.id || "account" } : {})
     })
   });
+}
+
+// C2+C3：失败 fail 对象由 driver 拥有的 buildFail 构造（见 core/failover.js）：
+// attempt 只交原始证据 {status,text,json} + 渲染 hint（headers/account），
+// 预渲染 response 统一为 JSON 信封 {error:{message}}（C2），原文恰好脱敏一次。
+// 直接调用 attemptAccount 的单测仍能看到 fail.response——构造器由 driver 模块拥有，
+// 语义与 runFailover 内按需补齐的完全一致。
+function failForAccount(account, evidence, exposeAccount) {
+  return buildFail(evidence, (fail) => accountResponse(account, {
+    body: upstreamErrorBody(String(fail.text ?? "")),
+    status: fail.status,
+    headers: fail.headers, contentType: "application/json"
+  }, exposeAccount));
 }
 
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
@@ -284,6 +297,8 @@ export class WorkBuddyProvider {
 
     // 账号级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、retry 预算、
     // 耗尽收尾由驱动器统一处理；单账号的「一次往返 → 一个 outcome」见 attemptAccount。
+    // 账号归因头仅对 master 下发；调用方经 options.principal 传入身份。
+    const exposeAccount = options?.principal?.isMaster === true;
     return await runFailover(accounts, {
       isAbort: (err) => err?.name === "AbortError",
       retryBudget: 1,               // 每个账号允许一次原地重试（对齐旧“600ms 重试一次”）
@@ -300,7 +315,14 @@ export class WorkBuddyProvider {
         log.warn("Account quota/safety filter triggered, cooling down and auto-switching", { account: label, status: fail.status, text: redactUpstreamText(String(fail.text || "")).slice(0, 80) });
         await setAccountCooldown(account, this.env, "cooldown");
       },
-      renderExhausted: () => new Response(JSON.stringify({ error: { message: "All WorkBuddy accounts in pool failed" } }), { status: 502, headers: { "Content-Type": "application/json" } }),
+      renderExhausted: () => new Response(errorBody("All WorkBuddy accounts in pool failed"), { status: 502, headers: { "Content-Type": "application/json" } }),
+      // C3 backstop：若某条 attempt 交来无 response 的原始证据，driver 按本账号口径补齐
+      // （与 failForAccount 同一信封；attemptAccount 直接返回的已预渲染 fail 保持原样）。
+      renderFail: (fail, account) => accountResponse(account, {
+        body: upstreamErrorBody(String(fail.text ?? "")),
+        status: fail.status,
+        headers: fail.headers, contentType: "application/json"
+      }, exposeAccount),
       attempt: (account) => this.attemptAccount(account, payload, serializedPayload, options),
     });
   }
@@ -345,19 +367,17 @@ export class WorkBuddyProvider {
     // 单一映射点：把一次 resp 解释为恰好一个 outcome。5xx → retry，成功 → done，
     // 其余失败 → switch（交 driver 分类）。doRequestWithRefresh 已把 401 重放包在这一层内。
     // 分类所需的 JSON 解析不在调用方重复：只交原始 status + text，classifyFailure 自行解析。
+    // fail 经 driver 拥有的 failForAccount 构造：原始证据 + 渲染 hint，response 为 C2 信封。
     const mapResponse = async (resp) => {
       // 502 / 503 / 504：服务端瞬时抖动，请求 driver 原地重试（预算与延迟归 driver）。
       if (resp.status === 502 || resp.status === 503 || resp.status === 504) {
         log.warn("Account returned error, requesting in-place retry", { account: accountLabel, status: resp.status });
         const errText = await resp.text();
-        return { kind: "retry", delayMs: delay, fail: {
+        return { kind: "retry", delayMs: delay, fail: failForAccount(account, {
           status: resp.status,
           text: errText,
-          response: accountResponse(account, {
-            body: redactUpstreamText(errText), status: resp.status,
-            headers: resp.headers, contentType: "application/json"
-          }, exposeAccount)
-        } };
+          headers: resp.headers,
+        }, exposeAccount) };
       }
 
       if (resp.ok) {
@@ -369,15 +389,12 @@ export class WorkBuddyProvider {
             if (businessErrorCode(resJson) !== 0) {
               // 200 包业务错误码：这是 adapter 级判断（决定“200 其实是失败”），
               // 判定后把已解析的 json 作为证据交给驱动器分类（避免 classifyFailure 再解析一遍）。
-              return { kind: "switch", fail: {
+              return { kind: "switch", fail: failForAccount(account, {
                 status: 200,
                 text: resJson.msg || resJson.message || JSON.stringify(resJson),
                 json: resJson,
-                response: accountResponse(account, {
-                  body: redactUpstreamText(JSON.stringify(resJson)), status: 200,
-                  headers: resp.headers, contentType: "application/json"
-                }, exposeAccount)
-              } };
+                headers: resp.headers,
+              }, exposeAccount) };
             }
           } catch (e) {}
         }
@@ -391,14 +408,11 @@ export class WorkBuddyProvider {
       // 失败收口：429 / 403 / 额度耗尽 / 其余 4xx 统一交驱动器分类
       const status = resp.status;
       const errText = await resp.text();
-      return { kind: "switch", fail: {
+      return { kind: "switch", fail: failForAccount(account, {
         status,
         text: errText,
-        response: accountResponse(account, {
-          body: redactUpstreamText(errText), status,
-          headers: resp.headers, contentType: "application/json"
-        }, exposeAccount)
-      } };
+        headers: resp.headers,
+      }, exposeAccount) };
     };
 
     try {

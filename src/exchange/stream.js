@@ -370,6 +370,55 @@ export function toolCallsToAnthropicBlocks(acc) {
   return blocks;
 }
 
+/**
+ * 上游 SSE 行源 —— 两条消费路径（流式 / 非流式）共享的 parsed-chunk 接缝。
+ *
+ * 收敛前两处各写一遍读循环（buffer → 按行切分 → data: 过滤 → [DONE] 跳过 →
+ * JSON.parse → 坏行限流告警）：删掉本模块只会把循环搬回两处，故它通过
+ * deletion test，自立为 seam。
+ *
+ * 本模块只拥有「行缓冲解析」：usage / cache 提取与发射归约仍归消费方
+ *（两处 token 记账变量名与落袋语义不同，不宜上收）。
+ *
+ * @param {ReadableStreamDefaultReader} reader - 上游 body 的 reader（abort / stall 接线仍归调用方）
+ * @param {Object} [options]
+ * @param {TextDecoder} [options.decoder] - 复用调用方 decoder，不传则自建
+ * @param {string} [options.warnMessage] - 坏行告警文案（流式 / 非流式各保留原措辞）
+ * @param {(value: Uint8Array) => void} [options.onBytes] - 每批字节到达钩子（流式停滞熔断计时用）
+ * @param {{ text: string }} [options.tail] - 出口：流结束时未成行的剩余缓冲（单 JSON 回退用）
+ * @yields {{ parsed: any, rawLine: string }} 成功解析的 chunk 与其原始 JSON 行
+ */
+export async function* iterSseParsedChunks(reader, options = {}) {
+  const decoder = options.decoder ?? new TextDecoder();
+  const warnMessage = options.warnMessage ?? "Skipping malformed SSE line";
+  const onBytes = typeof options.onBytes === "function" ? options.onBytes : null;
+  const tail = options.tail ?? null;
+  let buffer = "";
+  let badLineWarns = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (onBytes) onBytes(value);
+    buffer += decoder.decode(value, { stream: true });
+    let pos = 0;
+    let lineEnd;
+    while ((lineEnd = buffer.indexOf("\n", pos)) !== -1) {
+      const line = buffer.slice(pos, lineEnd).trim();
+      pos = lineEnd + 1;
+      if (!line || !line.startsWith("data:")) continue;
+      const jsonStr = line.slice(5).trim();
+      if (jsonStr === "[DONE]") continue;
+      try {
+        yield { parsed: JSON.parse(jsonStr), rawLine: jsonStr };
+      } catch (e) {
+        if (badLineWarns++ < 3) log.warn(warnMessage, { line: String(jsonStr).slice(0, 120) });
+      }
+    }
+    buffer = pos > 0 ? buffer.slice(pos) : buffer;
+  }
+  if (tail && typeof tail === "object") tail.text = buffer;
+}
+
 export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
   const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
@@ -464,57 +513,41 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     let reportedInputTokens = 0;
 
     try {
-      let badLineWarns = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value?.byteLength) lastUpstreamByteAt = Date.now();
+      const tail = { text: "" };
+      for await (const { parsed } of iterSseParsedChunks(reader, {
+        decoder: streamDecoder,
+        onBytes: (value) => { if (value?.byteLength) lastUpstreamByteAt = Date.now(); },
+        tail,
+      })) {
+        const cached = extractCachedTokens(parsed);
+        if (cached > maxCachedTokens) maxCachedTokens = cached;
 
-        buffer += streamDecoder.decode(value, { stream: true });
-        let pos = 0;
-        let lineEnd;
-        while ((lineEnd = buffer.indexOf("\n", pos)) !== -1) {
-          const line = buffer.slice(pos, lineEnd).trim();
-          pos = lineEnd + 1;
-          if (!line || !line.startsWith("data:")) continue;
-          const jsonStr = line.slice(5).trim();
-          if (jsonStr === "[DONE]") continue;
+        // 与非流式路径同源采信上游 usage（逐 chunk 覆盖，终局值胜出）；
+        // 缺失 usage 的 chunk 保留原值，最终由字符数估算兜底。
+        const chunkUsage = extractUsage(parsed, { input: reportedInputTokens, output: reportedOutputTokens });
+        reportedOutputTokens = chunkUsage.output;
+        reportedInputTokens = chunkUsage.input;
 
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const cached = extractCachedTokens(parsed);
-            if (cached > maxCachedTokens) maxCachedTokens = cached;
-
-            // 与非流式路径同源采信上游 usage（逐 chunk 覆盖，终局值胜出）；
-            // 缺失 usage 的 chunk 保留原值，最终由字符数估算兜底。
-            const chunkUsage = extractUsage(parsed, { input: reportedInputTokens, output: reportedOutputTokens });
-            reportedOutputTokens = chunkUsage.output;
-            reportedInputTokens = chunkUsage.input;
-
-            // 全部分类走 reducer seam：同一 chunk 的 thinking/text/tool/finish 按序发射，
-            // 不再各写一遍字段读取（error 独占，与旧语义一致）。
-            const emissions = reduceOpenAIChunkAll(parsed);
-            const errorEmission = emissions.find(e => e.kind === "error");
-            if (errorEmission) {
-              const errMsg = errorEmission.message;
-              log.warn("Upstream stream error", { error: errMsg });
-              if (blockState.blockType !== "text") await writeAll(blockState.open("text"));
-              // notice 文本同样计入 emittedChars（textDelta 内部累计），与正文同口径，避免 output_tokens 偏小
-              await writeAll(blockState.textDelta(`\n[Upstream Notice: ${errMsg}]\n`));
-              continue;
-            }
-
-            for (const emission of emissions) {
-            // 分派收进状态机：读循环只表达「解码 → 分派 → 写出」，不再承载 kind 长链。
-            // 无 delta 的纯 finish 终局块同样经此处设置 stop_reason，不得用 delta 守卫跳过。
-            await writeAll(blockState.applyEmission(emission));
-            }
-          } catch (e) {
-            if (badLineWarns++ < 3) log.warn("Skipping malformed SSE line", { line: String(jsonStr).slice(0, 120) });
-          }
+        // 全部分类走 reducer seam：同一 chunk 的 thinking/text/tool/finish 按序发射，
+        // 不再各写一遍字段读取（error 独占，与旧语义一致）。
+        const emissions = reduceOpenAIChunkAll(parsed);
+        const errorEmission = emissions.find(e => e.kind === "error");
+        if (errorEmission) {
+          const errMsg = errorEmission.message;
+          log.warn("Upstream stream error", { error: errMsg });
+          if (blockState.blockType !== "text") await writeAll(blockState.open("text"));
+          // notice 文本同样计入 emittedChars（textDelta 内部累计），与正文同口径，避免 output_tokens 偏小
+          await writeAll(blockState.textDelta(`\n[Upstream Notice: ${errMsg}]\n`));
+          continue;
         }
-        buffer = pos > 0 ? buffer.slice(pos) : buffer;
+
+        for (const emission of emissions) {
+        // 分派收进状态机：读循环只表达「解码 → 分派 → 写出」，不再承载 kind 长链。
+        // 无 delta 的纯 finish 终局块同样经此处设置 stop_reason，不得用 delta 守卫跳过。
+        await writeAll(blockState.applyEmission(emission));
+        }
       }
+      buffer = tail.text;
 
       // 若流结束时 buffer 尚存非 SSE 格式内容（如上游返回单一 JSON）
       if (blockState.blockIndex === -1 && buffer.trim()) {
@@ -607,50 +640,37 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   let maxCachedTokens = 0;
 
   try {
-    let badLineWarns = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let pos = 0;
-      let lineEnd;
-      while ((lineEnd = buffer.indexOf("\n", pos)) !== -1) {
-        const line = buffer.slice(pos, lineEnd).trim();
-        pos = lineEnd + 1;
-        if (!line || !line.startsWith("data:")) continue;
-        const jsonStr = line.slice(5).trim();
-        if (jsonStr === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(jsonStr);
-          // 同流式路径：全部分类走 reducer seam。SSE 形态的 tool_calls arguments 是分片到达，
-          // 按 id 拼接到一次后再整体解析（与流式 input_json_delta 语义对齐）；无 id 碎片无法
-          // 定址成块，直接丢弃（此前整段 tool_calls 被静默丢弃，stop_reason 恒为 end_turn）。
-          for (const emission of reduceOpenAIChunkAll(parsed)) {
-            if (emission.kind === "error") {
-              accumulated += `\n[Upstream Notice: ${emission.message}]\n`;
-            } else if (emission.kind === "thinking") {
-              accumulatedThinking += emission.text;
-            } else if (emission.kind === "text") {
-              accumulated += emission.text;
-            } else if (emission.kind === "tool_use") {
-              // 按 index 定址合并：续片通常只带 index+arguments、无 id。
-              // emission.calls 与 delta.tool_calls 同序，chunk 内序号即 index。
-              mergeSseToolFrags(sseToolFrags, emission.calls);
-            } else if (emission.kind === "finish") {
-              accumulatedFinishReason = emission.finishReason;
-            }
-          }
-          const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
-          inputTokens = usage.input;
-          outputTokens = usage.output;
-          const cached = extractCachedTokens(parsed);
-          if (cached > maxCachedTokens) maxCachedTokens = cached;
-        } catch (e) {
-          if (badLineWarns++ < 3) log.warn("Skipping malformed SSE line (non-streaming)", { line: String(jsonStr).slice(0, 120) });
+    const tail = { text: "" };
+    for await (const { parsed } of iterSseParsedChunks(reader, {
+      decoder,
+      warnMessage: "Skipping malformed SSE line (non-streaming)",
+      tail,
+    })) {
+      // 同流式路径：全部分类走 reducer seam。SSE 形态的 tool_calls arguments 是分片到达，
+      // 按 id 拼接到一次后再整体解析（与流式 input_json_delta 语义对齐）；无 id 碎片无法
+      // 定址成块，直接丢弃（此前整段 tool_calls 被静默丢弃，stop_reason 恒为 end_turn）。
+      for (const emission of reduceOpenAIChunkAll(parsed)) {
+        if (emission.kind === "error") {
+          accumulated += `\n[Upstream Notice: ${emission.message}]\n`;
+        } else if (emission.kind === "thinking") {
+          accumulatedThinking += emission.text;
+        } else if (emission.kind === "text") {
+          accumulated += emission.text;
+        } else if (emission.kind === "tool_use") {
+          // 按 index 定址合并：续片通常只带 index+arguments、无 id。
+          // emission.calls 与 delta.tool_calls 同序，chunk 内序号即 index。
+          mergeSseToolFrags(sseToolFrags, emission.calls);
+        } else if (emission.kind === "finish") {
+          accumulatedFinishReason = emission.finishReason;
         }
       }
-      buffer = pos > 0 ? buffer.slice(pos) : buffer;
+      const usage = extractUsage(parsed, { input: inputTokens, output: outputTokens });
+      inputTokens = usage.input;
+      outputTokens = usage.output;
+      const cached = extractCachedTokens(parsed);
+      if (cached > maxCachedTokens) maxCachedTokens = cached;
     }
+    buffer = tail.text;
 
     if (!accumulated && buffer.trim()) {
       try {

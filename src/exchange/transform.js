@@ -96,35 +96,69 @@ function assertNoAssistantImages(role, content) {
   throw err;
 }
 
-// tool_result 块组 → OpenAI tool 消息，返回其中抽出的图片 parts。
-// tool 消息 content 只能是文本，图片放不进去（整体序列化会把 base64 灌进 token），
-// 因此这里只发文本，图片交调用方由 pushTrailingImageMessage 补发。
-// tool_use_id 缺失在这里统一 400（原本两个分支各校验一次）。
-function pushToolResultMessages(openaiMessages, toolResultBlocks) {
-  const images = [];
-  for (const rb of toolResultBlocks) {
-    if (!rb.tool_use_id) {
-      const err = new Error("tool_result block is missing tool_use_id");
-      err.status = 400;
-      throw err;
-    }
-    const split = toolResultSplit(rb.content);
-    for (const p of split.images) images.push(p);
-    openaiMessages.push({
-      role: "tool",
-      tool_call_id: rb.tool_use_id,
-      content: split.text
-    });
+// OpenAI 消息序列的唯一排序主人（ordering seam）：上游 11148 要求
+// assistant tool_calls → tool 结果紧随 → 附带图片的 user 消息最后。
+// 此前 fan-out（tool 结果展开 + 尾随图片补发）与 re-sort（tool 结果重挂）
+// 是三个平级 helper，11148 恰恰坏在它们之间的顺序上，且无单个测试覆盖交错。
+// 新调用方只经由本类追加完整 tool 交换（appendToolExchange）并以 finalize()
+// 收尾，排序不变量收敛在一处，单测只须面对这一个面。
+export class OpenAIMessageSequence {
+  constructor(initialMessages = []) {
+    this._messages = [...initialMessages];
   }
-  return images;
-}
 
-// 图片统一以紧随其后的 user 多模态消息补发：OpenAI 要求 tool 消息紧跟 assistant tool_calls，
-// 图片插在中间会打断工具调用序列（上游 11148）；tool 消息自身又装不下图片。
-function pushTrailingImageMessage(openaiMessages, imageParts, toolImages) {
-  const images = toolImages.length > 0 ? [...imageParts, ...toolImages] : imageParts;
-  if (images.length === 0) return;
-  openaiMessages.push({ role: "user", content: images });
+  push(message) {
+    this._messages.push(message);
+    return this;
+  }
+
+  // 原子追加一次 tool 交换：assistant（含 tool_calls，可选）→ companion
+  // tool 结果（纯文本，图片另走）→ 尾随图片 user 消息（若有，必在交换之末）。
+  // 调用方不再分两次调用 fan-out + 补图，交错顺序在本方法内一次写死。
+  appendToolExchange({ assistantMessage = null, toolResultBlocks = [], imageParts = [] } = {}) {
+    if (assistantMessage) this._messages.push(assistantMessage);
+    const toolImages = this.#pushToolResults(toolResultBlocks);
+    this.#pushTrailingImages(imageParts, toolImages);
+    return this;
+  }
+
+  // 11148 收尾：tool 结果挂载到其 assistant tool_calls 正下方，图片 user
+  // 消息保持在交换之末（见 sortToolSequence）。
+  finalize() {
+    return sortToolSequence(this._messages);
+  }
+
+  // tool_result 块组 → OpenAI tool 消息，返回其中抽出的图片 parts。
+  // tool 消息 content 只能是文本，图片放不进去（整体序列化会把 base64 灌进 token），
+  // 因此这里只发文本，图片交 #pushTrailingImages 补发。
+  // tool_use_id 缺失在这里统一 400（原本两个分支各校验一次）。
+  #pushToolResults(toolResultBlocks) {
+    const images = [];
+    for (const rb of toolResultBlocks) {
+      if (!rb.tool_use_id) {
+        const err = new Error("tool_result block is missing tool_use_id");
+        err.status = 400;
+        throw err;
+      }
+      const split = toolResultSplit(rb.content);
+      for (const p of split.images) images.push(p);
+      this._messages.push({
+        role: "tool",
+        tool_call_id: rb.tool_use_id,
+        content: split.text
+      });
+    }
+    return images;
+  }
+
+  // 图片统一以紧随其后的 user 多模态消息补发：OpenAI 要求 tool 消息紧跟 assistant tool_calls，
+  // 图片插在中间会打断工具调用序列（上游 11148）；tool 消息自身又装不下图片。
+  // 调用方不得单独调用——顺序由 appendToolExchange 保证（图片必在 tool 结果之后）。
+  #pushTrailingImages(imageParts, toolImages) {
+    const images = toolImages.length > 0 ? [...imageParts, ...toolImages] : imageParts;
+    if (images.length === 0) return;
+    this._messages.push({ role: "user", content: images });
+  }
 }
 
 // /compact 总结请求的意图标记：Anthropic 形（body.system + 末条文本）与 OpenAI 形
@@ -157,8 +191,11 @@ export function transformToolsToOpenAI(tools) {  if (!Array.isArray(tools) || to
   }));
 }
 
-// 核心状态机规范化：重构并对齐 OpenAI tool_calls 与 tool_results 顺序（根除 11148 tool_call_sequence_broken）
-export function normalizeOpenAIMessages(messages) {
+// 核心状态机规范化本体（原 normalizeOpenAIMessages，原样下沉）：重构并对齐
+// OpenAI tool_calls 与 tool_results 顺序（根除 11148 tool_call_sequence_broken）。
+// 唯一调用方是 OpenAIMessageSequence.finalize() 与下方同名导出包装，
+// 不再有游离的直接调用——重挂顺序是序列模块的内部事务。
+function sortToolSequence(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
   const toolResultsMap = new Map();
@@ -209,6 +246,13 @@ export function normalizeOpenAIMessages(messages) {
   }
 
   return result;
+}
+
+// 导出包装（行为兼容：dispatch.js OpenAI 直传路径与既有测试依赖它）。
+// 排序本体已收归序列模块内部（sortToolSequence），此处只做一层转发，
+// 保证游离调用与序列收尾走同一口径。
+export function normalizeOpenAIMessages(messages) {
+  return sortToolSequence(messages);
 }
 
 /**
@@ -335,7 +379,9 @@ function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
 // intent 由 dispatch 预解析后传入（一请求只解析一次）；直接调用时传 null 自行解析。
 export function transformAnthropicToOpenAI(body, targetModel, config = {}, intent = null) {
   const model = targetModel || body.model || "deepseek-v4.1-flash";
-  const openaiMessages = [];
+  // 输出经由 OpenAIMessageSequence 累积：tool 交换的 fan-out 与 11148
+  // 重挂是序列模块的内部事务，本函数只追加完整交换并以 finalize() 收尾。
+  const sequence = new OpenAIMessageSequence();
 
   const rawMessages = Array.isArray(body.messages) ? body.messages : [];
   const totalMessages = rawMessages.length;
@@ -359,7 +405,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
 
   if (body.system) {
     if (typeof body.system === "string") {
-      openaiMessages.push({ role: "system", content: body.system });
+      sequence.push({ role: "system", content: body.system });
     } else if (Array.isArray(body.system)) {
       // Validate that each element in system array is an object with text property
       const systemTexts = [];
@@ -377,9 +423,9 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         }
         systemTexts.push(sysBlock.text);
       }
-      openaiMessages.push({ role: "system", content: systemTexts.join("\n") });
+      sequence.push({ role: "system", content: systemTexts.join("\n") });
     } else {
-      openaiMessages.push({ role: "system", content: String(body.system) });
+      sequence.push({ role: "system", content: String(body.system) });
     }
   }
 
@@ -389,7 +435,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
     assertNoAssistantImages(msg.role, msg.content);
 
     if (typeof msg.content === "string") {
-      openaiMessages.push({
+      sequence.push({
         role: msg.role === "assistant" ? "assistant" : "user",
         content: msg.content
       });
@@ -425,27 +471,29 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
             arguments: typeof tb.input === "string" ? tb.input : JSON.stringify(tb.input || {})
           }
         }));
-        openaiMessages.push({
-          role: "assistant",
-          content: textContent,
-          tool_calls: toolCalls
+        // 同消息的 tool_result companion 不丢弃：整段 tool 交换一次追加，
+        // assistant → tool 结果 → 尾随图片的顺序由序列模块锁定。
+        sequence.appendToolExchange({
+          assistantMessage: {
+            role: "assistant",
+            content: textContent,
+            tool_calls: toolCalls
+          },
+          toolResultBlocks,
+          imageParts
         });
-        // 同消息的 tool_result companion 不丢弃：以 tool 身份紧随其后发出。
-        const toolImages = pushToolResultMessages(openaiMessages, toolResultBlocks);
-        pushTrailingImageMessage(openaiMessages, imageParts, toolImages);
       } else if (toolResultBlocks.length > 0) {
         // 同消息的 text companion 不丢弃：先发文本再发 tool 结果。
         if (textBlocks.length > 0) {
           const combined = textBlocks.map(b => b.text || "").join("\n");
           if (combined) {
-            openaiMessages.push({
+            sequence.push({
               role: msg.role === "assistant" ? "assistant" : "user",
               content: combined
             });
           }
         }
-        const toolImages = pushToolResultMessages(openaiMessages, toolResultBlocks);
-        pushTrailingImageMessage(openaiMessages, imageParts, toolImages);
+        sequence.appendToolExchange({ toolResultBlocks, imageParts });
       } else {
         let combined = "";
         if (textBlocks.length === 1) {
@@ -453,7 +501,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         } else if (textBlocks.length > 1) {
           combined = textBlocks.map(b => b.text || "").join("\n");
         }
-        openaiMessages.push({
+        sequence.push({
           role: msg.role === "assistant" ? "assistant" : "user",
           // 无图片时保持 string content（与历史输出逐字节一致）；含图片才切成多模态 parts
           content: imageParts.length > 0 ? buildOpenAIContentParts(msg.content, imageParts) : combined
@@ -466,7 +514,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   const upstreamTools = isCompact ? undefined : transformToolsToOpenAI(body.tools);
   const payload = {
     model: model,
-    messages: normalizeOpenAIMessages(openaiMessages),
+    messages: sequence.finalize(),
     stream: body.stream !== false
   };
 

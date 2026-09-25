@@ -12,14 +12,24 @@
 //   - `{ kind: "done", response }` —— 拿到可用响应，直接返回。
 //   - `{ kind: "skip", reason? }` —— 从未真正尝试（如账号缺 token）；不计失败、不惩罚、不重试。
 //   - `{ kind: "switch", fail }` —— 把原始证据交给 driver 的 classify 定去留。
-//       fatal → 返回调用方预渲染的 fail.response；cooldown/retry → onRetryable 后试下一项。
-//       fail.response 必须预渲染（fatal 与耗尽时直接返回，不再二次拼装）。
+//       fatal → 返回 driver 构造的 fail.response；cooldown/retry → onRetryable 后试下一项。
+//       fail 即原始证据 `{ status, text, json? }`（+ 可选 force / headers / render hint），
+//       response 由 driver 经 buildFail 统一预渲染（fatal 与耗尽时直接返回，不再二次拼装）。
+//       兼容：自带 response 的旧 fail 原样保留（直接返回，不重建）。
 //       fail.force === "retry" —— 调用方断言“这次失败是当前项特有的”（如模型身份错误，
 //       后面有不同模型的候选），即使 classify 判 fatal 也切换；上报时不惩罚，只切换。
+//       fail.headers —— 渲染 hint（如上游响应头），classify 忽略，只供 renderFail 组装响应。
+//       fail.render —— 可选的单次渲染 hint (fail, item, index) => Response，优先于 driver 级 renderFail。
+//       outcome.evidence 可作为 fail 的别名（同为原始证据）。
 //   - `{ kind: "retry", fail, delayMs? }` —— 瞬时抖动（5xx / 传输错误），请求 driver 原地
 //       重试同一项。driver 依据 retryBudget 决定是否批准：批准则等待 delayMs 后再次 attempt
-//       同一项；预算耗尽则把这个 fail 升级为一条 switch 记录（照常 classify）。
+//       同一项；预算耗尽则把这个 fail 升级为一条 switch 记录（照常 classify，response 同样由
+//       driver 补齐）。fail 为空（传输错误）时记为传输失败的 lastError，不借用陈旧 lastFail。
 //       adapter 只“请求”重试，预算与 abort 由 driver 掌握。
+//
+// driver 选项 renderFail(fail, item, index) => Response —— 调用方声明“失败渲染口径”
+// （dispatch 的 CORS 信封 / workbuddy 的账号归因），attempt 不再手写 response。
+// 未声明且 fail 无预渲染时，driver 以 C2 信封兜底，保证 fatal 永不返回 undefined。
 //
 // 兼容：调用方若直接抛错（未包装成 outcome），driver 视为一次传输失败并切换到下一项
 // （isAbort(err) 为 true 时直接抛出终止）——这是 retry 的一种退化形态。
@@ -28,14 +38,48 @@
 // renderExhausted({ lastError, lastFail })。
 import { classifyFailure } from "./scheduler.js";
 import { corsHeaders } from "../http/headers.js";
-import { redactUpstreamText } from "../http/redact.js";
+import { errorBody, lastFailureDetail, upstreamErrorBody } from "../http/redact.js";
 import { log } from "../logging/logger.js";
+
+// fail 构造的唯一拥有者：attempt 只交原始证据，预渲染 response 归这里。
+// render(fail) 为调用方声明的渲染口径；缺省时以 C2 信封兜底（fatal 永不缺 response）。
+// headers 为渲染 hint（直通，不参与 classify）；render hint 本身不进入 canonical fail。
+export function buildFail(evidence = {}, render = null) {
+  const fail = { status: evidence.status, text: evidence.text };
+  if (evidence.json !== undefined) fail.json = evidence.json;
+  if (evidence.force !== undefined) fail.force = evidence.force;
+  if (evidence.headers !== undefined) fail.headers = evidence.headers;
+  const response = typeof render === "function" ? render(fail) : null;
+  fail.response = response || defaultFailResponse(fail);
+  return fail;
+}
+
+function defaultFailResponse(fail) {
+  const status = Number.isFinite(fail?.status) ? fail.status : 502;
+  return new Response(upstreamErrorBody(String(fail?.text ?? "none")), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders }
+  });
+}
+
+// 无 response 的原始证据经调用方口径（单次 hint 优先，其次 driver 级 renderFail，
+// 都没有则 C2 兜底）补齐为 canonical fail；已有 response 的旧 fail 原样保留。
+function ensureFail(raw, item, index, renderFail) {
+  if (raw.response) return raw;
+  const hint = typeof raw.render === "function" ? raw.render : null;
+  const render = hint
+    ? (f) => hint(f, item, index)
+    : (renderFail ? (f) => renderFail(f, item, index) : null);
+  return buildFail(raw, render);
+}
 
 export async function runFailover(items, {
   attempt,
   onRetryable,
   isAbort,
   renderExhausted,
+  // 失败渲染口径 (fail, item, index) => Response：attempt 只交原始证据时由 driver 补齐 response。
+  renderFail = null,
   // 每个 item 允许的原地重试次数上限（retry 预算）。0 = 完全不原地重试。
   retryBudget = 1,
   // retry outcome 未显式给 delayMs 时的默认等待。
@@ -87,12 +131,14 @@ export async function runFailover(items, {
         }
         // 预算耗尽：把这次瞬时失败升级为 switch 记录。fail 为空（传输错误）时
         // 记为传输失败的 lastError，不借用陈旧 lastFail 做 classify。
-        if (outcome.fail) {
-          lastFail = outcome.fail;
+        const rawRetry = outcome.fail ?? outcome.evidence;
+        if (rawRetry) {
+          const fail = ensureFail(rawRetry, item, index, renderFail);
+          lastFail = fail;
           lastFailureKind = "fail";
-          const action = classifyFailure(lastFail);
-          if (action === "fatal" && lastFail.force !== "retry") return lastFail.response;
-          if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, lastFail);
+          const action = classifyFailure(fail);
+          if (action === "fatal" && fail.force !== "retry") return fail.response;
+          if (onRetryable) await onRetryable(item, action === "fatal" ? "retry" : action, fail);
         } else {
           lastError = lastError || new Error("Upstream transport failed after retry budget exhausted");
           lastFailureKind = "error";
@@ -101,8 +147,9 @@ export async function runFailover(items, {
         break;
       }
       if (outcome?.kind === "switch") {
-        const fail = outcome.fail;
-        if (!fail) break;
+        const raw = outcome.fail ?? outcome.evidence;
+        if (!raw) break;
+        const fail = ensureFail(raw, item, index, renderFail);
         lastFail = fail;
         lastFailureKind = "fail";
         const action = classifyFailure(fail);
@@ -125,9 +172,8 @@ export async function runFailover(items, {
   const lastIsError = lastFailureKind === "error" && !!lastError;
   if (lastFail?.response && !lastIsError) return lastFail.response;
   if (renderExhausted) return renderExhausted({ lastError, lastFail });
-  return new Response(JSON.stringify({
-    error: { message: `All candidates failed. Last error: ${lastError?.message || redactUpstreamText(String(lastFail?.text || "none"))}` }
-  }), {
+  // C2：兜底 502 经同一 JSON 信封；可变部分恰好脱敏一次（见 lastFailureDetail）。
+  return new Response(errorBody(`All candidates failed. Last error: ${lastFailureDetail(lastError, lastFail)}`), {
     status: 502,
     headers: { "Content-Type": "application/json", ...corsHeaders }
   });

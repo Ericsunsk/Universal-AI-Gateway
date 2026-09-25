@@ -6,7 +6,7 @@ import { isModelLevelError } from "../core/scheduler.js";
 import { log } from "../logging/logger.js";
 import { hasCallChat, hasCallMessages, wantsStreamedChat, needsReasoningScrub } from "../core/contract.js";
 import { runFailover } from "../core/failover.js";
-import { redactUpstreamText } from "../http/redact.js";
+import { redactUpstreamText, errorBody } from "../http/redact.js";
 import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
 
@@ -25,12 +25,17 @@ function clientError(status, message) {
 // 上游响应体未经校验，可能含内部端点 / 账号标识 / 配额信息 —— 回吐前脱敏。
 // 本模块自身的参数校验文案（模型不存在、协议不支持）是可信的，直接透传，不必过这里。
 // 上游错误回执的唯一出口：4xx 与 5xx 同一脱敏口径、同一 JSON 信封；日志只记脱敏后文本。
+// C2：原文恰好脱敏一次，同一份 safe 文本同时用于日志与客户端信封（经 errorBody）。
 function upstreamErrorResponse(status, text, providerId) {
-  const redacted = redactUpstreamText(text);
+  const safe = redactUpstreamText(text);
   if (providerId !== undefined) {
-    log.warn("Upstream rejected request", { provider: providerId, status, text: redacted });
+    log.warn("Upstream rejected request", { provider: providerId, status, text: safe });
   }
-  return clientError(status, redacted);
+  // C2 信封：与 failover 兜底 / workbuddy 同一 {error:{message}} 形状。
+  return new Response(errorBody(safe), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders }
+  });
 }
 export async function dispatchExchange({
   protocol,
@@ -94,14 +99,17 @@ export async function dispatchExchange({
     onRetryable: async (candidate, action, fail) => {
       log.warn("Provider returned error, trying next candidate", { provider: candidate.provider, model: candidate.model, status: fail.status });
     },
-    renderExhausted: ({ lastError, lastFail }) => new Response(JSON.stringify({
-      error: {
-        message: `All available providers for model "${model}" failed. Last error: ${lastError?.message || (lastFail ? `${lastFail.status ?? ""} ${redactUpstreamText(String(lastFail.text || ""))}`.trim() : "none")}`
-      }
-    }), {
+    renderExhausted: ({ lastError, lastFail }) => new Response(errorBody(
+      // 状态前缀保留（历史格式）：单候选 fatal 走 lastFail.response，此处仅无证据/纯异常时可达。
+      // lastError.message 现与 lastFail.text 同口径脱敏一次（历史为原文直拼）。
+      `All available providers for model "${model}" failed. Last error: ${lastError?.message ? redactUpstreamText(lastError.message) : (lastFail ? `${lastFail.status ?? ""} ${redactUpstreamText(String(lastFail.text || ""))}`.trim() : "none")}`
+    ), {
       status: 502,
       headers: { "Content-Type": "application/json", ...corsHeaders }
     }),
+    // C3：fail 对象由 driver 经 buildFail 统一构造；attempt 只交原始证据，
+    // 预渲染响应由本口径按同一 upstreamErrorResponse 补齐（含 provider 归因日志）。
+    renderFail: (fail, item) => upstreamErrorResponse(fail.status, fail.text, item?.provider),
     attempt: async (candidate, candidateIndex) => {
       const provider = fleet.getProvider(candidate.provider);
       if (!provider) {
@@ -199,13 +207,12 @@ export async function dispatchExchange({
         if (laterModelsDiffer) {
           log.warn("Model unavailable, failing over to a different model", { provider: candidate.provider, model: candidate.model });
         }
+        // C3：只交原始证据（status + text + 可选 force）；response 由 driver 经 renderFail 补齐。
+        // 分类所需的 JSON 解析由 classifyFailure 完成，调用方不再预处理。
         return { kind: "switch", fail: {
           status,
           text: errText,
           ...(laterModelsDiffer ? { force: "retry" } : {}),
-          // 原始 errText 只作为分类证据留在 text 字段；回吐给客户端的那份必须脱敏。
-          // 4xx 与 5xx 同一出口：5xx 裸传 errText 会泄内部端点/凭据（单候选时 driver 直接返回 fail.response）。
-          response: upstreamErrorResponse(status, errText, candidate.provider)
         } };
       }
 

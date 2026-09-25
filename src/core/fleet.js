@@ -3,8 +3,6 @@ import { hasGetBalance, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
 import { log } from "../logging/logger.js";
 
 let cachedFleet = null;
-let cachedFleetConfigRef = null;
-let cachedFleetVersion = undefined;
 
 // 余额短缓存：providerId -> { at, value }（进程级，与 cachedFleet 同生命周期语义）
 const balanceCache = new Map();
@@ -135,38 +133,68 @@ export class ProviderFleet {
   }
 }
 
-// 单例获取 Fleet，复用 Provider 实例减少无谓的对象重新分配。
-// 判等优先用 config_version，但版本号是人工 bump、易忘：同时比对 providers 指纹
-//（id/type/enabled/region+账号结构），只加 provider 不 bump 时也能重建；
-// env 身份轮换（KV 绑定变化）同样触发重建，避免 provider 持有旧 env。
-// 注意：KV 直行写入配置时仍建议 bump config_version；无版本号时回退引用判等。
+// FleetConfig：重建规则的显式值对象（C4）。
+// ProviderFleet 消费的全部输入收敛一处：providers 全量快照（不再维护字段 allowlist——
+// baseUrl/apiKey/balanceUrl/账号 token 等凭据漂移同样触发重建）+ usage_provider_id
+//（getBalance 默认目标）+ config_version + env 身份 + 原引用。
+// 比较规则收敛在 fleetConfigEquals 内；调用方仍只传 (config, env)，签名不变。
+function sortCloneForFleet(value) {
+  if (Array.isArray(value)) return value.map(sortCloneForFleet);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const k of Object.keys(value).sort()) {
+      const v = value[k];
+      if (v === undefined || typeof v === "function" || typeof v === "symbol") continue;
+      out[k] = sortCloneForFleet(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 function providersFingerprint(config) {
   try {
-    const list = Array.isArray(config?.providers) ? config.providers : Object.values(config?.providers || {});
-    return JSON.stringify(list.map((p) => ({
-      id: p?.id, type: p?.type, enabled: p?.enabled,
-      region: p?.config?.region,
-      accounts: (p?.config?.accounts || []).map((a) => ({ id: a?.id, enabled: a?.enabled, userId: a?.userId }))
-    })));
-  } catch (e) {
+    const raw = config?.providers;
+    const list = Array.isArray(raw) ? raw : Object.values(raw || {});
+    // 全量快照 + 键序归一：语义相同（仅键序不同）不重建；任意值漂移（含凭据）必重建。
+    return JSON.stringify(sortCloneForFleet({
+      providers: list,
+      usage_provider_id: config?.usage_provider_id ?? null,
+    }));
+  } catch {
     return "";
   }
 }
-let cachedFleetProvidersHash = "";
-let cachedFleetEnv = null;
+
+export function toFleetConfig(config, env) {
+  return {
+    version: config?.config_version,
+    hash: providersFingerprint(config),
+    env,
+    ref: config,
+  };
+}
+
+// 重建规则唯一实现：env 身份轮换必重建（避免 provider 持有旧 env/KV 绑定）；
+// 有版本号时比 version+指纹（人工 bump 易忘，指纹兜底只加 provider 的场景）；
+// 无版本号时回退引用判等（与旧语义一致）。
+// 注意：KV 直行写入配置时仍建议 bump config_version。
+export function fleetConfigEquals(prev, next) {
+  if (!prev || !next) return false;
+  if (prev.env !== next.env) return false;
+  if (next.version !== undefined) {
+    return prev.version === next.version && prev.hash === next.hash;
+  }
+  return prev.ref === next.ref;
+}
+
+let cachedFleetConfig = null;
 export function getProviderFleet(config, env) {
-  const version = config?.config_version;
-  const hash = providersFingerprint(config);
-  const same = cachedFleet && (version !== undefined
-    ? (cachedFleetVersion === version && cachedFleetProvidersHash === hash && cachedFleetEnv === env)
-    : (cachedFleetConfigRef === config && cachedFleetEnv === env));
-  if (same) {
+  const next = toFleetConfig(config, env);
+  if (cachedFleet && cachedFleetConfig && fleetConfigEquals(cachedFleetConfig, next)) {
     return cachedFleet;
   }
   cachedFleet = new ProviderFleet(config, env);
-  cachedFleetConfigRef = config;
-  cachedFleetVersion = version;
-  cachedFleetProvidersHash = hash;
-  cachedFleetEnv = env;
+  cachedFleetConfig = next;
   return cachedFleet;
 }

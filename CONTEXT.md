@@ -20,6 +20,10 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 - **fleet** — the collection of providers plus load-balancing/health/scheduling behavior (`ProviderFleet`). The one place that dispatches to providers by model.
 
+- **fleet-config** — the explicit rebuild-identity value for the fleet cache (`toFleetConfig(config, env)` → `{ version, hash, env, ref }` in `src/core/fleet.js`). Callers pass `(config, env)`; comparison lives inside via `fleetConfigEquals`. A hit reuses the singleton, a miss rebuilds.
+
+- **fleet fingerprint** — the `hash` inside fleet-config: key-order-normalized snapshot of `providers` plus `usage_provider_id`. Any drift (including credentials) changes fleet identity; field-allowlist enumeration is abolished.
+
 - **provider contract** — the documented shape of what a provider adapter may implement (`src/core/contract.js`). Capability predicates (`hasGetBalance`/`hasDailyCheckin`/`hasCallChat`/`hasCallMessages`/`wantsStreamedChat`/`hasTokenRefresh`) replace hand-written `typeof` probes and `provider.type` switches. Dispatch probes capabilities, never the tag; `callChat` vs `callMessages` is decided by `hasCallMessages`, forced streaming by the adapter-declared `forceStream` flag.
 
 - **account** — one WorkBuddy credential inside a provider's `accounts` pool (`{ id, userId, accessToken, refreshToken }`). Multi-account round-robin happens at the account level, *below* the provider level.
@@ -50,6 +54,14 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 - **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and applies the intent exactly once per request (`transformAnthropicToOpenAI` 输出已含 OpenAI 映射，不二次 apply；唯 WorkBuddy 方言需清洗）。
 
+- **line-source** — the shared upstream-SSE parsed-chunk source (`iterSseParsedChunks` in `src/exchange/stream.js`): owns row-buffer parsing and yields `{ parsed, rawLine }`. Both translators consume it but keep their own emission handling; the unterminated remainder is exported via `tail` for the single-JSON fallback.
+
+- **message sequence** — the single owner of OpenAI message ordering (`OpenAIMessageSequence` in `src/exchange/transform.js`): tool fan-out and `11148` re-hanging are its internals, exposed only as `appendToolExchange` + `finalize`.
+
+- **tool exchange** — one atomic tool exchange: assistant `tool_calls` → companion tool results → trailing image `user` message last. Callers never send the parts separately.
+
+- **error envelope** — the single client-visible failure shape `{error:{message}}`, constructed in `src/http/redact.js` (`errorBody` / `upstreamErrorBody`). Callers pass raw text; the envelope module redacts exactly once (**redact-once**, truncation `UPSTREAM_ERR_MAX` included).
+
 ## Classification vocabulary (in the scheduler)
 
 - **cooldown** — a *punishable* failure (429, 402/403, quota, safety/compliance filter, Tencent business error). Cool the account down, then switch.
@@ -58,3 +70,11 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 - **attempt** — a single network round-trip against one candidate: one fetch, no sleep, no inner loop. It maps that one round-trip to exactly one **outcome**. (Distinct from *candidate*: one candidate may be attempted more than once.)
 - **outcome** — the closed vocabulary an **attempt** returns to the failover driver: `done` (usable response), `skip` (never tried — e.g. missing credential; no penalty), `switch` (hand raw evidence to the driver's `classifyFailure`), or `retry` (transient transport/5xx wobble; asking the driver to re-attempt the same candidate). Only the driver interprets outcomes; an adapter never classifies.
 - **retry budget** — the driver-owned cap on in-place re-attempts of one candidate (`retry` outcomes). The adapter requests a retry; the driver decides whether the budget allows it, owns the delay and the abort check. When the budget is spent, the attached fail escalates to `switch` and is classified like any other failure.
+
+- **fail evidence** — the raw evidence an attempt hands the driver (`{status, text, json?}` plus `force` / render hint), never a pre-rendered `response`.
+
+- **buildFail** — the driver's sole fail constructor (`src/core/failover.js`): evidence plus render caliber yields the canonical fail.
+
+- **canonical fail** — a driver-completed fail: evidence fields plus a guaranteed `response`. `onRetryable` and exhausted handling consume only this shape.
+
+- **renderFail** — the caller-declared failure-rendering caliber `(fail, item, index) => Response` (dispatch CORS envelope / workbuddy account attribution); a per-fail `render` hint takes precedence over it.
