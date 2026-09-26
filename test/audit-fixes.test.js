@@ -92,7 +92,7 @@ test("auth model gate strips reasoning suffix; proto keys are 401 not 403", () =
     master_key: "master",
     virtual_keys: { k1: { enabled: true, models: ["m"] } }
   };
-  const req = (model) => ({
+  const req = () => ({
     headers: new Headers({ Authorization: "Bearer k1" })
   });
   assert.equal(authenticateAccess(req(), cfg, { model: "m[high]" }).ok, true);

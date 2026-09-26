@@ -133,7 +133,7 @@ async function callGateway({ path, body, signal }) {
 }
 
 // Anthropic SSE 事件 → 汇聚结构（与 stream.js 输出形状对齐）
-function consume(evt, acc, emit) {
+function consume(evt, emit) {
   switch (evt.type) {
     case "message_start": {
       const u = evt.message?.usage || {};
@@ -291,7 +291,7 @@ async function scenarioCache() {
 }
 
 // ---- 场景 4：usage / stop_reason 完整性（合并到上面已覆盖，此处做总结断言） ----
-function summarize(all) {
+function summarize() {
   console.log("\n== 汇总 ==");
   const passed = results.filter(r => r.ok).length;
   console.log(`  ${passed}/${results.length} 断言通过`);

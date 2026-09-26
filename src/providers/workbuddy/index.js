@@ -1,4 +1,4 @@
-import { sanitizeMessages, sanitizeWorkbuddyPayload } from "./sanitize.js";
+import { sanitizeWorkbuddyPayload } from "./sanitize.js";
 import { buildResponseHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
 import { runFailover, buildFail } from "../../core/failover.js";
@@ -81,7 +81,7 @@ export function affinityKeyForCall(payload, options = {}) {
     const tools = JSON.stringify(payload?.tools ?? []);
     const sig = sys + "\n" + tools;
     if (sig.trim().length > 8) return `sig:${hashString32(sig)}`;
-  } catch (e) {}
+  } catch {}
   return null;
 }
 
@@ -395,7 +395,7 @@ export class WorkBuddyProvider {
                 headers: resp.headers,
               }, exposeAccount) };
             }
-          } catch (e) {}
+          } catch {}
         }
         await setAccountCooldown(account, this.env, "clear");
         return { kind: "done", response: accountResponse(account, {

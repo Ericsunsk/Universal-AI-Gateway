@@ -63,7 +63,7 @@ test("iterSseParsedChunks caps malformed-line warns at 3 with caller wording", a
   const lines = [];
   setLogSink((line) => { lines.push(line); });
   try {
-    const bad = Array.from({ length: 5 }, (_, i) => `data: {broken-${i}\n`).join("") + 'data: {"ok":true}\n';
+    const bad = Array.from({ length: 5 }, (_v, i) => `data: {broken-${i}\n`).join("") + 'data: {"ok":true}\n';
     const upstream = sseResponse([bad]);
     const items = await collect(upstream.body.getReader(), { warnMessage: "Skipping malformed SSE line (non-streaming)" });
     assert.equal(items.length, 1);

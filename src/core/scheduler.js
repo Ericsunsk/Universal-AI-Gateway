@@ -230,7 +230,7 @@ function tryParseJson(bodyText) {
   try {
     const v = JSON.parse(bodyText);
     return typeof v === "object" && v !== null ? v : null;
-  } catch (e) {
+  } catch {
     return null;
   }
 }

@@ -85,7 +85,7 @@ test("getConfig singleflights concurrent refreshes into one KV read", async () =
     API_KEY: "sk-test",
     MASTER_KEY: "sk-master",
     GATEWAY_KV: {
-      get: async (k) => { kvGets++; await new Promise(r => setTimeout(r, 20)); return store.get(k) ?? null; },
+      get: async (k) => { kvGets++; await new Promise(r => { setTimeout(r, 20); }); return store.get(k) ?? null; },
       put: async (k, v) => store.set(k, v),
       delete: async (k) => { store.delete(k); }
     }
@@ -160,4 +160,91 @@ test("balanceCache keeps previous providers cached and evicts only the oldest (M
   // 最近的键仍缓存：probe-159 第一次刚写，第二次不再重算 → 计数停在 1
   await fleet.getBalance("probe-159");
   assert.equal(upstreamCalls.get("probe-159"), 1, "recent entry still served from cache");
+});
+
+// --- /v1/messages/count_tokens（#11）---
+
+test("count_tokens requires auth", async () => {
+  const env = makeEnv();
+  const resp = await handler.fetch(new Request("https://x/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }] })
+  }), env);
+  assert.equal(resp.status, 401);
+});
+
+test("count_tokens returns the Anthropic shape { input_tokens }", async () => {
+  const env = makeEnv();
+  const resp = await handler.fetch(new Request("https://x/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { Authorization: "Bearer sk-test", "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hello world" }] })
+  }), env);
+  assert.equal(resp.status, 200);
+  const body = await resp.json();
+  assert.equal(typeof body.input_tokens, "number");
+  assert.ok(body.input_tokens > 0, "input_tokens must be a positive number");
+  assert.ok(!("content" in body), "count_tokens must not return message content");
+});
+
+test("count_tokens rejects non-POST without hitting a 500", async () => {
+  const env = makeEnv();
+  const resp = await handler.fetch(new Request("https://x/v1/messages/count_tokens", {
+    method: "GET",
+    headers: { Authorization: "Bearer sk-test" }
+  }), env);
+  assert.equal(resp.status, 405);
+});
+
+test("count_tokens tolerates an invalid JSON body without a 500", async () => {
+  const env = makeEnv();
+  const resp = await handler.fetch(new Request("https://x/v1/messages/count_tokens", {
+    method: "POST",
+    headers: { Authorization: "Bearer sk-test", "Content-Type": "application/json" },
+    body: "{ not json"
+  }), env);
+  assert.equal(resp.status, 400);
+  const body = await resp.json();
+  assert.deepEqual(Object.keys(body), ["error"], "must use the shared error envelope");
+  assert.equal(body.error.message, "Invalid JSON body");
+});
+
+test("count_tokens enforces model whitelist on virtual keys", async () => {
+  const env = {
+    API_KEY: "sk-test",
+    MASTER_KEY: "sk-master",
+    GATEWAY_KV: {
+      get: async (k) => {
+        if (k === "GATEWAY_CONFIG") {
+          return JSON.stringify({
+            virtual_keys: {
+              "sk-restricted": { enabled: true, models: ["allowed-model"] }
+            }
+          });
+        }
+        return null;
+      },
+      put: async () => {},
+      delete: async () => {}
+    }
+  };
+  await getConfig(env, true);
+  try {
+    const respForbidden = await handler.fetch(new Request("https://x/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { Authorization: "Bearer sk-restricted", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "forbidden-model", messages: [{ role: "user", content: "hi" }] })
+    }), env);
+    assert.equal(respForbidden.status, 403);
+
+    const respAllowed = await handler.fetch(new Request("https://x/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { Authorization: "Bearer sk-restricted", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "allowed-model", messages: [{ role: "user", content: "hi" }] })
+    }), env);
+    assert.equal(respAllowed.status, 200);
+  } finally {
+    await getConfig(makeEnv(), true);
+  }
 });

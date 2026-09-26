@@ -40,7 +40,7 @@ const sseStream = (chunks) => new ReadableStream({
   async start(c) {
     const enc = new TextEncoder();
     for (const ch of chunks) {
-      await new Promise(r => setImmediate(r));
+      await new Promise(r => { setImmediate(r); });
       c.enqueue(enc.encode(ch));
     }
     c.close();
@@ -79,7 +79,7 @@ async function scenarioA(n) {
     const ttfb = performance.now() - t0;
     // 读完剩余流再释放：中途 cancel 会让转译协程卡在 writer 背压上（已知泄漏，见 stream.js），
     // bench 必须走完整消费路径才干净。
-    while (!(await reader.read()).done) {}
+    while (!(await reader.read()).done) { /* 消费整条流 */ }
     reader.releaseLock();
     samples.push(ttfb);
   }

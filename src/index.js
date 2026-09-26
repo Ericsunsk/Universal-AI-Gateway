@@ -1,7 +1,9 @@
 import { getConfig, VERSION } from "./config/config.js";
 import { authenticateAccess, timingSafeEqual } from "./auth/auth.js";
 import { corsHeaders } from "./http/headers.js";
+import { errorBody } from "./http/redact.js";
 import { dispatchExchange } from "./exchange/exchange.js";
+import { recordCacheControl, getCacheControlStats } from "./exchange/cacheControlStats.js";
 import { getProviderFleet } from "./core/fleet.js";
 import { checkRateLimit, RATE_LIMIT_PRESETS, extractRateLimitKey, rateLimitResponse } from "./ratelimit/ratelimit.js";
 import { runWithLogger, extractTraceId, generateTraceId, log } from "./logging/logger.js";
@@ -60,7 +62,10 @@ async function handleRequest(request, env) {
       return new Response(JSON.stringify({
         service: "universal-ai-gateway",
         version: VERSION,
-        kvEnabled: !!kv
+        kvEnabled: !!kv,
+        // cache_control 断点观测（#12）：供决定是否做断点透传。
+        // 进程级累计、随实例归零；仅持有效 key 可读，不对外公开。
+        cacheControl: getCacheControlStats()
       }, null, 2), {
         status: 200,
         headers: { "Content-Type": "application/json", ...corsHeaders }
@@ -139,6 +144,53 @@ async function handleRequest(request, env) {
       });
     }
 
+    // 5.5 Anthropic count_tokens 接口 (/v1/messages/count_tokens)
+    // 必须在 /v1/messages 的等值判断之前无冲突（等值比较不会误匹配子路径），
+    // 但独立成段以便复用同一鉴权与限流口径。
+    // Anthropic SDK / Claude Code 用它做上下文预算管理；缺此路由会 404 中断客户端。
+    if (path === "/messages/count_tokens" || path === "/v1/messages/count_tokens") {
+      if (request.method !== "POST") {
+        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
+      }
+      const preAuth = authenticateAccess(request, config);
+      if (!preAuth.ok) return preAuth.response;
+
+      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+      const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
+      const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
+      if (!rateLimitResult.allowed) {
+        return rateLimitResponse(rateLimitResult, corsHeaders);
+      }
+
+      if (bodyTooLarge(request)) {
+        return new Response(errorBody("Request body too large"), {
+          status: 413,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      }
+      try {
+        const body = await request.json();
+        const requestModel = body?.model || "deepseek-v4.1-flash";
+        const auth = authenticateAccess(request, config, { model: requestModel });
+        if (!auth.ok) return auth.response;
+
+        // 复用响应侧的字符数/4 口径，保证与实际计费口径一致。
+        // 估的是入站请求的序列化长度：包含 system / messages / tools 全部字段，
+        // 与上游 OpenAI 侧 tokenizer 的偏差在同一量级内 —— 客户端要的是量级不是精确值。
+        const inputTokens = Math.max(1, Math.ceil(JSON.stringify(body || {}).length / 4));
+        return new Response(JSON.stringify({ input_tokens: inputTokens }), {
+          status: 200,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      } catch {
+        // 非法 JSON：返回标准错误信封，绝不 500
+        return new Response(errorBody("Invalid JSON body"), {
+          status: 400,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        });
+      }
+    }
+
     // 6. Anthropic Messages 接口 (/v1/messages)
     if (path === "/messages" || path === "/v1/messages") {
       if (request.method !== "POST") {
@@ -158,7 +210,7 @@ async function handleRequest(request, env) {
       }
 
       if (bodyTooLarge(request)) {
-        return new Response(JSON.stringify({ error: { message: "Request body too large" } }), {
+        return new Response(errorBody("Request body too large"), {
           status: 413,
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });
@@ -169,6 +221,9 @@ async function handleRequest(request, env) {
 
         const auth = authenticateAccess(request, config, { model: requestModel });
         if (!auth.ok) return auth.response;
+
+        // 观测（#12）：只计数，不改变行为。用于决定是否值得做 cache_control 断点透传。
+        recordCacheControl(body);
 
         return await dispatchExchange({
           protocol: "anthropic",
@@ -181,7 +236,7 @@ async function handleRequest(request, env) {
         });
       } catch (err) {
         log.error("Anthropic dispatch failed", { error: err?.message || String(err) });
-        return new Response(JSON.stringify({ error: { message: "Internal Server Error" } }), {
+        return new Response(errorBody("Internal Server Error"), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });

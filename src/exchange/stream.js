@@ -53,21 +53,61 @@ export function extractCachedTokens(parsed) {
   return Number.isFinite(Number(n)) && Number(n) > 0 ? Number(n) : 0;
 }
 
-// OpenAI finish_reason -> Anthropic stop_reason 映射
-// Anthropic 只有 end_turn / max_tokens / stop_sequence / tool_use 四种；
-// content_filter（安全过滤截断）没有对应项，归为 end_turn（自然停止），
-// 不能用 stop_sequence（那表示命中用户自定义停止序列，语义错误）。
-export function finishReasonToAnthropic(finishReason) {
+/**
+ * 统一解析终局 stop_reason 与 stop_sequence。
+ * 流式与非流式转译共享此唯一口径，避免逻辑分歧与重复代码。
+ *
+ * 映射规则：
+ * - "length" → stop_reason: "max_tokens", stop_sequence: null
+ * - "tool_calls" / "function_call" / "tool_use" → stop_reason: "tool_use", stop_sequence: null
+ * - "stop_sequence" → 上游明确返回命中停止序列（Anthropic/vLLM/LiteLLM 等）：
+ *   若正文命中某条序列则回显该序列；否则取下发的首条序列（或 null）
+ * - "stop" → OpenAI 上游在自然停止与命中停止序列时均返回 "stop"：
+ *   若下发过停止序列且在正文尾部探测到命中，判定为 "stop_sequence" 并附带该序列；
+ *   否则一律收敛为 "end_turn", stop_sequence: null
+ * - 其余 (content_filter / null / 未知) → stop_reason: "end_turn", stop_sequence: null
+ *
+ * @param {string|null} finishReason - 上游 finish_reason 或 blockState.stopReason
+ * @param {object} options
+ * @param {boolean} [options.hasStopSequences=false]
+ * @param {string} [options.text=""]
+ * @param {string[]} [options.stopSequences=[]]
+ * @returns {{stopReason: string, stopSequence: string|null}}
+ */
+export function resolveStopDetails(finishReason, { hasStopSequences = false, text = "", stopSequences = [] } = {}) {
   switch (finishReason) {
     case "length":
-      return "max_tokens";
+      return { stopReason: "max_tokens", stopSequence: null };
     case "tool_calls":
     case "function_call":
-      return "tool_use";
+    case "tool_use":
+      return { stopReason: "tool_use", stopSequence: null };
+    case "stop_sequence": {
+      const hit = Array.isArray(stopSequences)
+        ? stopSequences.find(s => typeof s === "string" && s.length > 0 && text.includes(s))
+        : null;
+      return {
+        stopReason: "stop_sequence",
+        stopSequence: hit || (Array.isArray(stopSequences) && stopSequences.length > 0 ? stopSequences[0] : null)
+      };
+    }
+    case "stop": {
+      if (hasStopSequences && Array.isArray(stopSequences) && stopSequences.length > 0) {
+        const hit = stopSequences.find(s => typeof s === "string" && s.length > 0 && text.includes(s));
+        if (hit) {
+          return { stopReason: "stop_sequence", stopSequence: hit };
+        }
+      }
+      return { stopReason: "end_turn", stopSequence: null };
+    }
     case "content_filter":
     default:
-      return "end_turn";
+      return { stopReason: "end_turn", stopSequence: null };
   }
+}
+
+export function finishReasonToAnthropic(finishReason, opts = {}) {
+  return resolveStopDetails(finishReason, opts).stopReason;
 }
 
 // 纯函数：把单个已解析的 OpenAI SSE chunk 归约为一组「发射指令」（按发射顺序排列）。
@@ -103,7 +143,7 @@ export function reduceOpenAIChunkAll(parsed) {
   if (Array.isArray(delta?.tool_calls) && delta.tool_calls.length > 0) {
     out.push({
       kind: "tool_use",
-      calls: delta.tool_calls.map((tc, i) => ({
+      calls: delta.tool_calls.map((tc) => ({
         id: tc.id || null,
         name: tc.function?.name || "tool",
         args: tc.function?.arguments || "",
@@ -121,6 +161,10 @@ export function reduceOpenAIChunkAll(parsed) {
 // 主动收尾而不是让客户端挂到平台超时。只看“无字节”时长，持续吐 token 的慢模型不受影响。
 // options.stallMs 供测试注入小值；生产默认 180s（< Vercel 300s 上限，远大于实测最慢模型的 118s）。
 const UPSTREAM_STALL_MS = 180 * 1000;
+
+// thinking block 回传所需的占位 signature（Anthropic 只要求 non-empty string）。
+// 上游 OpenAI 协议不产生真实 signature，此处合成仅为满足协议形状。
+const SYNTHETIC_THINKING_SIGNATURE = "gateway-synthetic-thinking-signature";
 
 // ---------------------------------------------------------------------------
 // tool_call 分片 → 累积器（非流式落袋的唯一合并点，按 index 定址）
@@ -206,13 +250,25 @@ export function mergeSseToolFrags(frags, calls) {
  * 调用方负责 `await writer.write()`，从而本类可脱离流做纯单测。
  */
 export class StreamBlockState {
-  constructor() {
+  /**
+   * @param {string[]} [stopSequences] - 本次请求下发的停止序列。
+   *   为空（绝大多数请求）时**完全不累积 textTail** —— 该功能未被请求，
+   *   不应在每条正文增量上做字符串分配（这是 TTFT 关键路径）。
+   */
+  constructor(stopSequences = []) {
     this.blockIndex = -1;
     this.blockType = null;   // null | "thinking" | "text" | "tool_use"
     this.toolId = null;
     this.toolName = null;
     this.emittedChars = 0;
     this.stopReason = "end_turn";
+    // 正文尾部窗口：仅保留「最长停止序列」长度的尾部，供终局判定 stop_sequence 命中。
+    // 窗口必须 >= 最长序列，否则长序列永远匹配不到（曾写死 64，长度 >64 的序列恒失配）。
+    // 无停止序列时为 0 长度，textDelta 走零开销分支。
+    this.tailWindow = stopSequences.reduce(
+      (m, s) => (typeof s === "string" && s.length > m ? s.length : m), 0
+    );
+    this.textTail = "";
   }
 
   #frame(event, payload) {
@@ -221,9 +277,21 @@ export class StreamBlockState {
 
   #stopFrame() {
     if (this.blockType === null || this.blockIndex < 0) return [];
-    const f = this.#frame("content_block_stop", { type: "content_block_stop", index: this.blockIndex });
+    const out = [];
+    // thinking 块收尾前补 signature_delta：Anthropic 规定 thinking block 必须带
+    // signature 才能被客户端回传，否则下一轮可能因 signature: Field required 报 400。
+    // 上游为 OpenAI 协议，无 signature 概念，合成非空占位串满足协议形状即可；
+    // 客户端回传的该块会在请求侧被丢弃（见 transform.js），不会打到上游。
+    if (this.blockType === "thinking") {
+      out.push(this.#frame("content_block_delta", {
+        type: "content_block_delta",
+        index: this.blockIndex,
+        delta: { type: "signature_delta", signature: SYNTHETIC_THINKING_SIGNATURE }
+      }));
+    }
+    out.push(this.#frame("content_block_stop", { type: "content_block_stop", index: this.blockIndex }));
     this.blockType = null;
-    return [f];
+    return out;
   }
 
   /**
@@ -267,6 +335,13 @@ export class StreamBlockState {
   textDelta(text) {
     if (this.blockType !== "text") return [];
     this.emittedChars += text.length;
+    // 仅在本请求确实下发了停止序列时才维护尾部窗口 —— 否则热路径零额外开销。
+    if (this.tailWindow > 0) {
+      const joined = this.textTail + text;
+      this.textTail = joined.length > this.tailWindow
+        ? joined.slice(joined.length - this.tailWindow)
+        : joined;
+    }
     return [this.#frame("content_block_delta", {
       type: "content_block_delta", index: this.blockIndex,
       delta: { type: "text_delta", text }
@@ -356,7 +431,7 @@ export function toolCallsToAnthropicBlocks(acc) {
     } else if (typeof rawArgs === "string" && rawArgs.trim()) {
       try {
         toolInput = JSON.parse(rawArgs);
-      } catch (e) {
+      } catch {
         toolInput = { _raw: rawArgs };
       }
     }
@@ -393,6 +468,7 @@ export async function* iterSseParsedChunks(reader, options = {}) {
   const warnMessage = options.warnMessage ?? "Skipping malformed SSE line";
   const onBytes = typeof options.onBytes === "function" ? options.onBytes : null;
   const tail = options.tail ?? null;
+  // 必须初始化为空串：下方是 `buffer += decoder.decode(...)`，无初值会拼出 "undefined..."。
   let buffer = "";
   let badLineWarns = 0;
   while (true) {
@@ -410,7 +486,7 @@ export async function* iterSseParsedChunks(reader, options = {}) {
       if (jsonStr === "[DONE]") continue;
       try {
         yield { parsed: JSON.parse(jsonStr), rawLine: jsonStr };
-      } catch (e) {
+      } catch {
         if (badLineWarns++ < 3) log.warn(warnMessage, { line: String(jsonStr).slice(0, 120) });
       }
     }
@@ -421,6 +497,8 @@ export async function* iterSseParsedChunks(reader, options = {}) {
 
 export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
   const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
+  // 本次请求下发的停止序列：用于流式终局判定 stop_reason 是 stop_sequence 还是 end_turn。
+  const stopSequences = Array.isArray(options?.stopSequences) ? options.stopSequences : [];
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -435,6 +513,11 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
   (async () => {
     let lastUpstreamByteAt = Date.now();
     let stalled = false;
+    // 保活/熔断轮询间隔：跟随 stallMs 而非写死 4s。
+    // 写死会让注入小 stallMs 的测试白等一个整拍（stallMs:50 也要等 4s），
+    // 生产上则让检测时刻落在 4s 网格上 —— stallMs=180s 最坏要 184s 才熔断。
+    // 下限 10ms 防误传 0 造成忙轮询；上限 4s 保持原有保活节奏不变。
+    const pingIntervalMs = Math.min(4000, Math.max(10, Math.floor(stallMs / 4)));
     let pingInterval = setInterval(async () => {
       // 停滞熔断：上游长时间零字节 → 取消上游读取，读循环以 done 收尾走正常闭环
       //（不 abort writer，否则下游收不到 message_stop）。客户端看到空内容而非无限挂起。
@@ -442,13 +525,13 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         stalled = true;
         log.warn("Upstream stalled, closing stream", { stall_ms: stallMs, model: requestedModel });
         clearInterval(pingInterval);
-        try { upstreamReader?.cancel(new Error("Upstream stalled")); } catch (e) {}
+        try { upstreamReader?.cancel(new Error("Upstream stalled")); } catch {}
         return;
       }
       try {
         await writer.write(KEEP_ALIVE_BYTES);
-      } catch (e) {}
-    }, 4000);
+      } catch {}
+    }, pingIntervalMs);
 
     // 监听客户端主动中断取消（Ctrl+C / 停止生成），级联终止上游读取与保活定时器。
     // 上游 reader 必须同步 cancel：否则协程卡在 reader.read()（上游停顿）或 writer.write()
@@ -457,8 +540,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     let upstreamReader = null;
     const abortUpstream = (reason) => {
       clearInterval(pingInterval);
-      try { upstreamReader?.cancel(reason); } catch (e) {}
-      try { writer.abort(reason instanceof Error ? reason : new Error("Client aborted")); } catch (e) {}
+      try { upstreamReader?.cancel(reason); } catch {}
+      try { writer.abort(reason instanceof Error ? reason : new Error("Client aborted")); } catch {}
     };
     if (clientSignal) {
       if (clientSignal.aborted) {
@@ -489,16 +572,16 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         usage: { input_tokens: 0, output_tokens: 0 }
       }
     })}\n\n`));
-    } catch (e) {
+    } catch {
       clearInterval(pingInterval);
       return;
     }
 
     const streamDecoder = new TextDecoder();
-    let buffer = "";
+    let buffer;
 
     // block 状态机：取代此前散落的 currentBlockIndex/Type/ToolId/ToolName 四个可变变量。
-    const blockState = new StreamBlockState();
+    const blockState = new StreamBlockState(stopSequences);
     // 批量写出状态机产出的 SSE 帧（状态机本身不发 IO，便于纯单测）。
     const writeAll = async (frames) => {
       for (const f of frames) await writer.write(textEncoder.encode(f));
@@ -562,7 +645,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
             await writeAll(blockState.open("text"));
             await writeAll(blockState.textDelta(text));
           }
-        } catch (e) {}
+        } catch {}
       }
 
       // 核心协议保障：若整个流未产生任何 content_block，强制合成 1 个空 text 块闭环，绝不让 Claude Code 触发 ph.length === 0 的流式回退报警
@@ -581,9 +664,17 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       // 取上游 usage 与字符估算的较大值（与非流式 formatOpenAIToAnthropicJson 口径一致）。
       // input_tokens 采信上游 usage.prompt_tokens：缺失时为 0（不估算输入长度）。
       const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
+      // 终局 stop_reason 与 stop_sequence：统一委托 resolveStopDetails 判定
+      const stopDetails = blockState.stopReason === "tool_use"
+        ? { stopReason: "tool_use", stopSequence: null }
+        : resolveStopDetails(blockState.stopReason, {
+            hasStopSequences: stopSequences.length > 0,
+            text: blockState.textTail,
+            stopSequences
+          });
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
-        delta: { stop_reason: blockState.stopReason, stop_sequence: null },
+        delta: { stop_reason: stopDetails.stopReason, stop_sequence: stopDetails.stopSequence },
         usage: { input_tokens: reportedInputTokens, output_tokens: finalOutputTokens }
       })}\n\n`));
 
@@ -606,15 +697,15 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
           usage: { input_tokens: reportedInputTokens, output_tokens: errOutputTokens }
         })}\n\n`));
         await writer.write(EVENT_MSG_STOP_BYTES);
-      } catch (e) {}
+      } catch {}
     } finally {
       clearInterval(pingInterval);
       // 无论正常收尾还是异常断流都记一次：命中率 = cachedResponses / responses
-      try { recordUpstreamCache(maxCachedTokens); } catch (e) {}
-      try { await writer.close(); } catch (e) {}
+      try { recordUpstreamCache(maxCachedTokens); } catch {}
+      try { await writer.close(); } catch {}
     }
   })().catch(err => {
-    try { writer.abort(err); } catch (e) {}
+    try { writer.abort(err); } catch {}
   });
 
   return new Response(readable, {
@@ -625,7 +716,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 
 // 内部非流式转译：OpenAI -> Anthropic JSON (优化：增量流式读取，零全量内存拷贝)
 // 导出给 ./dispatch.js 的非流式路径使用（对外仍经 exchange.js 门面）。
-export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, extraHeaders = {}) {
+export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, extraHeaders = {}, options = {}) {
+  const stopSequences = Array.isArray(options?.stopSequences) ? options.stopSequences : [];
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
@@ -633,7 +725,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   let accumulatedThinking = "";
   let accumulatedToolCalls = [];
   const sseToolFrags = new Map(); // tool id -> { id, name, args }，SSE 分片在此按 id 拼接
-  let buffer = "";
+  let buffer;
   let inputTokens = 0;
   let outputTokens = 0;
   let accumulatedFinishReason = null;
@@ -705,7 +797,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
         if (parsed.choices?.[0]) {
           accumulatedFinishReason = parsed.choices[0].finish_reason;
         }
-      } catch (e) {
+      } catch {
         accumulated = buffer.trim();
       }
     }
@@ -737,7 +829,14 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
 
   content.push({ type: "text", text: accumulated });
 
-  try { recordUpstreamCache(maxCachedTokens); } catch (e) {}
+  try { recordUpstreamCache(maxCachedTokens); } catch {}
+
+  // 停序列命中判定：统一委托 resolveStopDetails 判定
+  const stopDetails = resolveStopDetails(accumulatedFinishReason, {
+    hasStopSequences: stopSequences.length > 0,
+    text: accumulated,
+    stopSequences
+  });
 
   return new Response(JSON.stringify({
     id: msgId,
@@ -745,8 +844,8 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     role: "assistant",
     content: content,
     model: requestedModel || "claude-3-5-haiku-20241022",
-    stop_reason: finishReasonToAnthropic(accumulatedFinishReason),
-    stop_sequence: null,
+    stop_reason: stopDetails.stopReason,
+    stop_sequence: stopDetails.stopSequence,
     usage: { input_tokens: inputTokens, output_tokens: outputTokens }
   }), {
     status: 200,

@@ -581,7 +581,7 @@ test("streamOpenAIToAnthropic cancels upstream on client abort (no stranded pump
   const first = await reader.read();
   assert.equal(first.done, false, "first block must arrive before abort");
   ac.abort();
-  await new Promise(r => setTimeout(r, 50));
+  await new Promise(r => { setTimeout(r, 50); });
   assert.equal(upstreamCancelled, true, "upstream reader must be cancelled on abort");
   reader.releaseLock();
 });
@@ -591,7 +591,7 @@ test("dispatchExchange fails over when upstream says model unavailable (differen
   const fakeFleet = {
     getProvider: (name) => ({
       type: "openai",
-      callChat: async (payload) => {
+      callChat: async (_payload) => {
         calls.push(name);
         if (name === "first") {
           return new Response(JSON.stringify({ error: { message: "Model is unavailable" } }), { status: 400 });
@@ -648,6 +648,9 @@ test("streamOpenAIToAnthropic closes stalled upstream instead of hanging", async
   const events = await readAnthropicEvents(resp);
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 15000, `stall guard must fire promptly (took ${elapsed}ms)`);
+  // 轮询间隔必须跟随 stallMs：写死 4s 会让本用例白等一个整拍（曾实测 4002ms）。
+  // 收紧到 1s —— 既容忍 CI 抖动，又能守住这条例外不复发。
+  assert.ok(elapsed < 1000, `stall polling must track stallMs, not a fixed 4s grid (took ${elapsed}ms)`);
   assert.equal(events[0].event, "message_start");
   assert.equal(events[events.length - 1].event, "message_stop");
   const text = events
@@ -1074,11 +1077,21 @@ test("StreamBlockState opens a block and closes the previous one", async () => {
   assert.equal(f1.length, 1);
   assert.ok(f1[0].includes("content_block_start"));
   assert.ok(f1[0].includes("\"index\":0"));
-  // 切到 text：必须先发 content_block_stop(index 0) 再 start(index 1)
+  // 切到 text：thinking 块收尾须补 signature_delta，
+  // 再发 content_block_stop(index 0) 与 start(index 1)。
   const f2 = s.open("text");
-  assert.equal(f2.length, 2, "must close previous block before opening next");
-  assert.ok(f2[0].includes("content_block_stop") && f2[0].includes("\"index\":0"));
-  assert.ok(f2[1].includes("content_block_start") && f2[1].includes("\"index\":1"));
+  assert.equal(f2.length, 3, "thinking must emit signature_delta then stop, before opening next");
+  assert.ok(f2[0].includes("signature_delta"), "thinking block needs a signature before closing");
+  assert.ok(f2[1].includes("content_block_stop") && f2[1].includes("\"index\":0"));
+  assert.ok(f2[2].includes("content_block_start") && f2[2].includes("\"index\":1"));
+});
+
+test("non-thinking block closes without a signature_delta frame", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState();
+  s.open("text");
+  const frames = s.open("tool_use", { toolId: "t1", toolName: "f" });
+  assert.ok(!JSON.stringify(frames).includes("signature_delta"), "text block must not emit a signature");
 });
 
 test("StreamBlockState deltas are suppressed when block type does not match", async () => {
@@ -1149,4 +1162,119 @@ test("StreamBlockState.applyEmission drives block transitions for each kind", as
   // 未知 kind 安全忽略
   assert.deepEqual(s.applyEmission({ kind: "unknown" }), []);
   assert.deepEqual(s.applyEmission(null), []);
+});
+
+// --- stop_sequences 透传与 stop_reason 判定 ---
+
+test("stop_sequences is translated to upstream stop", async () => {
+  const { transformAnthropicToOpenAI } = await import("../src/exchange/exchange.js");
+  const payload = transformAnthropicToOpenAI({
+    model: "m",
+    stop_sequences: ["</done>", "STOP"],
+    messages: [{ role: "user", content: "hi" }]
+  });
+  assert.deepEqual(payload.stop, ["</done>", "STOP"]);
+});
+
+test("absent stop_sequences leaves no stop field upstream", async () => {
+  const { transformAnthropicToOpenAI } = await import("../src/exchange/exchange.js");
+  const payload = transformAnthropicToOpenAI({
+    model: "m",
+    messages: [{ role: "user", content: "hi" }]
+  });
+  assert.ok(!("stop" in payload), "no stop key when client sent no sequences");
+});
+
+test("finishReasonToAnthropic reports stop_sequence only on a confirmed tail hit", async () => {
+  const { finishReasonToAnthropic } = await import("../src/exchange/stream.js");
+  // 未下发序列：即使上游回 stop 也只报 end_turn
+  assert.equal(finishReasonToAnthropic("stop", { hasStopSequences: false, text: "abc</done>" }), "end_turn");
+  // 下发且尾部命中：报 stop_sequence
+  assert.equal(
+    finishReasonToAnthropic("stop", { hasStopSequences: true, text: "abc</done>", stopSequences: ["</done>"] }),
+    "stop_sequence"
+  );
+  // 下发但尾部未命中（自然停止）：退回 end_turn，不误报
+  assert.equal(
+    finishReasonToAnthropic("stop", { hasStopSequences: true, text: "just a normal end", stopSequences: ["</done>"] }),
+    "end_turn"
+  );
+  // 既有语义零回归
+  assert.equal(finishReasonToAnthropic("length"), "max_tokens");
+  assert.equal(finishReasonToAnthropic("tool_calls"), "tool_use");
+  assert.equal(finishReasonToAnthropic("content_filter"), "end_turn");
+  assert.equal(finishReasonToAnthropic(null), "end_turn");
+});
+
+// --- 停止序列：窗口长度与归一化（code review 修复）---
+
+test("stop sequence longer than 64 chars is still detected", async () => {
+  const { finishReasonToAnthropic } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  // 100 字符的哨兵：旧实现写死 64 字符尾部窗口，此类序列恒失配。
+  const longSeq = "S".repeat(100);
+  const s = new StreamBlockState([longSeq]);
+  s.open("text");
+  s.textDelta("prefix ");
+  s.textDelta(longSeq);
+  assert.ok(s.textTail.includes(longSeq), "tail window must be sized to the longest stop sequence");
+  assert.equal(
+    finishReasonToAnthropic("stop", { hasStopSequences: true, text: s.textTail, stopSequences: [longSeq] }),
+    "stop_sequence"
+  );
+});
+
+test("no tail accumulation when the request carried no stop sequences", async () => {
+  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const s = new StreamBlockState([]);
+  s.open("text");
+  s.textDelta("some long output that would otherwise be buffered");
+  assert.equal(s.textTail, "", "hot path must not allocate a tail window when unused");
+});
+
+test("normalizeStopSequences filters blank entries and caps at 4", async () => {
+  const { normalizeStopSequences } = await import("../src/exchange/exchange.js");
+  assert.deepEqual(normalizeStopSequences(["a", "", "   ", "b"]), ["a", "b"]);
+  assert.deepEqual(normalizeStopSequences(["1", "2", "3", "4", "5", "6"]), ["1", "2", "3", "4"]);
+  assert.deepEqual(normalizeStopSequences(["  "]), []);
+  assert.deepEqual(normalizeStopSequences(undefined), []);
+  assert.deepEqual(normalizeStopSequences("not an array"), []);
+});
+
+test("blank-only stop_sequences produce no upstream stop field", async () => {
+  const { transformAnthropicToOpenAI } = await import("../src/exchange/exchange.js");
+  const payload = transformAnthropicToOpenAI({
+    model: "m",
+    stop_sequences: ["", "  "],
+    messages: [{ role: "user", content: "hi" }]
+  });
+  assert.ok(!("stop" in payload), "empty stop strings must not reach upstream (400 risk)");
+});
+
+test("resolveStopDetails handles upstream stop_sequence finish_reason", async () => {
+  const { resolveStopDetails, finishReasonToAnthropic } = await import("../src/exchange/stream.js");
+  const res1 = resolveStopDetails("stop_sequence", {
+    hasStopSequences: true,
+    text: "result </done>",
+    stopSequences: ["</done>"]
+  });
+  assert.deepEqual(res1, { stopReason: "stop_sequence", stopSequence: "</done>" });
+  assert.equal(finishReasonToAnthropic("stop_sequence"), "stop_sequence");
+
+  // When upstream stripped stop sequence from text but reported stop_sequence
+  const res2 = resolveStopDetails("stop_sequence", {
+    hasStopSequences: true,
+    text: "result without trailing token",
+    stopSequences: ["</done>"]
+  });
+  assert.deepEqual(res2, { stopReason: "stop_sequence", stopSequence: "</done>" });
+});
+
+test("resolveStopDetails returns consistent stopReason and stopSequence across all reasons", async () => {
+  const { resolveStopDetails } = await import("../src/exchange/stream.js");
+  assert.deepEqual(resolveStopDetails("length"), { stopReason: "max_tokens", stopSequence: null });
+  assert.deepEqual(resolveStopDetails("tool_calls"), { stopReason: "tool_use", stopSequence: null });
+  assert.deepEqual(resolveStopDetails("tool_use"), { stopReason: "tool_use", stopSequence: null });
+  assert.deepEqual(resolveStopDetails("content_filter"), { stopReason: "end_turn", stopSequence: null });
+  assert.deepEqual(resolveStopDetails(null), { stopReason: "end_turn", stopSequence: null });
 });

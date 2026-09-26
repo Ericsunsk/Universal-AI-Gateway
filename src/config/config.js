@@ -40,7 +40,7 @@ export function getDefaultConfig(env) {
   const defaultApiKey = requireSecret(env, "API_KEY");
   // MASTER_KEY 缺失即 fail-closed：随机生成并告警，绝不回退为 API_KEY
   //（回退会让所有客户端 key 拥有 master 权限）。
-  let masterKey = null;
+  let masterKey;
   if (env.MASTER_KEY) {
     masterKey = requireSecret(env, "MASTER_KEY");
   } else {
@@ -223,7 +223,7 @@ async function refreshConfig(env) {
         try {
           const recheck = await kv.get("GATEWAY_CONFIG");
           stillEmpty = (recheck === null || recheck === undefined);
-        } catch (e) {
+        } catch {
           log.warn("Pre-write recheck failed; skipping initial write to avoid clobbering");
           stillEmpty = false;
         }

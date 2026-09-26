@@ -27,7 +27,7 @@ function toStoredString(value) {
 
 function parseJsonSafe(val) {
   if (typeof val !== "string") return val;
-  try { return JSON.parse(val); } catch (e) { return null; }
+  try { return JSON.parse(val); } catch { return null; }
 }
 
 function isJsonType(type) {
@@ -40,8 +40,10 @@ function ttlMs(opts) {
 }
 
 function timeoutSignal(ms) {
-  // AbortSignal.timeout 需 Node 18+；老运行时降级为无超时（行为同旧代码）
-  return typeof AbortSignal?.timeout === "function" ? AbortSignal.timeout(ms) : undefined;
+  // AbortSignal.timeout 需 Node 17.3+；engines 已声明 >=20，此处可无条件使用。
+  // 旧的降级分支（返回 undefined）实为「完全无超时」，会让挂死的 Upstash 调用
+  // 一直占住请求直到平台上限 —— 比报错更糟，故移除。
+  return AbortSignal.timeout(ms);
 }
 
 // 测试与生产共用的内存 Adapter：每次调用返回 fresh 实例，测试间天然隔离。

@@ -171,3 +171,54 @@ test("C5 seam: out-of-order raw input finalizes to valid 11148 with orphan downg
   assert.deepEqual(out[3], { role: "user", content: [shotPart("aGVsbG8=")] }, "trailing image stays last");
   assertValid11148(out);
 });
+
+// --- thinking 块丢弃（上游为 OpenAI 协议，不承载 Anthropic 思维链）---
+// thinking/redacted_thinking 的载荷字段是 thinking（非 text），若落入 textBlocks
+// 会抽出空串：轻则产出 content:"" 空气泡，重则与正文拼接把思维链喂给上游。
+
+test("thinking block is dropped, never concatenated into upstream text", () => {
+  const payload = transformAnthropicToOpenAI({
+    model: "m",
+    messages: [{
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "SECRET_CHAIN_OF_THOUGHT", signature: "sig" },
+        { type: "text", text: "visible answer" }
+      ]
+    }]
+  });
+  const flat = JSON.stringify(payload.messages);
+  assert.ok(!flat.includes("SECRET_CHAIN_OF_THOUGHT"), "thinking payload must not reach upstream");
+  assert.equal(payload.messages[0].content, "visible answer");
+});
+
+test("redacted_thinking block is dropped without producing empty content", () => {
+  const payload = transformAnthropicToOpenAI({
+    model: "m",
+    messages: [{
+      role: "assistant",
+      content: [
+        { type: "redacted_thinking", data: "SECRET_REDACTED" },
+        { type: "text", text: "answer" }
+      ]
+    }]
+  });
+  assert.ok(!JSON.stringify(payload.messages).includes("SECRET_REDACTED"));
+  assert.equal(payload.messages[0].content, "answer");
+});
+
+test("thinking-only conversation leaves no empty-content message upstream", () => {
+  const payload = transformAnthropicToOpenAI({
+    model: "m",
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "thinking", thinking: "only thinking", signature: "s" }] },
+      { role: "user", content: "again" }
+    ]
+  });
+  assert.ok(
+    payload.messages.every(m => !(m.content === "" || m.content === undefined)),
+    "no empty-content message may reach upstream"
+  );
+  assert.ok(!JSON.stringify(payload.messages).includes("only thinking"));
+});

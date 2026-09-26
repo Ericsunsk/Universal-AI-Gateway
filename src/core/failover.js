@@ -183,7 +183,7 @@ export async function runFailover(items, {
 function waitOrAbort(ms, signal) {
   if (signal?.aborted) return Promise.reject(abortError());
   if (!ms || ms <= 0) return Promise.resolve();
-  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (!signal) return new Promise((resolve) => { setTimeout(resolve, ms); });
   return new Promise((resolve, reject) => {
     const onAbort = () => { clearTimeout(timer); reject(abortError()); };
     const timer = setTimeout(() => {

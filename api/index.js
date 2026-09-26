@@ -58,7 +58,7 @@ function getTrustedHosts() {
     try {
       const domains = JSON.parse(process.env.VERCEL_PROJECT_DOMAINS);
       domains.forEach(d => hosts.add(d));
-    } catch (e) {}
+    } catch {}
   }
   hosts.add("localhost");
   hosts.add("127.0.0.1");
@@ -133,7 +133,7 @@ async function handleNodeRequest(req, res) {
         if (size > MAX_BODY_BYTES) {
           res.writeHead(413, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: { message: "Request body too large" } }));
-          try { req.destroy(); } catch (e) {}
+          try { req.destroy(); } catch {}
           return;
         }
         chunks.push(chunk);

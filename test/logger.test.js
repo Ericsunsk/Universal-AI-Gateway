@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateTraceId, extractTraceId, createLogger, sanitize, LogLevel, setLogSink, runWithLogger, log } from "../src/logging/logger.js";
+import { generateTraceId, extractTraceId, createLogger, sanitize, setLogSink, runWithLogger, log } from "../src/logging/logger.js";
 
 test("generateTraceId returns 32-char hex string", () => {
   const id = generateTraceId();
@@ -167,7 +167,7 @@ test("runWithLogger propagates trace_id through async depth without threading pa
   setLogSink((line) => logs.push(line));
   try {
     // 中间层刻意不接收任何 logger 参数，验证 ALS 自动传播
-    const deep = async () => { await new Promise((r) => setTimeout(r, 1)); log.warn("deep", { k: 1 }); };
+    const deep = async () => { await new Promise((r) => { setTimeout(r, 1); }); log.warn("deep", { k: 1 }); };
     const mid = async () => { await deep(); };
     await runWithLogger({ trace_id: "TRACE12345678" }, async () => { await mid(); });
   } finally {

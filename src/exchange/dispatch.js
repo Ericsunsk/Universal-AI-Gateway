@@ -7,7 +7,7 @@ import { log } from "../logging/logger.js";
 import { hasCallChat, hasCallMessages, wantsStreamedChat, needsReasoningScrub } from "../core/contract.js";
 import { runFailover } from "../core/failover.js";
 import { redactUpstreamText, errorBody } from "../http/redact.js";
-import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest } from "./transform.js";
+import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest, normalizeStopSequences } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
 
 /**
@@ -96,7 +96,7 @@ export async function dispatchExchange({
   return await runFailover(candidates, {
     retryBudget: 0,
     signal: request?.signal,
-    onRetryable: async (candidate, action, fail) => {
+    onRetryable: async (candidate, _action, fail) => {
       log.warn("Provider returned error, trying next candidate", { provider: candidate.provider, model: candidate.model, status: fail.status });
     },
     renderExhausted: ({ lastError, lastFail }) => new Response(errorBody(
@@ -121,7 +121,7 @@ export async function dispatchExchange({
       // 能力探针（contract.js）：原生 Anthropic 上游走 callMessages，其余走 callChat；
       // 是否强制流由 adapter 以 forceStream 声明。绝不 switch provider.type。
       const nativeAnthropic = hasCallMessages(provider);
-      let upstreamRes = null;
+      let upstreamRes;
 
       try {
         if (isAnthropic && nativeAnthropic) {
@@ -177,10 +177,13 @@ export async function dispatchExchange({
         } : {};
 
         if (isAnthropic && !nativeAnthropic) {
+          // 停止序列：归一化口径与 transform 注入 payload.stop 完全一致（同一个函数），
+          // 保证「发给上游的序列」与「判定 stop_reason 用的序列」不会分歧。
+          const stopSequences = normalizeStopSequences(body.stop_sequences);
           if (body.stream !== false) {
-            return { kind: "done", response: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders) };
+            return { kind: "done", response: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders, { stopSequences }) };
           } else {
-            return { kind: "done", response: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders) };
+            return { kind: "done", response: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders, { stopSequences }) };
           }
         }
 

@@ -34,7 +34,7 @@ export async function hydrateCooldowns(env, accounts, force = false) {
     if (r.status !== "fulfilled" || !r.value) return;
     let record = r.value;
     if (typeof record === "string") {
-      try { record = JSON.parse(record); } catch (e) { return; }
+      try { record = JSON.parse(record); } catch { return; }
     }
     if (!record?.expiresAt || record.expiresAt < now) return; // 已过期，不写入缓存
     const local = accountCooldownRecord.get(accounts[i].id);

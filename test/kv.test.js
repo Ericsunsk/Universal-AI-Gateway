@@ -9,16 +9,17 @@ afterEach(() => { globalThis.fetch = originalFetch; });
 function scriptUpstash({ get = {}, putOk = true, hang = false } = {}) {
   const commands = [];
   globalThis.fetch = async (_url, { body, signal } = {}) => {
+    void _url;
     const cmd = JSON.parse(body);
     commands.push(cmd);
     if (hang) {
       // ref'd 定时器让 loop 存活（AbortSignal.timeout 内部 timer 是 unref 的，
       // 纯 pending mock 下 loop 会提前排空导致用例被 cancel）；abort 50ms 必先赢。
-      await new Promise((_, rej) => {
+      await new Promise((_resolve, rej) => {
         const t = setTimeout(() => rej(new Error("mock: remote hung past budget")), 5000);
         const onAbort = () => { clearTimeout(t); rej(signal.reason || new Error("aborted")); };
         if (signal) {
-          if (signal.aborted) return onAbort();
+          if (signal.aborted) { onAbort(); return; }
           signal.addEventListener("abort", onAbort, { once: true });
         }
       });

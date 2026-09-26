@@ -34,7 +34,7 @@ export async function checkRateLimit(kv, key, config) {
   const kvKey = `${RATE_LIMIT_PREFIX}${key}`;
 
   // 读取当前桶状态
-  let bucket = null;
+  let bucket;
   try {
     const raw = await kv.get(kvKey, "json");
     bucket = raw && typeof raw === "object" ? raw : null;

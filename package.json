@@ -4,11 +4,16 @@
   "description": "High-performance Universal AI Gateway for Vercel Serverless and Node.js with protocol translation, multi-provider fallback, WorkBuddy auto-checkin, and Web Admin console.",
   "main": "api/index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "vercel dev",
     "deploy": "vercel --prod",
-    "test": "node --test",
+    "lint": "eslint .",
+    "test": "node --test --test-concurrency=8",
+    "check": "npm run lint && npm test",
     "bench": "node scripts/bench.mjs",
     "probe": "node scripts/probe-agent.mjs"
   },
@@ -26,5 +31,10 @@
     "deepseek"
   ],
   "author": "Ericsunsk",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0"
+  }
 }

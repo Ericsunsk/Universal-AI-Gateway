@@ -56,17 +56,17 @@ export function parseReasoningIntent({ model = "", body = {} } = {}) {
   // 容量后缀（[200k]/[1M]）仅做剥离，不产生 budget 语义。
   // 支持多层叠加（如 model[high][200k]），循环剥离直到无后缀；
   // 最后一个命中的推理档位/关闭词生效。
-  const suffixMatch = cleanModel.match(/\[([^\[\]]*)\]$/);
+  const suffixMatch = cleanModel.match(/\[([^[\]]*)\]$/);
   if (suffixMatch) {
     let guard = 0;
-    let m = cleanModel.match(/\[([^\[\]]*)\]$/);
+    let m = cleanModel.match(/\[([^[\]]*)\]$/);
     while (m && guard++ < 5) {
       const cand = m[1].toLowerCase().trim();
       if (REASONING_LEVELS.includes(cand) || cand === "mid" || DISABLE_KEYWORDS.includes(cand)) {
         rawSuffix = cand;
       }
-      cleanModel = cleanModel.replace(/\[[^\[\]]*\]$/, "").trim();
-      m = cleanModel.match(/\[([^\[\]]*)\]$/);
+      cleanModel = cleanModel.replace(/\[[^[\]]*\]$/, "").trim();
+      m = cleanModel.match(/\[([^[\]]*)\]$/);
     }
   }
 
@@ -139,8 +139,13 @@ export function parseReasoningIntent({ model = "", body = {} } = {}) {
 
 /**
  * 将解析出的标准推理意图，安全适配注入到对应上游提供商的 Payload 中
+ *
+ * targetModel 为**保留的定位参数**：签名契约的一部分（8 处调用方 + 测试按位置传入），
+ * 见 AGENTS.md「公共 API 顺序不变」。当前按 providerType 分支即可判定注入策略，
+ * 尚未用到模型名；保留形参以免破坏既有调用点。签名中保留即为其存在意义，勿删。
  */
 export function applyReasoningToPayload(payload, intent, providerType, targetModel = "") {
+  void targetModel; // 显式声明显式未用（签名契约保留），非疏漏
   if (!payload || !intent) return payload;
 
   const type = (providerType || "").toLowerCase();

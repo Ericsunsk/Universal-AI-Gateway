@@ -194,7 +194,7 @@ test("runFailover aborts during a pending retry delay (mid-flight, not pre-check
   });
   // 关键：等一个 tick 让 waitOrAbort 真正创建 timer，再 abort —— 覆盖 timer-cleanup 分支，
   // 而非 waitOrAbort 开头的 signal.aborted 预检分支。
-  await new Promise((r) => setTimeout(r, 5));
+  await new Promise((r) => { setTimeout(r, 5); });
   ac.abort();
   await assert.rejects(p, (err) => err?.name === "AbortError");
   assert.equal(attempts, 1, "abort must prevent the in-place re-attempt");

@@ -1,0 +1,24 @@
+name: check
+
+# 门禁：lint + 测试。项目零运行时依赖、零构建步骤，故无需 install 之外的准备。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # package.json 无 dependencies，此步只为装 eslint 等 devDependencies
+      - run: npm ci
+
+      - run: npm run lint
+      - run: npm test

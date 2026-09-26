@@ -4,6 +4,25 @@ import { optimizeToolOutput } from "./sanitizer.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { parseMaxContextTurns } from "../config/config.js";
 
+/**
+ * 归一化 Anthropic stop_sequences → 可安全下发给上游的 stop 数组。
+ * 唯一口径：transform 注入 payload.stop 与 dispatch 传给流式层的判定序列共用此函数，
+ * 避免「实际发给上游的序列」与「响应侧用于判定 stop_reason 的序列」出现分歧
+ * （分歧会导致检测到一条从未下发过的序列，或漏检真正下发过的）。
+ *
+ * - 逐项过滤：空串 / 纯空白会被 OpenAI 及多数兼容上游判为 400 invalid_request
+ * - 截断到 4 条：上游普遍上限，超出截断而非报错（Anthropic 侧上限同为 4）
+ *
+ * @param {unknown} raw - body.stop_sequences
+ * @returns {string[]} 归一化后的序列（可能为空数组）
+ */
+export function normalizeStopSequences(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter(s => typeof s === "string" && s.trim().length > 0)
+    .slice(0, 4);
+}
+
 // tool_result 单块展平为 string 的唯一口径：string / text 块 / 其余 JSON.stringify。
 // toolResultBlockText（整体）与 toolResultSplit（逐块，图片另走）共用，不再各写一份。
 function toolResultChunkText(c) {
@@ -452,6 +471,11 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         if (b.type === "tool_use") toolUseBlocks.push(b);
         else if (b.type === "tool_result") toolResultBlocks.push(b);
         else if (b.type === "image") imageParts.push(imageBlockToImagePart(b));
+        // thinking / redacted_thinking 显式丢弃：上游为 OpenAI 协议，不承载思维链。
+        // 二者的载荷字段是 thinking（非 text），若落入 textBlocks 会抽出空串——
+        // 轻则产出 content:"" 的空气泡消息，重则与同消息正文拼接，把思维链当正文喂给上游。
+        // 注意必须在 image 之后、textBlocks 之前拦截，不得并入 text。
+        else if (b.type === "thinking" || b.type === "redacted_thinking") continue;
         else textBlocks.push(b);
       }
 
@@ -501,6 +525,9 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         } else if (textBlocks.length > 1) {
           combined = textBlocks.map(b => b.text || "").join("\n");
         }
+        // 纯 thinking 消息（丢弃后已无任何可发内容且无图片）整体跳过：
+        // 发 content:"" 的空气泡既无信息量，又会被部分上游判为非法请求。
+        if (!combined && imageParts.length === 0) continue;
         sequence.push({
           role: msg.role === "assistant" ? "assistant" : "user",
           // 无图片时保持 string content（与历史输出逐字节一致）；含图片才切成多模态 parts
@@ -525,6 +552,9 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
 
   if (body.temperature !== undefined) payload.temperature = body.temperature;
   if (body.max_tokens !== undefined) payload.max_tokens = body.max_tokens;
+  // Anthropic stop_sequences → OpenAI stop。不透传的话客户端设的停止序列完全失效。
+  const stops = normalizeStopSequences(body.stop_sequences);
+  if (stops.length > 0) payload.stop = stops;
   if (body.top_p !== undefined) payload.top_p = body.top_p;
 
   // 共享思维链与推理强度调度器：统一解析与注入

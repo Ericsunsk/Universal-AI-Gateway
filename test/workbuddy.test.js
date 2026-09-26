@@ -201,7 +201,7 @@ test("clear skips KV delete without local record, deletes after real cooldown (Q
 test("hydrateCooldowns handles both parsed objects and string JSON from KV", async () => {
   const future = Date.now() + 60000;
   const mockKv = {
-    async get(key, type) {
+    async get(key) {
       if (key.includes("obj_acc")) return { expiresAt: future, streak: 1 };
       if (key.includes("str_acc")) return JSON.stringify({ expiresAt: future, streak: 2 });
       return null;

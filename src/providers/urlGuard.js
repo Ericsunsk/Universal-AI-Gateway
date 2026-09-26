@@ -108,7 +108,7 @@ export function isPrivateHostname(hostname) {
 
 export function assertPublicHttps(rawUrl, label) {
   let u = null;
-  try { u = new URL(rawUrl); } catch (e) { /* fallthrough */ }
+  try { u = new URL(rawUrl); } catch { /* fallthrough */ }
   if (!u || u.protocol !== "https:" || isPrivateHostname(u.hostname)) {
     throw new Error(`Refusing to fetch non-public upstream URL for ${label}`);
   }
