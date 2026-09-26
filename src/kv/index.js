@@ -145,13 +145,19 @@ export function createUpstashKv({ url, token, timeoutMs = DEFAULT_TIMEOUT_MS, fa
 
   const limiters = new Map();
   function getLimiter(config) {
-    const windowSec = Math.max(1, Math.round(config.capacity / (config.refillRate || 1)));
-    const cacheKey = `${config.capacity}:${windowSec}`;
+    // 必须与 createMemoryKv 的 token bucket 语义一致，否则内存兜底与
+    // 分布式路径的配额表现会分叉（尤其 burst 预设：capacity=100, refillRate=10）。
+    // Ratelimit.tokenBucket(refillRate, interval, maxTokens)：
+    //   refillRate 个令牌/interval 补充，桶可积攒至 maxTokens。
+    // 取 interval="1 s"、maxTokens=capacity，即"每秒补 refillRate、可攒到 capacity"。
+    const refillRate = config.refillRate || 1;
+    const maxTokens = config.capacity;
+    const cacheKey = `${maxTokens}:${refillRate}`;
     let limiter = limiters.get(cacheKey);
     if (!limiter) {
       limiter = new Ratelimit({
         redis,
-        limiter: Ratelimit.slidingWindow(config.capacity, `${windowSec} s`),
+        limiter: Ratelimit.tokenBucket(refillRate, "1 s", maxTokens),
         prefix: "ratelimit:",
       });
       limiters.set(cacheKey, limiter);

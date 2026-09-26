@@ -4,6 +4,10 @@ import { createParser } from "eventsource-parser";
 import { corsHeaders } from "../http/headers.js";
 import { recordUpstreamCache } from "../core/cacheStats.js";
 import { log } from "../logging/logger.js";
+import { DsmlStreamParser, parseDsmlInvocations, stripDsml, containsDsml } from "./dsml.js";
+
+export { DsmlStreamParser, parseDsmlInvocations, stripDsml, containsDsml };
+
 
 // 模块级单例 Encoder / Decoder 与预编码静态 Buffer（零 GC 内存分配）
 const textEncoder = new TextEncoder();
@@ -628,6 +632,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 
     // block 状态机：取代此前散落的 currentBlockIndex/Type/ToolId/ToolName 四个可变变量。
     const blockState = new StreamBlockState(stopSequences);
+    const dsmlParser = new DsmlStreamParser();
     // 批量写出状态机产出的 SSE 帧（状态机本身不发 IO，便于纯单测）。
     const writeAll = async (frames) => {
       for (const f of frames) await writer.write(textEncoder.encode(f));
@@ -671,11 +676,39 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         }
 
         for (const emission of emissions) {
-        // 分派收进状态机：读循环只表达「解码 → 分派 → 写出」，不再承载 kind 长链。
-        // 无 delta 的纯 finish 终局块同样经此处设置 stop_reason，不得用 delta 守卫跳过。
-        await writeAll(blockState.applyEmission(emission));
+          if (emission.kind === "text") {
+            const dsmlEvents = dsmlParser.push(emission.text);
+            for (const ev of dsmlEvents) {
+              if (ev.type === "text") {
+                await writeAll(blockState.applyEmission({ kind: "text", text: ev.text }));
+              } else if (ev.type === "tool_use") {
+                await writeAll(blockState.applyEmission({
+                  kind: "tool_use",
+                  calls: [{ id: ev.id, name: ev.name, args: JSON.stringify(ev.args), ident: true }]
+                }));
+              }
+            }
+          } else {
+            // 分派收进状态机：读循环只表达「解码 → 分派 → 写出」，不再承载 kind 长链。
+            // 无 delta 的纯 finish 终局块同样经此处设置 stop_reason，不得用 delta 守卫跳过。
+            await writeAll(blockState.applyEmission(emission));
+          }
         }
       }
+
+      // 流读取完毕，冲洗 DSML 缓冲区中挂起的所有内容
+      const flushedEvents = dsmlParser.flush();
+      for (const ev of flushedEvents) {
+        if (ev.type === "text") {
+          await writeAll(blockState.applyEmission({ kind: "text", text: ev.text }));
+        } else if (ev.type === "tool_use") {
+          await writeAll(blockState.applyEmission({
+            kind: "tool_use",
+            calls: [{ id: ev.id, name: ev.name, args: JSON.stringify(ev.args), ident: true }]
+          }));
+        }
+      }
+
       buffer = tail.text;
 
       // 若流结束时 buffer 尚存非 SSE 格式内容（如上游返回单一 JSON）
@@ -688,8 +721,23 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
                        parsed.msg ||
                        (parsed.code ? `Upstream error ${parsed.code}` : buffer.trim());
           if (text) {
-            await writeAll(blockState.open("text"));
-            await writeAll(blockState.textDelta(text));
+            if (containsDsml(text)) {
+              const dsmlInvocations = parseDsmlInvocations(text);
+              const cleanText = stripDsml(text);
+              if (cleanText) {
+                await writeAll(blockState.open("text"));
+                await writeAll(blockState.textDelta(cleanText));
+              }
+              for (const inv of dsmlInvocations) {
+                await writeAll(blockState.applyEmission({
+                  kind: "tool_use",
+                  calls: [{ id: "call_" + Math.random().toString(36).substring(2, 10), name: inv.name, args: JSON.stringify(inv.args), ident: true }]
+                }));
+              }
+            } else {
+              await writeAll(blockState.open("text"));
+              await writeAll(blockState.textDelta(text));
+            }
           }
         } catch {}
       }
@@ -867,8 +915,22 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     accumulatedToolCalls.push({ id, name: t.name, args: t.args });
   }
 
-  accumulated = accumulated || " ";
-  outputTokens = Math.max(outputTokens, Math.ceil((accumulated.length + accumulatedThinking.length) / 4));
+  // 拦截并解析可能泄漏在正文中的 DSML 工具调用
+  if (containsDsml(accumulated)) {
+    const dsmlInvocations = parseDsmlInvocations(accumulated);
+    for (const inv of dsmlInvocations) {
+      accumulatedToolCalls.push({
+        id: "call_" + Math.random().toString(36).substring(2, 10),
+        name: inv.name,
+        args: inv.args
+      });
+    }
+    accumulated = stripDsml(accumulated);
+    accumulatedFinishReason = "tool_calls";
+  }
+
+  accumulated = accumulated || "";
+  outputTokens = Math.max(outputTokens, Math.ceil(((accumulated || " ").length + accumulatedThinking.length) / 4));
 
   const content = [];
   if (accumulatedThinking) {
@@ -886,7 +948,10 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     content.push(...toolCallsToAnthropicBlocks(accumulatedToolCalls));
   }
 
-  content.push({ type: "text", text: accumulated });
+  // 仅在有有效正文，或者既无 thinking 也无 tool_calls 时才输出 text 块
+  if (accumulated.trim() || content.length === 0) {
+    content.push({ type: "text", text: accumulated || " " });
+  }
 
   try { recordUpstreamCache(maxCachedTokens); } catch {}
 

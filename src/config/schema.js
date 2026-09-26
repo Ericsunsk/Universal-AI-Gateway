@@ -37,7 +37,10 @@ export const VirtualKeySchema = v.looseObject({
   role: v.optional(v.string(), "client")
 });
 
-// 网关总配置 Schema（严格校验各模块，内嵌领域 Schema，消除松散兼容垫片）
+// 网关总配置 Schema（内嵌领域 Schema，校验已知字段的结构与类型）
+//
+// 注意：全部使用 looseObject —— 未知字段被保留，仅做**结构校验**而非白名单裁剪；
+// 校验失败时调用方为 fail-open（见 config.js refreshConfig），不做强制回退。
 export const GatewayConfigSchema = v.looseObject({
   config_version: v.optional(v.number(), 1),
   master_key: v.optional(v.string()),

@@ -172,10 +172,18 @@ async function refreshConfig(env) {
       if (raw) {
         let parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
         const defaults = getDefaultConfig(env);
+        // 校验策略：**尽力校验（fail-open）**。
+        // 校验失败仅告警并继续使用未清洗的对象——KV 中的一条脏配置不应让整个网关
+        // 无法启动；结构性缺失由下方 backfillMissingRoutes 就地回填默认值兜底。
+        // 若未来改为 fail-closed（回退 defaults），须同步更新此注释与相关测试。
         const validation = validateGatewayConfig(parsed);
         if (!validation.success) {
-          log.warn("GATEWAY_CONFIG schema validation warnings", { errors: validation.errors });
+          log.warn("GATEWAY_CONFIG schema validation failed, proceeding with raw config", {
+            errors: validation.errors,
+          });
         } else if (validation.output) {
+          // 注意：looseObject 会返回新对象，后续 in-place 变更（backfill/master_key）
+          // 作用于该副本，最终整体赋给 cachedConfig，无引用丢失问题。
           parsed = validation.output;
         }
         // 存量 KV 可能落后于代码默认路由：内存中回填缺失项（不写 KV，无版本冲突）。

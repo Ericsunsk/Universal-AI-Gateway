@@ -10,11 +10,15 @@
  * @returns {Promise<{allowed: boolean, remaining: number, resetAt: number, retryAfter: number}>}
  */
 export async function checkRateLimit(kv, key, config) {
+  // limit 为窗口内配额上限（常量），用于 X-RateLimit-Limit 响应头；
+  // 绝不能由 remaining 反推——桶耗尽时 remaining=0 会让客户端误判配额为 1。
+  const limit = config?.capacity ?? 0;
   if (!kv || typeof kv.limit !== "function") {
     // KV 不可用或无限流能力时 fail-open
-    return { allowed: true, remaining: config?.capacity ?? 0, resetAt: 0, retryAfter: 0 };
+    return { allowed: true, remaining: limit, limit, resetAt: 0, retryAfter: 0 };
   }
-  return kv.limit(key, config);
+  const result = await kv.limit(key, config);
+  return { ...result, limit };
 }
 
 /**
@@ -75,15 +79,18 @@ function hashString32(str) {
 /**
  * 构造 429 限流响应
  *
- * @param {Object} result - checkRateLimit 返回结果
+ * @param {Object} result - checkRateLimit 返回结果 { allowed, remaining, limit, resetAt, retryAfter }
  * @param {Object} corsHeaders - CORS 头
  * @returns {Response} 429 Too Many Requests
  */
 export function rateLimitResponse(result, corsHeaders = {}) {
+  // X-RateLimit-Limit 是窗口内配额上限（常量），非当前剩余量。
+  // result.limit 缺失时（旧调用方）退化为 remaining，保证不产生 NaN。
+  const quota = Number.isFinite(result.limit) ? result.limit : result.remaining;
   const headers = {
     "Content-Type": "application/json",
     "Retry-After": String(result.retryAfter),
-    "X-RateLimit-Limit": String(result.remaining + 1),
+    "X-RateLimit-Limit": String(quota),
     "X-RateLimit-Remaining": String(result.remaining),
     "X-RateLimit-Reset": String(result.resetAt),
     ...corsHeaders,
