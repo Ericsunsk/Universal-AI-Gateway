@@ -180,8 +180,7 @@ export class WorkBuddyProvider {
 
     if (this.kv) {
       const kvToken = await this.kv.get(`WB_ACCESS_TOKEN_${cacheKey}`) ||
-                     (await this.kv.get(`WB_ACCESS_TOKEN_${this.id}`)) ||
-                     (await this.kv.get("ACCESS_TOKEN"));
+                     (await this.kv.get(`WB_ACCESS_TOKEN_${this.id}`));
       if (kvToken) {
         memoryTokenCache.set(cacheKey, { token: kvToken, timestamp: now });
         return kvToken;
@@ -210,8 +209,7 @@ export class WorkBuddyProvider {
     let refreshToken = account.refreshToken || (allowEnv ? this.env.REFRESH_TOKEN || "" : "");
     if (this.kv) {
       const cachedRefresh = await this.kv.get(`WB_REFRESH_TOKEN_${cacheKey}`) ||
-                           (await this.kv.get(`WB_REFRESH_TOKEN_${this.id}`)) ||
-                           (await this.kv.get("REFRESH_TOKEN"));
+                           (await this.kv.get(`WB_REFRESH_TOKEN_${this.id}`));
       if (cachedRefresh) refreshToken = cachedRefresh;
     }
     if (!refreshToken) {
