@@ -7,6 +7,7 @@ import { recordCacheControl, getCacheControlStats } from "./exchange/cacheContro
 import { getProviderFleet } from "./core/fleet.js";
 import { checkRateLimit, RATE_LIMIT_PRESETS, extractRateLimitKey, rateLimitResponse } from "./ratelimit/ratelimit.js";
 import { runWithLogger, extractTraceId, generateTraceId, log } from "./logging/logger.js";
+import { estimateTokens } from "./core/tokenizer.js";
 
 // 未鉴权请求不解析 body：Content-Length 预检，超限直接 413。
 // 单一来源：api/index.js（Node 层流式累积）复用同一值。
@@ -149,7 +150,7 @@ async function handleRequest(request, env) {
       const parsed = await authenticateAndParseRequest(request, env, config);
       if (!parsed.ok) return parsed.response;
 
-      const inputTokens = Math.max(1, Math.ceil(JSON.stringify(parsed.body || {}).length / 4));
+      const inputTokens = estimateTokens(parsed.body || {});
       return new Response(JSON.stringify({ input_tokens: inputTokens }), {
         status: 200,
         headers: { "Content-Type": "application/json", ...corsHeaders }

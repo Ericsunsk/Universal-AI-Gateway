@@ -4,11 +4,11 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 ## Module layout (DDD-lite: one context, role-based folders)
 
-- `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration).
+- `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration), `tokenizer` (gpt-4o BPE token estimation).
 - `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
 - `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer` (vendors-neutral output pruning only).
 - `src/config/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the core Fetch handler, `api/index.js` the Vercel serverless entry.
-- `src/kv/` — persistence seam: `get` / `put` / `delete` (+ `json`) behind one interface; memory / Upstash-REST / composite adapters inside. Constructed once at the entry (`createKvFromEnv`), injected via env — core never imports adapters directly.
+- `src/kv/` — persistence seam: `get` / `put` / `delete` (+ `json`) and `limit` behind one interface; memory / Upstash (via `@upstash/redis` and `@upstash/ratelimit`) adapters inside. Constructed once at the entry (`createKvFromEnv`), injected via env — core never imports adapters directly.
 
 ## Core concepts
 
@@ -54,7 +54,7 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 - **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and applies the intent exactly once per request (`transformAnthropicToOpenAI` 输出已含 OpenAI 映射，不二次 apply；唯 WorkBuddy 方言需清洗）。
 
-- **line-source** — the shared upstream-SSE parsed-chunk source (`iterSseParsedChunks` in `src/exchange/stream.js`): owns row-buffer parsing and yields `{ parsed, rawLine }`. Both translators consume it but keep their own emission handling; the unterminated remainder is exported via `tail` for the single-JSON fallback.
+- **line-source** — the shared upstream-SSE parsed-chunk source (`iterSseParsedChunks` in `src/exchange/stream.js`): powered by industry-standard `eventsource-parser` with full W3C SSE compliance (handling CRLF, multi-line data, comments, keepalives, and multi-byte UTF-8 split reads). Yields `{ parsed, rawLine }` with bad-line warning caps; safely exports unparsed payload via `tail` for robust single-JSON fallbacks (even when terminated with newlines).
 
 - **message sequence** — the single owner of OpenAI message ordering (`OpenAIMessageSequence` in `src/exchange/transform.js`): tool fan-out and `11148` re-hanging are its internals, exposed only as `appendToolExchange` + `finalize`.
 

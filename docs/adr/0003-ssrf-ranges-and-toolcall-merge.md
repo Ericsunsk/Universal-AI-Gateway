@@ -1,6 +1,6 @@
 # 0003 — 收紧 SSRF 护栏地址分类 + 抽出 tool_call 分片合并纯函数
 
-- **Status**: Accepted
+- **Status**: Accepted (Amended 2026-09-27: Modernized with `ipaddr.js`)
 - **Date**: 2026-09-25
 - **Touches**: `src/providers/urlGuard.js`, `src/exchange/stream.js`, `test/audit-fixes.test.js`, `test/exchange.test.js`
 
@@ -17,14 +17,10 @@
 
 ## Decision
 
-### 1. `urlGuard` 段判定补全（保持零依赖，不引入 `ipaddr.js`）
+### 1. `urlGuard` 段判定升级（采用成熟库 `ipaddr.js`）
 
-- IPv4 覆盖 RFC 6890 全部不可全局路由区间，策略为 **fail-closed**：凡「非明确公网单播」一律拒绝。
-- IPv6 改为**展开为 8 组 16 位后按位判定**（`expandIpv6`），不再用字符串前缀近似：
-  `fc00::/7`、`fe80::/10`、`ff00::/8`、`2001:db8::/32`、`2002::/16`，以及 IPv4-mapped 两种形态。
-
-**为什么不引 `ipaddr.js`**：项目核心资产是零依赖（`dependencies` 为空，`node server.js` 直接可跑）。
-护栏只需覆盖 7→16 段判定，引入依赖的供应链成本高于收益。若未来需要完整 CIDR 语义再议。
+- 原设计采用纯手写位判定以追求 0 依赖，但手写位操作及对各种 IPv4-mapped IPv6 变体的处理在实际演进中存在隐蔽缺陷与维护负担。
+- **2026-09-27 架构升级**：引入行业标准库 `ipaddr.js`，统一规范化 IPv4/IPv6，利用成熟的 `range()` 分类精准拦截所有非 unicast 区间（RFC 6890 / RFC 4291），同时正确处理 IPv4-mapped IPv6 展开与已废弃的 RFC 3879 site-local。安全关键链路优先采信经数亿次验证的成熟算法。
 
 ### 2. `stream.js` 抽取 tool_call 合并纯函数
 

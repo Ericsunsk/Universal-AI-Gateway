@@ -123,3 +123,71 @@ test("rateLimitResponse returns 429 with correct headers", () => {
   assert.equal(resp.headers.get("X-RateLimit-Reset"), "1234567890");
   assert.equal(resp.headers.get("Access-Control-Allow-Origin"), "*");
 });
+
+test("createUpstashKv limit uses @upstash/ratelimit when redis is configured", async () => {
+  const fakeRedis = {
+    eval: async () => [9, Date.now() + 5000, 10],
+    evalsha: async () => [9, Date.now() + 5000, 10],
+    scriptLoad: async () => "dummy",
+  };
+  const { createUpstashKv } = await import("../src/kv/index.js");
+  const kv = createUpstashKv({ redis: fakeRedis });
+  const res = await kv.limit("test-upstash-key", { capacity: 10, refillRate: 1 });
+  assert.equal(res.allowed, true);
+  assert.equal(res.remaining, 9);
+  assert.equal(res.retryAfter, 0);
+  assert.ok(res.resetAt > 0);
+});
+
+test("createUpstashKv limit blocks and computes retryAfter with @upstash/ratelimit", async () => {
+  const fakeRedis = {
+    eval: async () => [-1, Date.now() + 5000, 10],
+    evalsha: async () => [-1, Date.now() + 5000, 10],
+    scriptLoad: async () => "dummy",
+  };
+  const { createUpstashKv } = await import("../src/kv/index.js");
+  const kv = createUpstashKv({ redis: fakeRedis });
+  const res = await kv.limit("test-upstash-blocked", { capacity: 10, refillRate: 1 });
+  assert.equal(res.allowed, false);
+  assert.equal(res.remaining, 0);
+  assert.ok(res.retryAfter > 0);
+});
+
+test("createUpstashKv limit falls back to memory if redis throws", async () => {
+  const memKv = createMemoryKv();
+  const failingRedis = {
+    eval: async () => { throw new Error("Connection reset"); },
+    evalsha: async () => { throw new Error("Connection reset"); },
+    scriptLoad: async () => "dummy",
+  };
+  const { createUpstashKv } = await import("../src/kv/index.js");
+  const kv = createUpstashKv({ redis: failingRedis, fallback: memKv });
+  const res = await kv.limit("test-fallback-key", { capacity: 10, refillRate: 1 });
+  assert.equal(res.allowed, true);
+  assert.equal(res.remaining, 9);
+});
+
+test("checkRateLimit delegates to kv.limit when present (clean seam encapsulation)", async () => {
+  let calledWith = null;
+  const mockKv = {
+    limit: async (key, config) => {
+      calledWith = { key, config };
+      return { allowed: true, remaining: 42, resetAt: 100, retryAfter: 0 };
+    }
+  };
+  const res = await checkRateLimit(mockKv, "user-clean-seam", { capacity: 50, refillRate: 1 });
+  assert.equal(res.remaining, 42);
+  assert.equal(calledWith.key, "user-clean-seam");
+});
+
+test("createUpstashKv preserves persistence seam and does not leak redis", async () => {
+  const { createUpstashKv } = await import("../src/kv/index.js");
+  const kv = createUpstashKv({ url: "https://example.upstash.io", token: "fake-token" });
+  assert.equal(kv.redis, undefined, "redis property must NOT be leaked on seam object");
+  assert.equal(typeof kv.limit, "function", "limit must be available as a seam method");
+  assert.equal(typeof kv.get, "function");
+  assert.equal(typeof kv.put, "function");
+  assert.equal(typeof kv.delete, "function");
+});
+
+

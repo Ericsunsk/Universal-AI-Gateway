@@ -1,4 +1,5 @@
 export const VERSION = "2.5.0";
+import { validateGatewayConfig } from "./schema.js";
 import { log } from "../logging/logger.js";
 
 let cachedConfig = null;
@@ -169,8 +170,14 @@ async function refreshConfig(env) {
         raw = await kv.get("GATEWAY_CONFIG");
       }
       if (raw) {
-        const parsed = JSON.parse(raw);
+        let parsed = JSON.parse(raw);
         const defaults = getDefaultConfig(env);
+        const validation = validateGatewayConfig(parsed);
+        if (!validation.success) {
+          log.warn("GATEWAY_CONFIG schema validation warnings", { errors: validation.errors });
+        } else if (validation.output) {
+          parsed = validation.output;
+        }
         // 存量 KV 可能落后于代码默认路由：内存中回填缺失项（不写 KV，无版本冲突）。
         try {
           backfillMissingRoutes(parsed, defaults);

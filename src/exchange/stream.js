@@ -1,5 +1,6 @@
 // 响应侧转译 —— OpenAI SSE/JSON → Anthropic SSE/JSON（reduce / extractors / stream）。
 // 流式与非流式共享 extractors，两处不再各自拼装；路由见 ./dispatch.js。
+import { createParser } from "eventsource-parser";
 import { corsHeaders } from "../http/headers.js";
 import { recordUpstreamCache } from "../core/cacheStats.js";
 import { log } from "../logging/logger.js";
@@ -469,31 +470,74 @@ export async function* iterSseParsedChunks(reader, options = {}) {
   const warnMessage = options.warnMessage ?? "Skipping malformed SSE line";
   const onBytes = typeof options.onBytes === "function" ? options.onBytes : null;
   const tail = options.tail ?? null;
-  // 必须初始化为空串：下方是 `buffer += decoder.decode(...)`，无初值会拼出 "undefined..."。
-  let buffer = "";
+
   let badLineWarns = 0;
+  const queue = [];
+  let rawBuffer = "";
+  let dispatchedCount = 0;
+
+  const parser = createParser({
+    onEvent(event) {
+      const trimmed = event.data?.trim();
+      if (!trimmed) return;
+      dispatchedCount++;
+      if (trimmed === "[DONE]") return;
+
+      try {
+        queue.push({ parsed: JSON.parse(trimmed), rawLine: trimmed });
+      } catch {
+        if (trimmed.includes("\n")) {
+          for (const rawLine of trimmed.split("\n")) {
+            const lineTrimmed = rawLine.trim();
+            if (!lineTrimmed || lineTrimmed === "[DONE]") continue;
+            try {
+              queue.push({ parsed: JSON.parse(lineTrimmed), rawLine: lineTrimmed });
+            } catch {
+              if (badLineWarns++ < 3) log.warn(warnMessage, { line: String(lineTrimmed).slice(0, 120) });
+            }
+          }
+          return;
+        }
+        if (badLineWarns++ < 3) log.warn(warnMessage, { line: String(trimmed).slice(0, 120) });
+      }
+    }
+  });
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     if (onBytes) onBytes(value);
-    buffer += decoder.decode(value, { stream: true });
-    let pos = 0;
-    let lineEnd;
-    while ((lineEnd = buffer.indexOf("\n", pos)) !== -1) {
-      const line = buffer.slice(pos, lineEnd).trim();
-      pos = lineEnd + 1;
-      if (!line || !line.startsWith("data:")) continue;
-      const jsonStr = line.slice(5).trim();
-      if (jsonStr === "[DONE]") continue;
-      try {
-        yield { parsed: JSON.parse(jsonStr), rawLine: jsonStr };
-      } catch {
-        if (badLineWarns++ < 3) log.warn(warnMessage, { line: String(jsonStr).slice(0, 120) });
+    const text = decoder.decode(value, { stream: true });
+    rawBuffer += text;
+    if (dispatchedCount > 0 && rawBuffer.length > 4096) {
+      rawBuffer = rawBuffer.slice(rawBuffer.length - 4096);
+    }
+    parser.feed(text);
+    while (queue.length > 0) {
+      yield queue.shift();
+    }
+  }
+
+  parser.feed("\n\n");
+  parser.reset({ consume: true });
+  while (queue.length > 0) {
+    yield queue.shift();
+  }
+
+  if (tail && typeof tail === "object") {
+    if (dispatchedCount === 0) {
+      tail.text = rawBuffer;
+    } else {
+      const lastDataIdx = Math.max(rawBuffer.lastIndexOf("\ndata:"), rawBuffer.startsWith("data:") ? 0 : -1);
+      if (lastDataIdx !== -1) {
+        const afterLastData = rawBuffer.slice(lastDataIdx);
+        const nextNl = afterLastData.indexOf("\n");
+        tail.text = nextNl !== -1 ? afterLastData.slice(nextNl + 1).replace(/^[\r\n]+/, "") : "";
+      } else {
+        tail.text = "";
       }
     }
-    buffer = pos > 0 ? buffer.slice(pos) : buffer;
   }
-  if (tail && typeof tail === "object") tail.text = buffer;
 }
 
 export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {

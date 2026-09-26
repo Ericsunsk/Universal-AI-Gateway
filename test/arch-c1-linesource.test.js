@@ -151,3 +151,52 @@ test("non-streaming translator merges split tool_call fragments after refactor",
   assert.equal(tool.id, "call_1");
   assert.deepEqual(tool.input, { cmd: "ls" });
 });
+
+// ---- 稳健性：单 JSON 结尾带 \n 不再被错误吞掉 ----
+test("iterSseParsedChunks preserves single JSON ending with newline via tail", async () => {
+  const jsonWithNewline = JSON.stringify({ choices: [{ message: { content: "single json with newline" } }] }) + "\n";
+  const upstream = sseResponse([jsonWithNewline]);
+  const tail = { text: "" };
+  const items = await collect(upstream.body.getReader(), { tail });
+  assert.equal(items.length, 0);
+  assert.ok(tail.text.includes("single json with newline"), "tail must not drop JSON terminated with newline");
+
+  // 端到端非流式解析单 JSON 带换行符
+  const resp = await formatOpenAIToAnthropicJson(sseResponse([jsonWithNewline]), "m");
+  const body = await resp.json();
+  assert.equal(body.content[0].text, "single json with newline");
+});
+
+// ---- 规范兼容性：支持 CRLF (\\r\\n) 格式的标准 SSE ----
+test("iterSseParsedChunks handles CRLF (\\r\\n) SSE streams cleanly", async () => {
+  const crlfStream = "data: {\"choices\":[{\"delta\":{\"content\":\"CRLF\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n";
+  const upstream = sseResponse([crlfStream]);
+  const items = await collect(upstream.body.getReader());
+  assert.equal(items.length, 1);
+  assert.equal(items[0].parsed.choices[0].delta.content, "CRLF");
+});
+
+// ---- 规范兼容性：处理跨 chunk 切分的 UTF-8 多字节字符 ----
+test("iterSseParsedChunks handles multibyte UTF-8 split across chunks", async () => {
+  const chineseText = "你好世界，宇宙网关";
+  const jsonStr = `data: ${JSON.stringify({ choices: [{ delta: { content: chineseText } }] })}\n\n`;
+  const bytes = enc.encode(jsonStr);
+  // 从一个中文字符中间的字节切分 (每个中文字符通常占 3 字节)
+  const cutPoint = jsonStr.indexOf("世界") + 1;
+  const pieces = [bytes.slice(0, cutPoint), bytes.slice(cutPoint)];
+  const upstream = sseResponse(pieces);
+  const items = await collect(upstream.body.getReader());
+  assert.equal(items.length, 1);
+  assert.equal(items[0].parsed.choices[0].delta.content, chineseText);
+});
+
+// ---- 规范兼容性：正确解析内嵌换行符的标准 W3C 多行 JSON 数据 ----
+test("iterSseParsedChunks correctly parses multiline SSE data containing newlines in JSON", async () => {
+  const multilineData = "data: {\"choices\":[{\"delta\":{\"content\":\"line 1\\nline 2\"}}]}\n\n";
+  const upstream = sseResponse([multilineData]);
+  const items = await collect(upstream.body.getReader());
+  assert.equal(items.length, 1);
+  assert.equal(items[0].parsed.choices[0].delta.content, "line 1\nline 2");
+});
+
+
