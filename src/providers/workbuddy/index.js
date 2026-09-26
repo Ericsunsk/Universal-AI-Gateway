@@ -132,6 +132,9 @@ export class WorkBuddyProvider {
     // 能力声明：上游非流式 JSON 可能是 200 业务错误包，调用方须强制 stream=true。
     // dispatch 经 contract.wantsStreamedChat 探针读取，不 switch type。
     this.forceStream = true;
+    // 推理方言：WorkBuddy 上游拒收推理参数，须做方言清洗（见 core/contract.js）。
+    // 显式声明而非依赖 type === "workbuddy" 兜底——新增上游不得隐式继承本方言。
+    this.reasoningDialect = "workbuddy";
   }
 
   get kv() {

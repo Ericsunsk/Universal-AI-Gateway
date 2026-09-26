@@ -81,12 +81,12 @@ test("applyReasoningToPayload adapts to Anthropic provider correctly", () => {
     temperature: 0.7
   };
 
-  const adapted = applyReasoningToPayload(payload, intent, "anthropic", "claude-3-7-sonnet-20250219");
+  const adapted = applyReasoningToPayload(payload, intent, "anthropic");
   assert.deepEqual(adapted.thinking, { type: "enabled", budget_tokens: 12000 });
   assert.equal(adapted.temperature, 1.0, "Anthropic Extended Thinking requires temperature 1.0");
 
   const disabledIntent = { cleanModel: "claude", enabled: false, level: "minimal" };
-  const disabledPayload = applyReasoningToPayload({ model: "claude" }, disabledIntent, "anthropic", "claude");
+  const disabledPayload = applyReasoningToPayload({ model: "claude" }, disabledIntent, "anthropic");
   assert.deepEqual(disabledPayload.thinking, { type: "disabled" });
 });
 
@@ -98,7 +98,7 @@ test("applyReasoningToPayload adapts to OpenAI provider correctly", () => {
   };
 
   const payload = { model: "o3-mini", messages: [] };
-  const adapted = applyReasoningToPayload(payload, intent, "openai", "o3-mini");
+  const adapted = applyReasoningToPayload(payload, intent, "openai");
   assert.equal(adapted.reasoning_effort, "high", "xhigh maps to OpenAI high");
   assert.deepEqual(adapted.reasoning, { effort: "high", enabled: true });
 });
@@ -111,13 +111,13 @@ test("applyReasoningToPayload adapts reasoning_effort and sanitizes objects for 
     reasoning: { effort: "high" }
   };
 
-  const adaptedEnabled = applyReasoningToPayload(payload1, enabledIntent, "workbuddy", "deepseek-v4.1-flash");
+  const adaptedEnabled = applyReasoningToPayload(payload1, enabledIntent, "workbuddy");
   assert.equal(adaptedEnabled.reasoning_effort, "high", "Must map level to reasoning_effort for WorkBuddy");
   assert.equal(adaptedEnabled.reasoning, undefined, "Must remove reasoning object for WorkBuddy");
   assert.equal(adaptedEnabled.thinking, undefined, "Must remove thinking object for WorkBuddy");
 
   const lowIntent = { cleanModel: "deepseek-v4.1-flash", enabled: true, level: "low" };
-  const adaptedLow = applyReasoningToPayload({ model: "deepseek-v4.1-flash" }, lowIntent, "workbuddy", "deepseek-v4.1-flash");
+  const adaptedLow = applyReasoningToPayload({ model: "deepseek-v4.1-flash" }, lowIntent, "workbuddy");
   assert.equal(adaptedLow.reasoning_effort, "low");
 
   const disabledIntent = { cleanModel: "deepseek-v4.1-flash", enabled: false };
@@ -126,7 +126,7 @@ test("applyReasoningToPayload adapts reasoning_effort and sanitizes objects for 
     reasoning_effort: "high",
     thinking: { type: "disabled" }
   };
-  const adaptedDisabled = applyReasoningToPayload(payload2, disabledIntent, "workbuddy", "deepseek-v4.1-flash");
+  const adaptedDisabled = applyReasoningToPayload(payload2, disabledIntent, "workbuddy");
   assert.equal(adaptedDisabled.reasoning_effort, undefined, "Must remove reasoning_effort when disabled");
   assert.equal(adaptedDisabled.thinking, undefined, "Must remove thinking object for WorkBuddy");
 });

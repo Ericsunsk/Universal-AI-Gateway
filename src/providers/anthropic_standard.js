@@ -5,6 +5,8 @@ export class AnthropicStandardProvider {
     this.id = config.id;
     this.name = config.name || "Anthropic Compatible";
     this.type = "anthropic";
+    // 推理方言：原生 Anthropic 上游走 thinking 块，不做 OpenAI 方言清洗（见 core/contract.js）。
+    this.reasoningDialect = "anthropic";
     this.env = env;
     this.config = config.config || {};
   }

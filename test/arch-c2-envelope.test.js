@@ -39,6 +39,7 @@ test("C2: dispatch upstream 4xx returns the shared envelope (redacted once)", as
   const fakeFleet = {
     getProvider: () => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async () => new Response(LEAK, { status: 400 }),
     }),
   };

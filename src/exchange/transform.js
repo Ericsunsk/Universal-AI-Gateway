@@ -2,6 +2,7 @@
 // 纯数据变换，无 I/O；响应侧与路由见 ./stream.js 与 ./dispatch.js。
 import { optimizeToolOutput } from "./sanitizer.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
+import { shouldDiscardInboundThinking } from "./thinking.js";
 import { parseMaxContextTurns } from "../config/config.js";
 
 /**
@@ -494,11 +495,12 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         if (b.type === "tool_use") toolUseBlocks.push(b);
         else if (b.type === "tool_result") toolResultBlocks.push(b);
         else if (b.type === "image") imageParts.push(imageBlockToImagePart(b));
-        // thinking / redacted_thinking 显式丢弃：上游为 OpenAI 协议，不承载思维链。
-        // 二者的载荷字段是 thinking（非 text），若落入 textBlocks 会抽出空串——
-        // 轻则产出 content:"" 的空气泡消息，重则与同消息正文拼接，把思维链当正文喂给上游。
-        // 注意必须在 image 之后、textBlocks 之前拦截，不得并入 text。
-        else if (b.type === "thinking" || b.type === "redacted_thinking") continue;
+        // 思维链入站丢弃：判据归 thinking 模块（shouldDiscardInboundThinking），不在此处硬编码类型名。
+        // 载荷字段是 thinking（非 text），若落入 textBlocks 会抽出空串——轻则产出 content:""
+        // 的空气泡消息，重则与同消息正文拼接，把思维链当正文喂给上游。
+        // 拦截点必须在本行位置（image 之后、textBlocks 之前）——顺序约束归本文件的
+        // if-else 链，判据归 thinking 模块；改动此处前请先读 src/exchange/thinking.js。
+        else if (shouldDiscardInboundThinking(b)) continue;
         else if (b.type === "document") {
           const err = new Error("document blocks (PDF) are not currently supported by upstream");
           err.status = 400;
@@ -591,7 +593,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
 
   // 共享思维链与推理强度调度器：统一解析与注入
   const reasoningIntent = intent || parseReasoningIntent({ model: body.model || model, body });
-  applyReasoningToPayload(payload, reasoningIntent, "openai", targetModel || model);
+  applyReasoningToPayload(payload, reasoningIntent, "openai");
 
   return payload;
 }

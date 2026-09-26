@@ -5,6 +5,8 @@ export class OpenAIStandardProvider {
     this.id = config.id;
     this.name = config.name || "OpenAI Compatible";
     this.type = "openai";
+    // 推理方言：标准 OpenAI 上游接受 reasoning_effort，无需清洗（见 core/contract.js）。
+    this.reasoningDialect = "openai";
     this.env = env;
     this.config = config.config || {};
   }

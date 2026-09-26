@@ -47,5 +47,8 @@ test("exchange.js facade still resolves the domain's public surface", async () =
   // 三个真实模块各自的代表作都能经门面取到（防止误删某个 export * 行）。
   assert.equal(typeof mod.dispatchExchange, "function", "dispatch surface");
   assert.equal(typeof mod.transformAnthropicToOpenAI, "function", "transform surface");
-  assert.equal(typeof mod.formatOpenAIToAnthropicJson, "function", "stream surface");
+  assert.equal(typeof mod.encodeAnthropicResponse, "function", "stream surface");
+  // 旧位置参数式双导出已删除：门面不得再暴露它们。
+  assert.equal(mod.streamOpenAIToAnthropic, undefined, "old stream export removed");
+  assert.equal(mod.formatOpenAIToAnthropicJson, undefined, "old non-stream export removed");
 });

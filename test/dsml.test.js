@@ -110,8 +110,8 @@ test("DsmlStreamParser intercepts streamed DSML and outputs tool_use events acro
   assert.equal(events[2].text.trim(), "Checking git...");
 });
 
-test("streamOpenAIToAnthropic intercepts leaked DSML and emits Anthropic tool_use SSE events", async () => {
-  const { streamOpenAIToAnthropic } = await import("../src/exchange/stream.js");
+test("encodeAnthropicResponse(stream:true) intercepts leaked DSML and emits Anthropic tool_use SSE events", async () => {
+  const { encodeAnthropicResponse } = await import("../src/exchange/stream.js");
 
   const sseBody = [
     `data: ${JSON.stringify({ choices: [{ delta: { content: "The sub-agent report is thorough.\n\n<｜｜DS" } }] })}\n\n`,
@@ -127,7 +127,7 @@ test("streamOpenAIToAnthropic intercepts leaked DSML and emits Anthropic tool_us
     headers: { "Content-Type": "text/event-stream" }
   });
 
-  const anthropicRes = streamOpenAIToAnthropic(mockUpstreamResponse, "claude-3-7-sonnet-20250219", null, {}, {});
+  const anthropicRes = encodeAnthropicResponse({ upstream: mockUpstreamResponse, model: "claude-3-7-sonnet-20250219", stream: true });
   const reader = anthropicRes.body.getReader();
   const decoder = new TextDecoder();
   let fullOutput = "";
@@ -150,8 +150,8 @@ test("streamOpenAIToAnthropic intercepts leaked DSML and emits Anthropic tool_us
   assert.ok(!fullOutput.includes("<｜｜DSML｜｜"));
 });
 
-test("formatOpenAIToAnthropicJson intercepts leaked DSML and populates tool_use blocks", async () => {
-  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/stream.js");
+test("encodeAnthropicResponse(stream:false) intercepts leaked DSML and populates tool_use blocks", async () => {
+  const { encodeAnthropicResponse } = await import("../src/exchange/stream.js");
 
   const jsonBody = JSON.stringify({
     choices: [{
@@ -168,7 +168,7 @@ test("formatOpenAIToAnthropicJson intercepts leaked DSML and populates tool_use 
     headers: { "Content-Type": "application/json" }
   });
 
-  const anthropicRes = await formatOpenAIToAnthropicJson(mockUpstreamResponse, "claude-3-7-sonnet-20250219", {}, {});
+  const anthropicRes = await encodeAnthropicResponse({ upstream: mockUpstreamResponse, model: "claude-3-7-sonnet-20250219", stream: false });
   const data = await anthropicRes.json();
 
   assert.equal(data.stop_reason, "tool_use");

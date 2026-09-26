@@ -1,5 +1,5 @@
 import { createProvider } from "../providers/index.js";
-import { hasGetBalance, hasDailyCheckin, hasTokenRefresh } from "./contract.js";
+import { hasGetBalance, hasDailyCheckin, hasTokenRefresh, REASONING_DIALECTS } from "./contract.js";
 import { log } from "../logging/logger.js";
 
 let cachedFleet = null;
@@ -34,6 +34,11 @@ export class ProviderFleet {
         try {
           const instance = createProvider(pConf, env);
           if (instance) {
+            // P1 早告警：方言缺失是配置错误，dispatch 预检会 fast-fail 为 500。
+            // 此处只告警不跳过（保持路由成员语义不变），避免根因被「provider 未配置」掩盖。
+            if (!REASONING_DIALECTS.includes(instance.reasoningDialect)) {
+              log.warn("Provider missing valid reasoningDialect", { provider: pConf?.id, dialect: instance.reasoningDialect });
+            }
             this._instances.set(pConf.id, instance);
           }
         } catch (e) {

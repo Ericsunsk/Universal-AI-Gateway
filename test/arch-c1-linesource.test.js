@@ -2,8 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   iterSseParsedChunks,
-  streamOpenAIToAnthropic,
-  formatOpenAIToAnthropicJson,
+  encodeAnthropicResponse,
 } from "../src/exchange/stream.js";
 import { setLogSink } from "../src/logging/logger.js";
 
@@ -114,7 +113,7 @@ test("stream translator is stable under chunk-split delivery (thinking+text+usag
   const splitAt = (s, n) => [s.slice(0, n), s.slice(n)];
   const pieces = chunks.flatMap((c, i) => (i === 0 ? splitAt(c, 17) : [c]));
   const upstream = sseResponse(pieces);
-  const resp = streamOpenAIToAnthropic(upstream, "m");
+  const resp = encodeAnthropicResponse({ upstream, model: "m", stream: true });
   const text = await resp.text();
   const events = [];
   for (const block of text.split("\n\n")) {
@@ -144,7 +143,7 @@ test("non-streaming translator merges split tool_call fragments after refactor",
   // 第二个 chunk 从中间切断，跨 read 边界
   const cut = chunks[1];
   const pieces = [chunks[0], cut.slice(0, 23), cut.slice(23), chunks[2]];
-  const resp = await formatOpenAIToAnthropicJson(sseResponse(pieces), "m");
+  const resp = await encodeAnthropicResponse({ upstream: sseResponse(pieces), model: "m", stream: false });
   const body = await resp.json();
   const tool = body.content.find((c) => c.type === "tool_use");
   assert.ok(tool);
@@ -162,7 +161,7 @@ test("iterSseParsedChunks preserves single JSON ending with newline via tail", a
   assert.ok(tail.text.includes("single json with newline"), "tail must not drop JSON terminated with newline");
 
   // 端到端非流式解析单 JSON 带换行符
-  const resp = await formatOpenAIToAnthropicJson(sseResponse([jsonWithNewline]), "m");
+  const resp = await encodeAnthropicResponse({ upstream: sseResponse([jsonWithNewline]), model: "m", stream: false });
   const body = await resp.json();
   assert.equal(body.content[0].text, "single json with newline");
 });

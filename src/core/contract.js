@@ -30,13 +30,22 @@ export function wantsStreamedChat(provider) {
   return !!provider && provider.forceStream === true;
 }
 
-// 是否需要 WorkBuddy 方言清洗（拒收推理参数）。按能力/显式方言标记判定，
-// 不按 provider.type 字符串分支：adapter 可声明 reasoningDialect === "workbuddy"。
+// 推理方言取值：adapter 必须显式声明其一，不再从 provider.type 兜底推断。
+// 新增上游须声明方言，避免「型名恰好叫 workbuddy 就继承 workbuddy 方言」这类隐式继承。
+export const REASONING_DIALECTS = ["workbuddy", "openai", "anthropic"];
+
+// 是否需要 WorkBuddy 方言清洗（拒收推理参数）。按 adapter 显式声明的 reasoningDialect 判定；
+// 未声明即视为契约违约——报错而非静默兜底（兜底曾是 provider.type 字符串分支）。
 export function needsReasoningScrub(provider) {
   if (!provider) return false;
-  if (provider.reasoningDialect === "workbuddy") return true;
-  if (provider.reasoningDialect === "openai" || provider.reasoningDialect === "anthropic") return false;
-  return provider.type === "workbuddy";
+  const dialect = provider.reasoningDialect;
+  if (!REASONING_DIALECTS.includes(dialect)) {
+    throw new Error(
+      `Provider ${provider.type ?? provider.name ?? "<anonymous>"} 未声明 reasoningDialect；` +
+      `须为 ${REASONING_DIALECTS.join(" | ")} 之一（见 core/contract.js）`
+    );
+  }
+  return dialect === "workbuddy";
 }
 
 export function hasTokenRefresh(provider) {

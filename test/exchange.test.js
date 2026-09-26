@@ -160,8 +160,8 @@ test("transformAnthropicToOpenAI handles tool_use and tool_result blocks", () =>
   assert.equal(toolMsg.tool_call_id, "tu_1");
 });
 
-// ---- OpenAI SSE -> Anthropic SSE 流式转译 ----
-import { streamOpenAIToAnthropic } from "../src/exchange/exchange.js";
+// ---- OpenAI SSE -> Anthropic SSE 响应侧转译（唯一出口 encodeAnthropicResponse） ----
+import { encodeAnthropicResponse } from "../src/exchange/exchange.js";
 
 function openAISseResponse(lines) {
   const body = new ReadableStream({
@@ -190,13 +190,13 @@ async function readAnthropicEvents(response) {
   return events;
 }
 
-test("streamOpenAIToAnthropic emits full Anthropic SSE lifecycle", async () => {
+test("encodeAnthropicResponse(stream:true) emits full Anthropic SSE lifecycle", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { content: "Hello" } }] }),
     "data: " + JSON.stringify({ choices: [{ delta: { content: " world" } }] }),
     "data: [DONE]"
   ]);
-  const resp = streamOpenAIToAnthropic(upstream, "claude-test");
+  const resp = encodeAnthropicResponse({ upstream, model: "claude-test", stream: true });
   assert.equal(resp.status, 200);
   assert.match(resp.headers.get("Content-Type"), /text\/event-stream/);
 
@@ -220,12 +220,12 @@ test("streamOpenAIToAnthropic emits full Anthropic SSE lifecycle", async () => {
   assert.equal(msgDelta.data.delta.stop_reason, "end_turn");
 });
 
-test("streamOpenAIToAnthropic sets stop_reason=tool_use on tool_calls", async () => {
+test("encodeAnthropicResponse(stream:true) sets stop_reason=tool_use on tool_calls", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { tool_calls: [{ id: "call_9", function: { name: "bash", arguments: "{\"cmd\":\"ls\"}" } }] }, finish_reason: "tool_calls" }] }),
     "data: [DONE]"
   ]);
-  const resp = streamOpenAIToAnthropic(upstream, "m");
+  const resp = encodeAnthropicResponse({ upstream, model: "m", stream: true });
   const events = await readAnthropicEvents(resp);
 
   const blockStarts = events.filter(e => e.event === "content_block_start");
@@ -237,12 +237,12 @@ test("streamOpenAIToAnthropic sets stop_reason=tool_use on tool_calls", async ()
   assert.equal(msgDelta.data.delta.stop_reason, "tool_use");
 });
 
-test("streamOpenAIToAnthropic surfaces upstream business error as notice", async () => {
+test("encodeAnthropicResponse(stream:true) surfaces upstream business error as notice", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ code: 11128, message: "compliance filter" }),
     "data: [DONE]"
   ]);
-  const resp = streamOpenAIToAnthropic(upstream, "m");
+  const resp = encodeAnthropicResponse({ upstream, model: "m", stream: true });
   const events = await readAnthropicEvents(resp);
 
   const deltas = events.filter(e => e.event === "content_block_delta");
@@ -332,6 +332,7 @@ test("dispatchExchange preserves upstream error without body consumption crash",
       if (name === "fake") {
         return {
           type: "workbuddy",
+          reasoningDialect: "workbuddy",
           callChat: async () => {
             return new Response(JSON.stringify({ error: { code: 14018, msg: "额度已用尽" } }), {
               status: 429,
@@ -464,6 +465,7 @@ test("dispatchExchange forwards image input to the upstream instead of rejecting
   const fakeFleet = {
     getProvider: () => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async (payload) => {
         sentPayload = payload;
         return new Response(
@@ -500,6 +502,7 @@ test("dispatchExchange surfaces upstream 400 for rejected image input (not 502)"
   const fakeFleet = {
     getProvider: () => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async () => new Response(
         JSON.stringify({ error: { message: "image input is not supported by this model" } }),
         { status: 400 }
@@ -525,6 +528,7 @@ test("dispatchExchange redacts upstream endpoints and credentials from 4xx repli
   const fakeFleet = {
     getProvider: () => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async () => new Response(JSON.stringify({ error: { message: leaked } }), { status: 400 })
     })
   };
@@ -565,7 +569,7 @@ test("transformAnthropicToOpenAI validates system array with 400", () => {
   );
 });
 
-test("streamOpenAIToAnthropic cancels upstream on client abort (no stranded pump)", async () => {
+test("encodeAnthropicResponse(stream:true) cancels upstream on client abort (no stranded pump)", async () => {
   let upstreamCancelled = false;
   const slowUpstream = new ReadableStream({
     start(c) {
@@ -576,7 +580,7 @@ test("streamOpenAIToAnthropic cancels upstream on client abort (no stranded pump
   });
   const upstream = new Response(slowUpstream, { status: 200 });
   const ac = new AbortController();
-  const res = streamOpenAIToAnthropic(upstream, "m", ac.signal);
+  const res = encodeAnthropicResponse({ upstream, model: "m", signal: ac.signal, stream: true });
   const reader = res.body.getReader();
   const first = await reader.read();
   assert.equal(first.done, false, "first block must arrive before abort");
@@ -591,6 +595,7 @@ test("dispatchExchange fails over when upstream says model unavailable (differen
   const fakeFleet = {
     getProvider: (name) => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async (_payload) => {
         calls.push(name);
         if (name === "first") {
@@ -619,6 +624,7 @@ test("dispatchExchange does not fail over model errors onto the same model", asy
   const fakeFleet = {
     getProvider: (name) => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async () => {
         calls.push(name);
         return new Response(JSON.stringify({ error: { message: "Model is unavailable" } }), { status: 400 });
@@ -637,14 +643,14 @@ test("dispatchExchange does not fail over model errors onto the same model", asy
   assert.deepEqual(calls, ["first"], "same model next → fail fast, no pointless retry");
 });
 
-test("streamOpenAIToAnthropic closes stalled upstream instead of hanging", async () => {
+test("encodeAnthropicResponse(stream:true) closes stalled upstream instead of hanging", async () => {
   // 上游 200 但正文永远不来字节：必须熔断收尾，不能无限 ping
   const hung = new Response(new ReadableStream({ start() {} }), {
     status: 200,
     headers: { "Content-Type": "text/event-stream" }
   });
   const started = Date.now();
-  const resp = streamOpenAIToAnthropic(hung, "m", null, {}, { stallMs: 50 });
+  const resp = encodeAnthropicResponse({ upstream: hung, model: "m", stallMs: 50, stream: true });
   const events = await readAnthropicEvents(resp);
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 15000, `stall guard must fire promptly (took ${elapsed}ms)`);
@@ -710,7 +716,7 @@ test("stream translator logs upstream prefix-cache hits", async () => {
       "data: " + JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 80 } } }),
       "data: [DONE]"
     ]);
-    const resp = streamOpenAIToAnthropic(upstream, "m");
+    const resp = encodeAnthropicResponse({ upstream, model: "m", stream: true });
     await readAnthropicEvents(resp);
   } finally {
     setLogSink(null);
@@ -720,52 +726,51 @@ test("stream translator logs upstream prefix-cache hits", async () => {
   assert.ok(lines.some((l) => l.includes("prefix-cache hit") && l.includes("80")), "cache hit must be observable via logs");
 });
 
-test("streamOpenAIToAnthropic emits both thinking and text from one mixed chunk", async () => {
+test("encodeAnthropicResponse(stream:true) emits both thinking and text from one mixed chunk", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { reasoning_content: "r1", content: "c1" } }] }),
     "data: [DONE]"
   ]);
-  const resp = streamOpenAIToAnthropic(upstream, "m");
+  const resp = encodeAnthropicResponse({ upstream, model: "m", stream: true });
   const events = await readAnthropicEvents(resp);
   const starts = events.filter(e => e.event === "content_block_start").map(e => e.data.content_block.type);
   assert.deepEqual(starts, ["thinking", "text"]);
 });
 
-test("streamOpenAIToAnthropic reports real output_tokens from upstream usage (L1)", async () => {
+test("encodeAnthropicResponse(stream:true) reports real output_tokens from upstream usage (L1)", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { content: "Hello" } }] }),
     "data: " + JSON.stringify({ choices: [{ delta: { content: " world" } }] }),
     "data: " + JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 12, completion_tokens: 7 } }),
     "data: [DONE]"
   ]);
-  const events = await readAnthropicEvents(streamOpenAIToAnthropic(upstream, "m"));
+  const events = await readAnthropicEvents(encodeAnthropicResponse({ upstream, model: "m", stream: true }));
   const msgDelta = events.find(e => e.event === "message_delta");
   assert.equal(msgDelta.data.usage.output_tokens, 7, "must use upstream completion_tokens, not hardcoded 60");
   assert.equal(msgDelta.data.usage.input_tokens, 12, "must report upstream prompt_tokens as input_tokens");
   assert.notEqual(msgDelta.data.usage.output_tokens, 60);
 });
 
-test("streamOpenAIToAnthropic estimates output_tokens when upstream omits usage (L1)", async () => {
+test("encodeAnthropicResponse(stream:true) estimates output_tokens when upstream omits usage (L1)", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { content: "12345678" } }] }),
     "data: " + JSON.stringify({ choices: [{ delta: { content: "abcdefgh" } }] }),
     "data: [DONE]"
   ]);
-  const events = await readAnthropicEvents(streamOpenAIToAnthropic(upstream, "m"));
+  const events = await readAnthropicEvents(encodeAnthropicResponse({ upstream, model: "m", stream: true }));
   const msgDelta = events.find(e => e.event === "message_delta");
-  // 16 字符 / 4 = 4，与 formatOpenAIToAnthropicJson 的估算口径一致
+  // 16 字符 / 4 = 4，与非流式落袋的估算口径一致
   assert.equal(msgDelta.data.usage.output_tokens, 4, "char-based estimate must replace the 60 placeholder");
   assert.notEqual(msgDelta.data.usage.output_tokens, 60);
 });
 
-test("formatOpenAIToAnthropicJson accumulates SSE tool_calls into tool_use blocks", async () => {
-  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
+test("encodeAnthropicResponse(stream:false) accumulates SSE tool_calls into tool_use blocks", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { tool_calls: [{ id: "call_1", function: { name: "bash", arguments: "{\"cm" } }] } }] }),
     "data: " + JSON.stringify({ choices: [{ delta: { tool_calls: [{ id: "call_1", function: { arguments: "d\":\"ls\"}" } }] } }] }),
     "data: [DONE]"
   ]);
-  const resp = await formatOpenAIToAnthropicJson(upstream, "m");
+  const resp = await encodeAnthropicResponse({ upstream, model: "m", stream: false });
   const body = await resp.json();
   const tool = body.content.find(c => c.type === "tool_use");
   assert.ok(tool, "SSE tool_calls must surface as tool_use (was silently dropped)");
@@ -774,13 +779,12 @@ test("formatOpenAIToAnthropicJson accumulates SSE tool_calls into tool_use block
   assert.equal(body.stop_reason, "end_turn");
 });
 
-test("formatOpenAIToAnthropicJson maps SSE finish_reason to stop_reason", async () => {
-  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
+test("encodeAnthropicResponse(stream:false) maps SSE finish_reason to stop_reason", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({ choices: [{ delta: { content: "hi" }, finish_reason: "length" }] }),
     "data: [DONE]"
   ]);
-  const resp = await formatOpenAIToAnthropicJson(upstream, "m");
+  const resp = await encodeAnthropicResponse({ upstream, model: "m", stream: false });
   const body = await resp.json();
   assert.equal(body.stop_reason, "max_tokens", "SSE finish was previously ignored (always end_turn)");
 });
@@ -791,6 +795,7 @@ test("dispatchExchange passes through unconfigured model to default provider wit
     getAllActive: () => [{ id: "mock_wb" }],
     getProvider: (id) => ({
       id,
+      reasoningDialect: "openai",
       callChat: async (payload) => {
         requestedPayload = payload;
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
@@ -826,6 +831,7 @@ test("dispatchExchange OpenAI path prunes noisy role:tool output before upstream
     getAllActive: () => [{ id: "mock_oai" }],
     getProvider: (id) => ({
       id,
+      reasoningDialect: "openai",
       callChat: async (payload) => {
         requestedPayload = payload;
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
@@ -871,6 +877,7 @@ test("dispatchExchange honors wildcard route routes['*'] when configured", async
     getAllActive: () => [{ id: "wb" }],
     getProvider: (id) => ({
       id,
+      reasoningDialect: "openai",
       callChat: async (payload) => {
         requestedPayload = payload;
         return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
@@ -1346,18 +1353,96 @@ test("resolveStopDetails agrees with resolveStopDetail across the tri-state x fi
   }
 });
 
-test("formatOpenAIToAnthropicJson includes signature on thinking blocks", async () => {
-  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
+test("encodeAnthropicResponse(stream:false) includes signature on thinking blocks", async () => {
   const sseBody = [
     "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking step\"}}]}\n\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
     "data: [DONE]\n\n"
   ].join("");
-  const resp = await formatOpenAIToAnthropicJson(new Response(sseBody), "m");
+  const resp = await encodeAnthropicResponse({ upstream: new Response(sseBody), model: "m", stream: false });
   assert.equal(resp.status, 200);
   const json = await resp.json();
   const thinkingBlock = json.content.find(b => b.type === "thinking");
   assert.ok(thinkingBlock, "thinking block must be present");
   assert.equal(thinkingBlock.thinking, "thinking step");
   assert.equal(thinkingBlock.signature, "sig_synthetic_done", "thinking block must carry signature for Anthropic protocol compliance");
+});
+
+// ---- 唯一出口：流式/非流式只是数据键，同一 fixture 翻转 stream 即可覆盖两条路径 ----
+test("encodeAnthropicResponse drives both stream and non-stream from one fixture by flipping stream", async () => {
+  const { encodeAnthropicResponse } = await import("../src/exchange/stream.js");
+
+  const sseBody = () => {
+    const lines = [
+      'data: {"choices":[{"delta":{"content":"Hello"}}]}',
+      'data: {"choices":[{"delta":{"content":" world"},"finish_reason":"stop"}]}',
+      'data: [DONE]'
+    ];
+    const body = new ReadableStream({
+      start(c) {
+        const enc = new TextEncoder();
+        for (const l of lines) c.enqueue(enc.encode(l + "\n\n"));
+        c.close();
+      }
+    });
+    return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+  };
+
+  const base = { model: "claude-test", headers: { "X-Debug": "1" } };
+
+  // 流式：SSE 出站
+  const streamed = encodeAnthropicResponse({ ...base, upstream: sseBody(), stream: true });
+  assert.match(streamed.headers.get("content-type"), /^text\/event-stream/);
+  const sseText = await streamed.text();
+  assert.match(sseText, /event: message_start/);
+  assert.match(sseText, /Hello/);
+  assert.match(sseText, /event: message_stop/);
+
+  // 非流式：同一份 fixture，只把 stream 翻成 false
+  const packed = await encodeAnthropicResponse({ ...base, upstream: sseBody(), stream: false });
+  assert.match(packed.headers.get("content-type"), /^application\/json/);
+  const json = JSON.parse(await packed.text());
+  assert.equal(json.type, "message");
+  assert.equal(json.content[0].text, "Hello world");
+  assert.equal(json.stop_reason, "end_turn");
+
+  // 调用方提供的头在两条路径上都生效（此前该头在第 3/第 2 位漂移，互换即静默出错）
+  assert.equal(streamed.headers.get("X-Debug"), "1");
+  assert.equal(packed.headers.get("X-Debug"), "1");
+});
+
+test("encodeAnthropicResponse resolves the stop detail once and shares it across both paths", async () => {
+  const { encodeAnthropicResponse, resolveStopDetail } = await import("../src/exchange/stream.js");
+
+  const sseBody = () => {
+    const body = new ReadableStream({
+      start(c) {
+        const enc = new TextEncoder();
+        c.enqueue(enc.encode('data: {"choices":[{"delta":{"content":"abc</done>"},"finish_reason":"stop"}]}\n\n'));
+        c.enqueue(enc.encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(body, { headers: { "Content-Type": "text/event-stream" } });
+  };
+
+  const detail = resolveStopDetail(["</done>"]);
+  for (const stream of [true, false]) {
+    const res = await encodeAnthropicResponse({ upstream: sseBody(), model: "m", stream, stopDetail: detail });
+    // 流式出站是 SSE，非流式是整包 JSON；两者都用 text() 读取，避免响应体被消费两次。
+    const body = await res.text();
+    assert.match(body, /stop_sequence/, `stream=${stream} 应判定为 stop_sequence`);
+  }
+
+  // 传 stopDetail 与传原始 stopSequences 等价（两条路径同口径）
+  for (const stream of [true, false]) {
+    const res = await encodeAnthropicResponse({ upstream: sseBody(), model: "m", stream, stopSequences: ["</done>"] });
+    const body = await res.text();
+    assert.match(body, /stop_sequence/, `raw sequences, stream=${stream}`);
+  }
+});
+
+test("encodeAnthropicResponse refuses a missing upstream", async () => {
+  const { encodeAnthropicResponse } = await import("../src/exchange/stream.js");
+  assert.throws(() => encodeAnthropicResponse({ model: "m" }), /upstream is required/);
 });

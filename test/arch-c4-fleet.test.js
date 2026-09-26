@@ -14,7 +14,7 @@ import {
 // 模块单例缓存相互干扰（同文件内各用例亦互不复用版本号）。
 
 function openaiProvider(id, config) {
-  return { id, type: "openai", enabled: true, config };
+  return { id, type: "openai", reasoningDialect: "openai", enabled: true, config };
 }
 
 test("C4: baseUrl drift rebuilds fleet without version bump", () => {
@@ -55,7 +55,7 @@ test("C4: workbuddy account credential drift rebuilds fleet", () => {
   const mk = (token) => ({
     config_version: v,
     providers: [{
-      id: "c4wb", type: "workbuddy", enabled: true,
+      id: "c4wb", type: "workbuddy", reasoningDialect: "workbuddy", enabled: true,
       config: { accounts: [{ id: "a1", enabled: true, userId: "u1", accessToken: token, refreshToken: "r1" }] },
     }],
   });
@@ -86,7 +86,7 @@ test("C4: identical content reuses fleet despite new object and shuffled key ord
   const b = {
     usage_provider_id: "c4o6",
     config_version: v,
-    providers: [{ config: { apiKey: "sk-a", baseUrl: "https://a.example.com" }, enabled: true, type: "openai", id: "c4o6" }],
+    providers: [{ config: { apiKey: "sk-a", baseUrl: "https://a.example.com" }, enabled: true, reasoningDialect: "openai", type: "openai", id: "c4o6" }],
   };
   assert.equal(getProviderFleet(b, env), f1, "key order must not trigger rebuild");
 });

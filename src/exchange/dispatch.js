@@ -8,7 +8,7 @@ import { hasCallChat, hasCallMessages, wantsStreamedChat, needsReasoningScrub } 
 import { runFailover } from "../core/failover.js";
 import { redactUpstreamText, errorBody } from "../http/redact.js";
 import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest, normalizeStopSequences } from "./transform.js";
-import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
+import { encodeAnthropicResponse } from "./stream.js";
 import { estimateTokens } from "../core/tokenizer.js";
 
 /**
@@ -84,6 +84,15 @@ export async function dispatchExchange({
       `Available models: ${availableModels.length > 0 ? availableModels.join(", ") : "(none)"}.`);
   }
 
+  // P1 fast-fail：reasoningDialect 缺失是配置错误，不是上游抖动。
+  // needsReasoningScrub 在 attempt 内抛错会被 runFailover 视为传输失败，
+  // 最终渲染成 502「All available providers failed」掩盖根因。
+  // 此处在 failover 之外预检一次，违约直接抛给 index.js 转 500。
+  for (const c of candidates) {
+    const p = fleet.getProvider(c.provider);
+    if (p) needsReasoningScrub(p);
+  }
+
   // 候选级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、retry 预算、
   // 耗尽收尾由驱动器统一处理；单个候选的「一次往返 → 一个 outcome」见 attempt。
   // 候选层不原地重试（retryBudget: 0）：不同上游的抖动差异大，切换候选比重发更快。
@@ -119,7 +128,9 @@ export async function dispatchExchange({
 
       try {
         if (isAnthropic && nativeAnthropic) {
-          const anthropicPayload = applyReasoningToPayload({ ...body, model: candidate.model }, reasoningIntent, "anthropic", candidate.model);
+          // 原生路径按 adapter 声明的方言注入（预检已保证合法）；硬编码 "anthropic"
+          // 仅为历史缺省，現以 provider 声明为准，避免未来原生方言分化时错配。
+          const anthropicPayload = applyReasoningToPayload({ ...body, model: candidate.model }, reasoningIntent, provider.reasoningDialect ?? "anthropic");
           upstreamRes = await provider.callMessages(anthropicPayload, { signal: request?.signal, request, principal });
         } else if (hasCallChat(provider)) {
           let openaiPayload;
@@ -140,7 +151,7 @@ export async function dispatchExchange({
           // 方言身份经能力谓词判定（needsReasoningScrub），不 switch provider.type。
           const scrub = needsReasoningScrub(provider);
           if (!isAnthropic || scrub) {
-            applyReasoningToPayload(openaiPayload, reasoningIntent, scrub ? "workbuddy" : "openai", candidate.model);
+            applyReasoningToPayload(openaiPayload, reasoningIntent, scrub ? "workbuddy" : "openai");
           }
           if (wantsStreamedChat(provider)) {
             openaiPayload.stream = true;
@@ -173,14 +184,22 @@ export async function dispatchExchange({
         if (isAnthropic && !nativeAnthropic) {
           // 停止序列：归一化口径与 transform 注入 payload.stop 完全一致（同一个函数），
           // 保证「发给上游的序列」与「判定 stop_reason 用的序列」不会分歧。
+          // 响应侧转译走唯一入口 encodeAnthropicResponse：流式/非流式只是 stream 数据键，
+          // 不再由调用方在「只差中间一格的兄弟签名」之间二选一。
           const stopSequences = normalizeStopSequences(body.stop_sequences);
           const initialInputTokens = estimateTokens(body || {});
-          const streamOptions = { stopSequences, initialInputTokens };
-          if (body.stream !== false) {
-            return { kind: "done", response: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders, streamOptions) };
-          } else {
-            return { kind: "done", response: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders, streamOptions) };
-          }
+          return {
+            kind: "done",
+            response: await encodeAnthropicResponse({
+              upstream: upstreamRes,
+              model,
+              signal: request?.signal,
+              headers: debugHeaders,
+              stopSequences,
+              initialInputTokens,
+              stream: body.stream !== false
+            })
+          };
         }
 
         return { kind: "done", response: new Response(upstreamRes.body, {

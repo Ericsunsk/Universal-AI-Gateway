@@ -140,12 +140,11 @@ export function parseReasoningIntent({ model = "", body = {} } = {}) {
 /**
  * 将解析出的标准推理意图，安全适配注入到对应上游提供商的 Payload 中
  *
- * targetModel 为**保留的定位参数**：签名契约的一部分（8 处调用方 + 测试按位置传入），
- * 见 AGENTS.md「公共 API 顺序不变」。当前按 providerType 分支即可判定注入策略，
- * 尚未用到模型名；保留形参以免破坏既有调用点。签名中保留即为其存在意义，勿删。
+ * providerType 即上游的**推理方言**（取值以 core/contract.js REASONING_DIALECTS
+ * 为准，此处 switch 的三个分支须与之同义；加方言时两处同改）。
+ * 旧第 4 参 targetModel 已删除（全程未用过的定位参数，不保留兼容位）。
  */
-export function applyReasoningToPayload(payload, intent, providerType, targetModel = "") {
-  void targetModel; // 显式声明显式未用（签名契约保留），非疏漏
+export function applyReasoningToPayload(payload, intent, providerType) {
   if (!payload || !intent) return payload;
 
   const type = (providerType || "").toLowerCase();

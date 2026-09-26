@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reduceOpenAIChunkAll, formatOpenAIToAnthropicJson } from "../src/exchange/stream.js";
+import { reduceOpenAIChunkAll, encodeAnthropicResponse } from "../src/exchange/stream.js";
 import { dispatchExchange } from "../src/exchange/exchange.js";
 import { needsReasoningScrub, hasCallChat, hasCallMessages } from "../src/core/contract.js";
 import { parseReasoningIntent } from "../src/exchange/reasoning.js";
@@ -21,7 +21,7 @@ test("non-streaming SSE tool frags without id merge by order", async () => {
       c.close();
     }
   });
-  const res = await formatOpenAIToAnthropicJson(new Response(body), "m");
+  const res = await encodeAnthropicResponse({ upstream: new Response(body), model: "m", stream: false });
   const json = await res.json();
   const tool = json.content.find((b) => b.type === "tool_use");
   assert.ok(tool, "tool_use survives id-less continuation");
@@ -34,6 +34,7 @@ test("dispatchExchange exhausted message includes lastFail evidence", async () =
     getAllActive: () => [{ id: "bad" }],
     getProvider: () => ({
       id: "bad",
+      reasoningDialect: "openai",
       callChat: async () => new Response("upstream says quota gone", { status: 429 })
     })
   };
@@ -52,11 +53,19 @@ test("dispatchExchange exhausted message includes lastFail evidence", async () =
 });
 
 // P0-4：方言判定走能力谓词，不 switch type
-test("needsReasoningScrub prefers explicit dialect over type tag", () => {
-  assert.equal(needsReasoningScrub({ type: "workbuddy" }), true);
-  assert.equal(needsReasoningScrub({ type: "openai" }), false);
-  assert.equal(needsReasoningScrub({ type: "custom", reasoningDialect: "workbuddy" }), true);
+test("needsReasoningScrub reads the declared dialect and refuses to guess", () => {
+  // 方言是显式声明，不再从 type 字符串兜底推断。
+  assert.equal(needsReasoningScrub({ reasoningDialect: "workbuddy" }), true);
+  assert.equal(needsReasoningScrub({ reasoningDialect: "openai" }), false);
+  assert.equal(needsReasoningScrub({ reasoningDialect: "anthropic" }), false);
   assert.equal(needsReasoningScrub(null), false);
+
+  // 契约违约：未声明方言即报错，而非静默继承 type 同名方言。
+  // 这正是本用例此前守卫的兜底行为，现已被显式声明取代。
+  assert.throws(() => needsReasoningScrub({ type: "workbuddy" }), /reasoningDialect/);
+  assert.throws(() => needsReasoningScrub({ type: "custom" }), /reasoningDialect/);
+  // type 与 dialect 不再有隐式联系：type 叫 workbuddy 也必须显式声明。
+  assert.equal(needsReasoningScrub({ type: "custom", reasoningDialect: "workbuddy" }), true);
 });
 
 // P0-5：Anthropic provider 无 callChat stub；OpenAI+Anthropic 组合显式 400

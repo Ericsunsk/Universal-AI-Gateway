@@ -2,6 +2,7 @@
 // 流式与非流式共享 extractors，两处不再各自拼装；路由见 ./dispatch.js。
 import { createParser } from "eventsource-parser";
 import { corsHeaders } from "../http/headers.js";
+import { ThinkingAccumulator, shouldEmitTextBlock, SYNTHETIC_THINKING_SIGNATURE } from "./thinking.js";
 import { recordUpstreamCache } from "../core/cacheStats.js";
 import { log } from "../logging/logger.js";
 import { DsmlStreamParser, parseDsmlInvocations, stripDsml, containsDsml } from "./dsml.js";
@@ -25,7 +26,7 @@ const EVENT_MSG_STOP_BYTES = textEncoder.encode("event: message_stop\ndata: {\"t
 //   "text"     —— 正文文本增量
 //   "tool_use" —— 工具调用块（可能伴随 id/name/arguments）
 // 纯函数：从已解析的上游 JSON 中提取错误消息（error 字段 / msg / message / 非零 code）。
-// reduceOpenAIChunkAll 与 formatOpenAIToAnthropicJson 共享，避免两处各自拼装。
+// reduceOpenAIChunkAll 与非流式落袋共享，避免两处各自拼装。
 export function extractErrorMessage(parsed) {
   if (!parsed || typeof parsed !== "object") return null;
   return parsed.error?.message || parsed.msg || parsed.message ||
@@ -200,9 +201,8 @@ export function reduceOpenAIChunkAll(parsed) {
 // options.stallMs 供测试注入小值；生产默认 180s（< Vercel 300s 上限，远大于实测最慢模型的 118s）。
 const UPSTREAM_STALL_MS = 180 * 1000;
 
-// thinking block 回传所需的占位 signature（Anthropic 只要求 non-empty string）。
-// 上游 OpenAI 协议不产生真实 signature，此处合成仅为满足协议形状。
-const SYNTHETIC_THINKING_SIGNATURE = "gateway-synthetic-thinking-signature";
+// thinking 占位签名统一归 thinking.js（SYNTHETIC_THINKING_SIGNATURE）：
+// 流式 signature_delta 与非流式 thinking 块须同值，否则同一思维链在两种出站形态下签名分叉。
 
 // ---------------------------------------------------------------------------
 // tool_call 分片 → 累积器（非流式落袋的唯一合并点，按 index 定址）
@@ -576,11 +576,47 @@ export async function* iterSseParsedChunks(reader, options = {}) {
   }
 }
 
-export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
+/**
+ * 响应侧转译的**唯一出口**（命名请求包）。旧位置参数式双导出已删除，
+ * 流式/非流式只是数据键（stream），不再有兄弟签名。
+ * @param {object} req
+ * @param {Response} req.upstream - 上游响应（其 body 会被读取）
+ * @param {string} req.model - 客户端请求的模型名，用于回显
+ * @param {AbortSignal|null} [req.signal] - 客户端断开信号（仅流式使用）
+ * @param {object} [req.headers] - 追加到响应上的头（调用方构造，如 debug 头）
+ * @param {object} [req.stopDetail] - resolveStopDetail 的返回值；省略时由 stopSequences 就地解析
+ * @param {unknown} [req.stopSequences] - 原始停止序列（stopDetail 省略时使用）
+ * @param {number} [req.initialInputTokens] - 首帧 input_tokens 预估（仅非流式/流式首帧）
+ * @param {number} [req.stallMs] - 上游停滞熔断阈值（仅流式；生产默认 UPSTREAM_STALL_MS）
+ * @param {boolean} [req.stream=true] - true 走 SSE，false 走整包 JSON
+ * @returns {Response|Promise<Response>}
+ */
+export function encodeAnthropicResponse(req = {}) {
+  const {
+    upstream, model, signal = null, headers = {}, stopDetail, stopSequences,
+    initialInputTokens, stallMs, stream = true
+  } = req;
+
+  if (!upstream) throw new Error("encodeAnthropicResponse: req.upstream is required");
+
+  // 停止序列概念在此归一化一次，两个分支共用同一口径。
+  const detail = stopDetail ?? resolveStopDetail(stopSequences);
+
+  if (stream === false) {
+    return formatOpenAIToAnthropicJson(upstream, model, headers, { stopDetail: detail, initialInputTokens });
+  }
+  return streamOpenAIToAnthropic(upstream, model, signal, headers, {
+    stopDetail: detail, initialInputTokens, stallMs
+  });
+}
+
+// 流式转译内部实现：OpenAI SSE → Anthropic SSE（仅经 encodeAnthropicResponse 调用，不导出）。
+function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
   const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
   // 本次请求下发的停止序列：用于流式终局判定 stop_reason 是 stop_sequence 还是 end_turn。
   // 归一化与「是否生效」由 resolveStopDetail 唯一回答（概念归属，见该函数）。
-  const stopDetail = resolveStopDetail(options?.stopSequences);
+  // 调用方若已解析（encodeAnthropicResponse）则直接透传，避免重复归一化。
+  const stopDetail = options?.stopDetail ?? resolveStopDetail(options?.stopSequences);
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -788,7 +824,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       }
 
       // message_delta.usage.output_tokens 是 Anthropic 线协议字段，客户端会读；
-      // 取上游 usage 与字符估算的较大值（与非流式 formatOpenAIToAnthropicJson 口径一致）。
+      // 取上游 usage 与字符估算的较大值（与非流式落袋口径一致）。
       // input_tokens 采信上游 usage.prompt_tokens：缺失时为 0（不估算输入长度）。
       const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
       // 终局 stop_reason 与 stop_sequence：统一委托 resolveStopDetails 判定
@@ -850,16 +886,16 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
   });
 }
 
-// 内部非流式转译：OpenAI -> Anthropic JSON (优化：增量流式读取，零全量内存拷贝)
-// 导出给 ./dispatch.js 的非流式路径使用（对外仍经 exchange.js 门面）。
-export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, extraHeaders = {}, options = {}) {
+// 非流式转译内部实现：OpenAI -> Anthropic JSON（仅经 encodeAnthropicResponse 调用，不导出）。
+async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, extraHeaders = {}, options = {}) {
   // 与非流式同口径：停止序列概念交由 resolveStopDetail 归属（见该函数）。
-  const stopDetail = resolveStopDetail(options?.stopSequences);
+  // 调用方若已解析（encodeAnthropicResponse）则直接透传，避免重复归一化。
+  const stopDetail = options?.stopDetail ?? resolveStopDetail(options?.stopSequences);
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   let accumulated = "";
-  let accumulatedThinking = "";
+  const thinkingAcc = new ThinkingAccumulator();
   let accumulatedToolCalls = [];
   const sseToolFrags = new Map(); // tool id -> { id, name, args }，SSE 分片在此按 id 拼接
   let buffer;
@@ -882,7 +918,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
         if (emission.kind === "error") {
           accumulated += `\n[Upstream Notice: ${emission.message}]\n`;
         } else if (emission.kind === "thinking") {
-          accumulatedThinking += emission.text;
+          thinkingAcc.push(emission.text);
         } else if (emission.kind === "text") {
           accumulated += emission.text;
         } else if (emission.kind === "tool_use") {
@@ -907,13 +943,13 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
         const message = parsed.choices?.[0]?.message;
         const reasoning = message?.reasoning_content || message?.reasoning ||
                           parsed.choices?.[0]?.delta?.reasoning_content || parsed.choices?.[0]?.delta?.reasoning;
-        if (reasoning) accumulatedThinking = reasoning;
+        if (reasoning) thinkingAcc.reset(reasoning);
         if (message && message.content !== undefined && message.content !== null) {
           accumulated = message.content;
         } else if (parsed.choices?.[0]?.delta?.content) {
           accumulated = parsed.choices[0].delta.content;
         } else {
-          accumulated = extractErrorMessage(parsed) || (accumulatedThinking ? "" : buffer.trim());
+          accumulated = extractErrorMessage(parsed) || (thinkingAcc.suppressesFallbackText ? "" : buffer.trim());
         }
         // 提取非流式响应中的工具调用（直接存归一化形态，避免二次嵌套 OpenAI 包裹层）
         if (Array.isArray(message?.tool_calls)) {
@@ -964,16 +1000,12 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   }
 
   accumulated = accumulated || "";
-  outputTokens = Math.max(outputTokens, Math.ceil(((accumulated || " ").length + accumulatedThinking.length) / 4));
+  outputTokens = Math.max(outputTokens, Math.ceil(((accumulated || " ").length + thinkingAcc.estimatedChars()) / 4));
 
   const content = [];
-  if (accumulatedThinking) {
-    content.push({
-      type: "thinking",
-      thinking: accumulatedThinking,
-      signature: "sig_synthetic_done"
-    });
-  }
+  // thinking 块由归属模块构造（含统一签名补齐），此处只负责排布顺序。
+  const thinkingBlock = thinkingAcc.toAnthropicBlock();
+  if (thinkingBlock) content.push(thinkingBlock);
 
   // 工具调用：映射 OpenAI tool_calls 到 Anthropic tool_use content blocks
   // Anthropic tool_use.input 必须是 object；OpenAI arguments 是 JSON 字符串，需解析
@@ -982,8 +1014,8 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     content.push(...toolCallsToAnthropicBlocks(accumulatedToolCalls));
   }
 
-  // 仅在有有效正文，或者既无 thinking 也无 tool_calls 时才输出 text 块
-  if (accumulated.trim() || content.length === 0) {
+  // 「何时输出 text 块」的唯一规则，归 thinking 模块（见 shouldEmitTextBlock）。
+  if (shouldEmitTextBlock(accumulated, content)) {
     content.push({ type: "text", text: accumulated || " " });
   }
 

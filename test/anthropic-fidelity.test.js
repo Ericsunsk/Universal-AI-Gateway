@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import {
   mapAnthropicToolChoice,
   transformAnthropicToOpenAI,
-  streamOpenAIToAnthropic,
-  formatOpenAIToAnthropicJson
+  encodeAnthropicResponse
 } from "../src/exchange/exchange.js";
 
 function openAISseResponse(lines) {
@@ -88,7 +87,7 @@ test("transformAnthropicToOpenAI handles tool_choice, user_id and rejects docume
   }, (err) => err.status === 400 && err.message.includes("document blocks (PDF)"));
 });
 
-test("streamOpenAIToAnthropic includes anthropic-version, initialInputTokens, and cache_read_input_tokens", async () => {
+test("encodeAnthropicResponse(stream:true) includes anthropic-version, initialInputTokens, and cache_read_input_tokens", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({
       choices: [{ delta: { content: "Cached response" }, finish_reason: "stop" }],
@@ -97,8 +96,9 @@ test("streamOpenAIToAnthropic includes anthropic-version, initialInputTokens, an
     "data: [DONE]"
   ]);
 
-  const resp = streamOpenAIToAnthropic(upstream, "m", null, {}, {
-    initialInputTokens: 12
+  const resp = encodeAnthropicResponse({
+    upstream, model: "m",
+    initialInputTokens: 12, stream: true
   });
 
   assert.equal(resp.headers.get("anthropic-version"), "2023-06-01");
@@ -116,7 +116,7 @@ test("streamOpenAIToAnthropic includes anthropic-version, initialInputTokens, an
   assert.equal(deltaEvent.data.usage.cache_read_input_tokens, 10);
 });
 
-test("formatOpenAIToAnthropicJson includes anthropic-version, tokens and cache_read_input_tokens", async () => {
+test("encodeAnthropicResponse(stream:false) includes anthropic-version, tokens and cache_read_input_tokens", async () => {
   const upstream = openAISseResponse([
     "data: " + JSON.stringify({
       choices: [{ delta: { content: "Result" }, finish_reason: "stop" }],
@@ -125,7 +125,7 @@ test("formatOpenAIToAnthropicJson includes anthropic-version, tokens and cache_r
     "data: [DONE]"
   ]);
 
-  const resp = await formatOpenAIToAnthropicJson(upstream, "m");
+  const resp = await encodeAnthropicResponse({ upstream, model: "m", stream: false });
   assert.equal(resp.headers.get("anthropic-version"), "2023-06-01");
 
   const json = await resp.json();
