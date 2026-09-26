@@ -9,6 +9,7 @@ import { runFailover } from "../core/failover.js";
 import { redactUpstreamText, errorBody } from "../http/redact.js";
 import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest, normalizeStopSequences } from "./transform.js";
 import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.js";
+import { estimateTokens } from "../core/tokenizer.js";
 
 /**
  * Deep Exchange Module:
@@ -173,10 +174,12 @@ export async function dispatchExchange({
           // 停止序列：归一化口径与 transform 注入 payload.stop 完全一致（同一个函数），
           // 保证「发给上游的序列」与「判定 stop_reason 用的序列」不会分歧。
           const stopSequences = normalizeStopSequences(body.stop_sequences);
+          const initialInputTokens = estimateTokens(body || {});
+          const streamOptions = { stopSequences, initialInputTokens };
           if (body.stream !== false) {
-            return { kind: "done", response: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders, { stopSequences }) };
+            return { kind: "done", response: streamOpenAIToAnthropic(upstreamRes, model, request?.signal, debugHeaders, streamOptions) };
           } else {
-            return { kind: "done", response: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders, { stopSequences }) };
+            return { kind: "done", response: await formatOpenAIToAnthropicJson(upstreamRes, model, debugHeaders, streamOptions) };
           }
         }
 

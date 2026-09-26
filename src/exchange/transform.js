@@ -198,6 +198,29 @@ function blockText(content) {
 // 回合数归一化统一走 config.js parseMaxContextTurns（KV 存量可能绕过 getDefaultConfig，
 // 消费侧必须用同一口径兜底；此前本地 normalizeTurns 用 Number，与 parseInt 语义分叉）。
 
+/**
+ * 映射 Anthropic tool_choice 到 OpenAI tool_choice：
+ * - undefined / null / { type: "auto" } -> "auto"
+ * - { type: "any" } -> "required"
+ * - { type: "tool", name: "xxx" } -> { type: "function", function: { name: "xxx" } }
+ * - { type: "none" } -> "none"
+ * - 字符串方言（如 "auto", "none", "required"）原样保留
+ */
+export function mapAnthropicToolChoice(tc) {
+  if (!tc) return "auto";
+  if (typeof tc === "string") return tc;
+  if (typeof tc === "object") {
+    const type = String(tc.type || "").toLowerCase();
+    if (type === "auto") return "auto";
+    if (type === "any") return "required";
+    if (type === "none") return "none";
+    if (type === "tool" && tc.name) {
+      return { type: "function", function: { name: String(tc.name) } };
+    }
+  }
+  return "auto";
+}
+
 // 内部协议工具：Tools 转换
 export function transformToolsToOpenAI(tools) {  if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => ({
@@ -476,6 +499,11 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         // 轻则产出 content:"" 的空气泡消息，重则与同消息正文拼接，把思维链当正文喂给上游。
         // 注意必须在 image 之后、textBlocks 之前拦截，不得并入 text。
         else if (b.type === "thinking" || b.type === "redacted_thinking") continue;
+        else if (b.type === "document") {
+          const err = new Error("document blocks (PDF) are not currently supported by upstream");
+          err.status = 400;
+          throw err;
+        }
         else textBlocks.push(b);
       }
 
@@ -547,7 +575,11 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
 
   if (upstreamTools && upstreamTools.length > 0) {
     payload.tools = upstreamTools;
-    payload.tool_choice = "auto";
+    payload.tool_choice = mapAnthropicToolChoice(body.tool_choice);
+  }
+
+  if (typeof body.metadata?.user_id === "string" && body.metadata.user_id.trim().length > 0) {
+    payload.user = body.metadata.user_id.trim();
   }
 
   if (body.temperature !== undefined) payload.temperature = body.temperature;

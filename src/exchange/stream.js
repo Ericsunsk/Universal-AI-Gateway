@@ -551,6 +551,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
+    "anthropic-version": "2023-06-01",
     ...corsHeaders,
     ...extraHeaders
   };
@@ -614,7 +615,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         model: requestedModel || "claude-3-5-sonnet-20241022",
         stop_reason: null,
         stop_sequence: null,
-        usage: { input_tokens: 0, output_tokens: 0 }
+        usage: { input_tokens: options?.initialInputTokens || 0, output_tokens: 0 }
       }
     })}\n\n`));
     } catch {
@@ -714,10 +715,16 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         text: blockState.textTail,
         stopSequences
       });
+      const finalInputTokens = reportedInputTokens || options?.initialInputTokens || 0;
+      const usagePayload = {
+        input_tokens: finalInputTokens,
+        output_tokens: finalOutputTokens,
+        ...(maxCachedTokens > 0 ? { cache_read_input_tokens: maxCachedTokens } : {})
+      };
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
         delta: { stop_reason: stopDetails.stopReason, stop_sequence: stopDetails.stopSequence },
-        usage: { input_tokens: reportedInputTokens, output_tokens: finalOutputTokens }
+        usage: usagePayload
       })}\n\n`));
 
       await writer.write(EVENT_MSG_STOP_BYTES);
@@ -733,10 +740,16 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
         await writeAll(blockState.close());
         // 错误路径同样发射真实计数（含警告文本），与正常闭环保持一致，避免硬编码漂移。
         const errOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
+        const errInputTokens = reportedInputTokens || options?.initialInputTokens || 0;
+        const errUsage = {
+          input_tokens: errInputTokens,
+          output_tokens: errOutputTokens,
+          ...(maxCachedTokens > 0 ? { cache_read_input_tokens: maxCachedTokens } : {})
+        };
         await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
           type: "message_delta",
           delta: { stop_reason: "end_turn", stop_sequence: null },
-          usage: { input_tokens: reportedInputTokens, output_tokens: errOutputTokens }
+          usage: errUsage
         })}\n\n`));
         await writer.write(EVENT_MSG_STOP_BYTES);
       } catch {}
@@ -883,6 +896,13 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     stopSequences
   });
 
+  const finalInputTokens = inputTokens || options?.initialInputTokens || 0;
+  const jsonUsage = {
+    input_tokens: finalInputTokens,
+    output_tokens: outputTokens,
+    ...(maxCachedTokens > 0 ? { cache_read_input_tokens: maxCachedTokens } : {})
+  };
+
   return new Response(JSON.stringify({
     id: msgId,
     type: "message",
@@ -891,9 +911,14 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
     model: requestedModel || "claude-3-5-haiku-20241022",
     stop_reason: stopDetails.stopReason,
     stop_sequence: stopDetails.stopSequence,
-    usage: { input_tokens: inputTokens, output_tokens: outputTokens }
+    usage: jsonUsage
   }), {
     status: 200,
-    headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders, ...extraHeaders }
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "anthropic-version": "2023-06-01",
+      ...corsHeaders,
+      ...extraHeaders
+    }
   });
 }
