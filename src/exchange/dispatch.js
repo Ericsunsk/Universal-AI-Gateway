@@ -17,7 +17,7 @@ import { streamOpenAIToAnthropic, formatOpenAIToAnthropicJson } from "./stream.j
 // 客户端错误直返（400 参数校验 / 404 模型未知）：不进故障转移，两处 short-circuit 共用。
 // 返回裸 Response；调用方包成 { kind:"done", response } outcome 交给 driver。
 function clientError(status, message) {
-  return new Response(JSON.stringify({ error: { message } }), {
+  return new Response(errorBody(message), {
     status,
     headers: { "Content-Type": "application/json", ...corsHeaders }
   });
@@ -79,15 +79,8 @@ export async function dispatchExchange({
 
   if (!candidates || candidates.length === 0) {
     const availableModels = Object.keys(routes || {}).filter((k) => k !== "*");
-    return new Response(JSON.stringify({
-      error: {
-        message: `No route or provider configured for model "${model}". ` +
-          `Available models: ${availableModels.length > 0 ? availableModels.join(", ") : "(none)"}.`
-      }
-    }), {
-      status: 404,
-      headers: { "Content-Type": "application/json", ...corsHeaders }
-    });
+    return clientError(404, `No route or provider configured for model "${model}". ` +
+      `Available models: ${availableModels.length > 0 ? availableModels.join(", ") : "(none)"}.`);
   }
 
   // 候选级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、retry 预算、

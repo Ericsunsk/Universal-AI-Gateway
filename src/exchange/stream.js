@@ -92,7 +92,8 @@ export function resolveStopDetails(finishReason, { hasStopSequences = false, tex
       };
     }
     case "stop": {
-      if (hasStopSequences && Array.isArray(stopSequences) && stopSequences.length > 0) {
+      const stopsActive = hasStopSequences !== undefined ? hasStopSequences : (Array.isArray(stopSequences) && stopSequences.length > 0);
+      if (stopsActive && Array.isArray(stopSequences) && stopSequences.length > 0) {
         const hit = stopSequences.find(s => typeof s === "string" && s.length > 0 && text.includes(s));
         if (hit) {
           return { stopReason: "stop_sequence", stopSequence: hit };
@@ -665,13 +666,10 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       // input_tokens 采信上游 usage.prompt_tokens：缺失时为 0（不估算输入长度）。
       const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
       // 终局 stop_reason 与 stop_sequence：统一委托 resolveStopDetails 判定
-      const stopDetails = blockState.stopReason === "tool_use"
-        ? { stopReason: "tool_use", stopSequence: null }
-        : resolveStopDetails(blockState.stopReason, {
-            hasStopSequences: stopSequences.length > 0,
-            text: blockState.textTail,
-            stopSequences
-          });
+      const stopDetails = resolveStopDetails(blockState.stopReason, {
+        text: blockState.textTail,
+        stopSequences
+      });
       await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
         delta: { stop_reason: stopDetails.stopReason, stop_sequence: stopDetails.stopSequence },
@@ -817,7 +815,11 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
 
   const content = [];
   if (accumulatedThinking) {
-    content.push({ type: "thinking", thinking: accumulatedThinking });
+    content.push({
+      type: "thinking",
+      thinking: accumulatedThinking,
+      signature: "sig_synthetic_done"
+    });
   }
 
   // 工具调用：映射 OpenAI tool_calls 到 Anthropic tool_use content blocks
@@ -833,7 +835,6 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
 
   // 停序列命中判定：统一委托 resolveStopDetails 判定
   const stopDetails = resolveStopDetails(accumulatedFinishReason, {
-    hasStopSequences: stopSequences.length > 0,
     text: accumulated,
     stopSequences
   });

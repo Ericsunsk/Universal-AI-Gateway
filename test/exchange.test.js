@@ -1278,3 +1278,19 @@ test("resolveStopDetails returns consistent stopReason and stopSequence across a
   assert.deepEqual(resolveStopDetails("content_filter"), { stopReason: "end_turn", stopSequence: null });
   assert.deepEqual(resolveStopDetails(null), { stopReason: "end_turn", stopSequence: null });
 });
+
+test("formatOpenAIToAnthropicJson includes signature on thinking blocks", async () => {
+  const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
+  const sseBody = [
+    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking step\"}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: [DONE]\n\n"
+  ].join("");
+  const resp = await formatOpenAIToAnthropicJson(new Response(sseBody), "m");
+  assert.equal(resp.status, 200);
+  const json = await resp.json();
+  const thinkingBlock = json.content.find(b => b.type === "thinking");
+  assert.ok(thinkingBlock, "thinking block must be present");
+  assert.equal(thinkingBlock.thinking, "thinking step");
+  assert.equal(thinkingBlock.signature, "sig_synthetic_done", "thinking block must carry signature for Anthropic protocol compliance");
+});

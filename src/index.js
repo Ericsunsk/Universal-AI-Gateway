@@ -145,94 +145,33 @@ async function handleRequest(request, env) {
     }
 
     // 5.5 Anthropic count_tokens 接口 (/v1/messages/count_tokens)
-    // 必须在 /v1/messages 的等值判断之前无冲突（等值比较不会误匹配子路径），
-    // 但独立成段以便复用同一鉴权与限流口径。
-    // Anthropic SDK / Claude Code 用它做上下文预算管理；缺此路由会 404 中断客户端。
     if (path === "/messages/count_tokens" || path === "/v1/messages/count_tokens") {
-      if (request.method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
-      }
-      const preAuth = authenticateAccess(request, config);
-      if (!preAuth.ok) return preAuth.response;
+      const parsed = await authenticateAndParseRequest(request, env, config);
+      if (!parsed.ok) return parsed.response;
 
-      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
-      const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
-      const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
-      if (!rateLimitResult.allowed) {
-        return rateLimitResponse(rateLimitResult, corsHeaders);
-      }
-
-      if (bodyTooLarge(request)) {
-        return new Response(errorBody("Request body too large"), {
-          status: 413,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      }
-      try {
-        const body = await request.json();
-        const requestModel = body?.model || "deepseek-v4.1-flash";
-        const auth = authenticateAccess(request, config, { model: requestModel });
-        if (!auth.ok) return auth.response;
-
-        // 复用响应侧的字符数/4 口径，保证与实际计费口径一致。
-        // 估的是入站请求的序列化长度：包含 system / messages / tools 全部字段，
-        // 与上游 OpenAI 侧 tokenizer 的偏差在同一量级内 —— 客户端要的是量级不是精确值。
-        const inputTokens = Math.max(1, Math.ceil(JSON.stringify(body || {}).length / 4));
-        return new Response(JSON.stringify({ input_tokens: inputTokens }), {
-          status: 200,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      } catch {
-        // 非法 JSON：返回标准错误信封，绝不 500
-        return new Response(errorBody("Invalid JSON body"), {
-          status: 400,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      }
+      const inputTokens = Math.max(1, Math.ceil(JSON.stringify(parsed.body || {}).length / 4));
+      return new Response(JSON.stringify({ input_tokens: inputTokens }), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ...corsHeaders }
+      });
     }
 
     // 6. Anthropic Messages 接口 (/v1/messages)
     if (path === "/messages" || path === "/v1/messages") {
-      if (request.method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
-      }
-      // 先鉴权后解析：key 无效直接 401，不解析 body（防未授权 DoS）；
-      // 模型白名单需 body.model，解析后再做第二道门。
-      const preAuth = authenticateAccess(request, config);
-      if (!preAuth.ok) return preAuth.response;
+      const parsed = await authenticateAndParseRequest(request, env, config);
+      if (!parsed.ok) return parsed.response;
 
-      // 限流检查（已认证用户）：标准限流（60 req/min）
-      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
-      const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
-      const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
-      if (!rateLimitResult.allowed) {
-        return rateLimitResponse(rateLimitResult, corsHeaders);
-      }
-
-      if (bodyTooLarge(request)) {
-        return new Response(errorBody("Request body too large"), {
-          status: 413,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      }
       try {
-        const body = await request.json();
-        const requestModel = body.model || "deepseek-v4.1-flash";
-
-        const auth = authenticateAccess(request, config, { model: requestModel });
-        if (!auth.ok) return auth.response;
-
-        // 观测（#12）：只计数，不改变行为。用于决定是否值得做 cache_control 断点透传。
-        recordCacheControl(body);
+        recordCacheControl(parsed.body);
 
         return await dispatchExchange({
           protocol: "anthropic",
-          model: requestModel,
-          body: body,
+          model: parsed.model,
+          body: parsed.body,
           fleet: fleet,
           config: config,
           request: request,
-          principal: auth.principal
+          principal: parsed.auth.principal
         });
       } catch (err) {
         log.error("Anthropic dispatch failed", { error: err?.message || String(err) });
@@ -245,54 +184,83 @@ async function handleRequest(request, env) {
 
     // 7. OpenAI 对话接口 (/v1/chat/completions)
     if (path === "/chat/completions" || path === "/v1/chat/completions") {
-      if (request.method !== "POST") {
-        return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
-      }
-      const preAuth = authenticateAccess(request, config);
-      if (!preAuth.ok) return preAuth.response;
+      const parsed = await authenticateAndParseRequest(request, env, config);
+      if (!parsed.ok) return parsed.response;
 
-      // 限流检查（已认证用户）：标准限流（60 req/min）
-      const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
-      const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
-      const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
-      if (!rateLimitResult.allowed) {
-        return rateLimitResponse(rateLimitResult, corsHeaders);
-      }
-
-      if (bodyTooLarge(request)) {
-        return new Response(JSON.stringify({ error: { message: "Request body too large" } }), {
-          status: 413,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
-      }
       try {
-        const body = await request.json();
-        const requestModel = body.model || "deepseek-v4.1-flash";
-
-        const auth = authenticateAccess(request, config, { model: requestModel });
-        if (!auth.ok) return auth.response;
-
         return await dispatchExchange({
           protocol: "openai",
-          model: requestModel,
-          body: body,
+          model: parsed.model,
+          body: parsed.body,
           fleet: fleet,
           config: config,
           request: request,
-          principal: auth.principal
+          principal: parsed.auth.principal
         });
       } catch (err) {
         log.error("OpenAI dispatch failed", { error: err?.message || String(err) });
-        return new Response(JSON.stringify({ error: { message: "Internal Server Error" } }), {
+        return new Response(errorBody("Internal Server Error"), {
           status: 500,
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });
       }
     }
 
-    return new Response(JSON.stringify({ error: { message: "Endpoint Not Found" } }), {
+    return new Response(errorBody("Endpoint Not Found"), {
       status: 404,
       headers: { "Content-Type": "application/json", ...corsHeaders }
     });
   }
+}
+
+/**
+ * 校验并解析 POST API 请求（/messages, /messages/count_tokens, /chat/completions 共用）。
+ * 统一收敛：方法校验（405）、预鉴权、限流、尺寸限制（413）、JSON 解析（400）与模型权限（403）。
+ * 所有失败出口统一采用 errorBody 信封。
+ */
+async function authenticateAndParseRequest(request, env, config, { defaultModel = "deepseek-v4.1-flash" } = {}) {
+  if (request.method !== "POST") {
+    return {
+      ok: false,
+      response: new Response(errorBody("Method Not Allowed"), { status: 405, headers: corsHeaders })
+    };
+  }
+  const preAuth = authenticateAccess(request, config);
+  if (!preAuth.ok) return { ok: false, response: preAuth.response };
+
+  const kv = env.GATEWAY_KV || env.WORKBUDDY_KV;
+  const rateLimitKey = extractRateLimitKey(request, preAuth.principal);
+  const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
+  if (!rateLimitResult.allowed) {
+    return { ok: false, response: rateLimitResponse(rateLimitResult, corsHeaders) };
+  }
+
+  if (bodyTooLarge(request)) {
+    return {
+      ok: false,
+      response: new Response(errorBody("Request body too large"), {
+        status: 413,
+        headers: { "Content-Type": "application/json", ...corsHeaders }
+      })
+    };
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return {
+      ok: false,
+      response: new Response(errorBody("Invalid JSON body"), {
+        status: 400,
+        headers: { "Content-Type": "application/json", ...corsHeaders }
+      })
+    };
+  }
+
+  const model = body?.model || defaultModel;
+  const auth = authenticateAccess(request, config, { model });
+  if (!auth.ok) return { ok: false, response: auth.response };
+
+  return { ok: true, body, model, auth };
 }
