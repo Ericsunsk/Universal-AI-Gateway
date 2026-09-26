@@ -1279,6 +1279,73 @@ test("resolveStopDetails returns consistent stopReason and stopSequence across a
   assert.deepEqual(resolveStopDetails(null), { stopReason: "end_turn", stopSequence: null });
 });
 
+// ---- 停止序列这一概念的归属：归一化 + 「是否生效」只有一个答案 ----
+// 取代此前的三态歧义（解构默认 false、却用 !== undefined 判定），
+// 使 unset / false / [] / ["a"] 各有唯一且明确的语义。
+test("resolveStopDetail normalises the tri-state to one unambiguous boolean", async () => {
+  const { resolveStopDetail } = await import("../src/exchange/stream.js");
+
+  // 「未下发 / 下发空 / 下发非法」三种输入收敛为同一答案：不生效、无序列。
+  for (const raw of [undefined, null, false, [], "", 0, {}, [[]], [42], [""]]) {
+    const d = resolveStopDetail(raw);
+    assert.deepEqual(d.sequences, [], `sequences for ${JSON.stringify(raw)}`);
+    assert.equal(d.active, false, `active for ${JSON.stringify(raw)}`);
+    assert.equal(d.match("anything"), null);
+  }
+
+  // 合法输入：去空、去非字符串、去重，且顺序保持（首条命中优先）。
+  const d = resolveStopDetail(["</done>", "", 7, "</done>", "STOP", null]);
+  assert.deepEqual(d.sequences, ["</done>", "STOP"]);
+  assert.equal(d.active, true);
+  assert.equal(d.match("abc</done>"), "</done>");
+  assert.equal(d.match("xyz STOP here"), "STOP");
+  assert.equal(d.match("no hit"), null);
+  // 多条同时出现时按下发顺序取首条
+  assert.equal(d.match("STOP then </done>"), "</done>");
+});
+
+test("resolveStopDetail.active is a plain boolean, never undefined", async () => {
+  const { resolveStopDetail } = await import("../src/exchange/stream.js");
+  for (const raw of [undefined, null, false, [], ["a"]]) {
+    const d = resolveStopDetail(raw);
+    assert.equal(typeof d.active, "boolean");
+    assert.notEqual(d.active, undefined);
+  }
+});
+
+test("resolveStopDetails agrees with resolveStopDetail across the tri-state x finish_reason matrix", async () => {
+  const { resolveStopDetails, resolveStopDetail } = await import("../src/exchange/stream.js");
+
+  // 关键回归：此前 unset 与 false 走不同分支；现在二者必须完全一致。
+  const inputs = [undefined, null, false, [], ["</done>"], ["</done>", "STOP"]];
+
+  for (const raw of inputs) {
+    const detail = resolveStopDetail(raw);
+
+    // 显式传 detail 与传原始 stopSequences 必须产出同一结果（两条入口一致）。
+    for (const finish of ["stop", "stop_sequence", "length", "tool_calls", "content_filter", null]) {
+      const text = "hello </done> world";
+      const viaDetail = resolveStopDetails(finish, { text, detail });
+      const viaRaw = resolveStopDetails(finish, { text, stopSequences: raw });
+      assert.deepEqual(viaDetail, viaRaw, `detail vs raw for ${JSON.stringify(raw)} / ${finish}`);
+    }
+
+    // "stop" 只在真的命中序列时才报 stop_sequence，否则一律 end_turn。
+    const stopped = resolveStopDetails("stop", { text: "hello </done> world", detail });
+    if (detail.active && detail.match("hello </done> world")) {
+      assert.equal(stopped.stopReason, "stop_sequence");
+      assert.equal(stopped.stopSequence, "</done>");
+    } else {
+      assert.deepEqual(stopped, { stopReason: "end_turn", stopSequence: null });
+    }
+
+    // "stop_sequence" 无论是否命中都报 stop_sequence；未命中时回退首条或 null。
+    const explicit = resolveStopDetails("stop_sequence", { text: "no hit here", detail });
+    assert.equal(explicit.stopReason, "stop_sequence");
+    assert.equal(explicit.stopSequence, detail.active ? detail.sequences[0] : null);
+  }
+});
+
 test("formatOpenAIToAnthropicJson includes signature on thinking blocks", async () => {
   const { formatOpenAIToAnthropicJson } = await import("../src/exchange/exchange.js");
   const sseBody = [

@@ -59,6 +59,39 @@ export function extractCachedTokens(parsed) {
 }
 
 /**
+ * 停止序列这一概念的**唯一归属**。
+ *
+ * 调用方只持有本值的两个字段，不再自行推导「序列是否生效」：
+ * 归一化（去空、去非字符串、去重）与「正文命中哪一条」的查找都在此实现，
+ *   - `sequences` —— 归一化后的有效序列（无效项已被剔除）
+ *   - `active`    —— 是否真的下发了至少一条有效序列。这是**普通布尔**，
+ *                    不会出现 `undefined`；调用方无需再判类型或长度
+ *
+ * 取代此前散落各处的 `Array.isArray(x) && x.length > 0` 重复判定，
+ * 以及 resolveStopDetails 内「解构默认 false、却又用 !== undefined 判定」的三态歧义。
+ *
+ * @param {unknown} raw - 请求侧下发的原始 stop_sequences（任意形状，函数自行容错）
+ */
+export function resolveStopDetail(raw) {
+  const sequences = Array.isArray(raw)
+    ? [...new Set(raw.filter(s => typeof s === "string" && s.length > 0))]
+    : [];
+  return {
+    sequences,
+    active: sequences.length > 0,
+    /**
+     * 正文是否命中某条下发序列（按下发顺序取首条命中）。
+     * @param {string} text
+     * @returns {string|null}
+     */
+    match(text) {
+      if (!sequences.length || typeof text !== "string" || !text) return null;
+      return sequences.find(s => text.includes(s)) ?? null;
+    }
+  };
+}
+
+/**
  * 统一解析终局 stop_reason 与 stop_sequence。
  * 流式与非流式转译共享此唯一口径，避免逻辑分歧与重复代码。
  *
@@ -74,12 +107,17 @@ export function extractCachedTokens(parsed) {
  *
  * @param {string|null} finishReason - 上游 finish_reason 或 blockState.stopReason
  * @param {object} options
- * @param {boolean} [options.hasStopSequences=false]
- * @param {string} [options.text=""]
- * @param {string[]} [options.stopSequences=[]]
+ * @param {string} [options.text=""] - 用于尾部命中的正文
+ * @param {Array<object>|null} [options.candidates=[]] - 本次故障转移尝试过的候选快照，
+ *   每条带 provider/model/step（step = 该候选链内的第几次重试）。仅用于错误归因。
+ * @param {object} [options.detail] - 已解析的 stop-detail（resolveStopDetail 的返回值）。
+ *   **省略时**由本函数从 `options.stopSequences` 就地解析，使既有调用点零改动。
+ * @param {unknown} [options.stopSequences] - 原始序列；仅当 detail 省略时使用。
  * @returns {{stopReason: string, stopSequence: string|null}}
  */
-export function resolveStopDetails(finishReason, { hasStopSequences = false, text = "", stopSequences = [] } = {}) {
+export function resolveStopDetails(finishReason, { text = "", detail, stopSequences } = {}) {
+  // 兼容口径：detail 优先；未给则从原始 stopSequences 就地解析（不再接受 hasStopSequences）。
+  const d = detail ?? resolveStopDetail(stopSequences);
   switch (finishReason) {
     case "length":
       return { stopReason: "max_tokens", stopSequence: null };
@@ -87,22 +125,16 @@ export function resolveStopDetails(finishReason, { hasStopSequences = false, tex
     case "function_call":
     case "tool_use":
       return { stopReason: "tool_use", stopSequence: null };
-    case "stop_sequence": {
-      const hit = Array.isArray(stopSequences)
-        ? stopSequences.find(s => typeof s === "string" && s.length > 0 && text.includes(s))
-        : null;
+    case "stop_sequence":
       return {
         stopReason: "stop_sequence",
-        stopSequence: hit || (Array.isArray(stopSequences) && stopSequences.length > 0 ? stopSequences[0] : null)
+        stopSequence: d.match(text) || (d.active ? d.sequences[0] : null)
       };
-    }
     case "stop": {
-      const stopsActive = hasStopSequences !== undefined ? hasStopSequences : (Array.isArray(stopSequences) && stopSequences.length > 0);
-      if (stopsActive && Array.isArray(stopSequences) && stopSequences.length > 0) {
-        const hit = stopSequences.find(s => typeof s === "string" && s.length > 0 && text.includes(s));
-        if (hit) {
-          return { stopReason: "stop_sequence", stopSequence: hit };
-        }
+      // 「是否生效」由 detail 唯一回答，不再有 unset/false/[] 三态。
+      if (d.active) {
+        const hit = d.match(text);
+        if (hit) return { stopReason: "stop_sequence", stopSequence: hit };
       }
       return { stopReason: "end_turn", stopSequence: null };
     }
@@ -547,7 +579,8 @@ export async function* iterSseParsedChunks(reader, options = {}) {
 export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal = null, extraHeaders = {}, options = {}) {
   const stallMs = Number.isFinite(options?.stallMs) && options.stallMs > 0 ? options.stallMs : UPSTREAM_STALL_MS;
   // 本次请求下发的停止序列：用于流式终局判定 stop_reason 是 stop_sequence 还是 end_turn。
-  const stopSequences = Array.isArray(options?.stopSequences) ? options.stopSequences : [];
+  // 归一化与「是否生效」由 resolveStopDetail 唯一回答（概念归属，见该函数）。
+  const stopDetail = resolveStopDetail(options?.stopSequences);
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -631,7 +664,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
     let buffer;
 
     // block 状态机：取代此前散落的 currentBlockIndex/Type/ToolId/ToolName 四个可变变量。
-    const blockState = new StreamBlockState(stopSequences);
+    const blockState = new StreamBlockState(stopDetail.sequences);
     const dsmlParser = new DsmlStreamParser();
     // 批量写出状态机产出的 SSE 帧（状态机本身不发 IO，便于纯单测）。
     const writeAll = async (frames) => {
@@ -761,7 +794,7 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
       // 终局 stop_reason 与 stop_sequence：统一委托 resolveStopDetails 判定
       const stopDetails = resolveStopDetails(blockState.stopReason, {
         text: blockState.textTail,
-        stopSequences
+        detail: stopDetail
       });
       const finalInputTokens = reportedInputTokens || options?.initialInputTokens || 0;
       const usagePayload = {
@@ -820,7 +853,8 @@ export function streamOpenAIToAnthropic(upstreamResponse, requestedModel, client
 // 内部非流式转译：OpenAI -> Anthropic JSON (优化：增量流式读取，零全量内存拷贝)
 // 导出给 ./dispatch.js 的非流式路径使用（对外仍经 exchange.js 门面）。
 export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, extraHeaders = {}, options = {}) {
-  const stopSequences = Array.isArray(options?.stopSequences) ? options.stopSequences : [];
+  // 与非流式同口径：停止序列概念交由 resolveStopDetail 归属（见该函数）。
+  const stopDetail = resolveStopDetail(options?.stopSequences);
   const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
@@ -958,7 +992,7 @@ export async function formatOpenAIToAnthropicJson(upstreamResponse, requestedMod
   // 停序列命中判定：统一委托 resolveStopDetails 判定
   const stopDetails = resolveStopDetails(accumulatedFinishReason, {
     text: accumulated,
-    stopSequences
+    detail: stopDetail
   });
 
   const finalInputTokens = inputTokens || options?.initialInputTokens || 0;
