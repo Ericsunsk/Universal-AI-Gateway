@@ -103,16 +103,31 @@ test("applyReasoningToPayload adapts to OpenAI provider correctly", () => {
   assert.deepEqual(adapted.reasoning, { effort: "high", enabled: true });
 });
 
-test("applyReasoningToPayload safely sanitizes WorkBuddy provider to prevent 400 errors", () => {
-  const intent = { cleanModel: "deepseek-v4.1-flash", enabled: true, level: "high" };
-  const payload = {
+test("applyReasoningToPayload adapts reasoning_effort and sanitizes objects for WorkBuddy", () => {
+  const enabledIntent = { cleanModel: "deepseek-v4.1-flash", enabled: true, level: "high" };
+  const payload1 = {
     model: "deepseek-v4.1-flash",
-    reasoning_effort: "high",
-    thinking: { type: "enabled" }
+    thinking: { type: "enabled" },
+    reasoning: { effort: "high" }
   };
 
-  const adapted = applyReasoningToPayload(payload, intent, "workbuddy", "deepseek-v4.1-flash");
-  assert.equal(adapted.reasoning_effort, undefined, "Must remove reasoning_effort for WorkBuddy");
-  assert.equal(adapted.reasoning, undefined, "Must remove reasoning for WorkBuddy");
-  assert.equal(adapted.thinking, undefined, "Must remove thinking for WorkBuddy");
+  const adaptedEnabled = applyReasoningToPayload(payload1, enabledIntent, "workbuddy", "deepseek-v4.1-flash");
+  assert.equal(adaptedEnabled.reasoning_effort, "high", "Must map level to reasoning_effort for WorkBuddy");
+  assert.equal(adaptedEnabled.reasoning, undefined, "Must remove reasoning object for WorkBuddy");
+  assert.equal(adaptedEnabled.thinking, undefined, "Must remove thinking object for WorkBuddy");
+
+  const lowIntent = { cleanModel: "deepseek-v4.1-flash", enabled: true, level: "low" };
+  const adaptedLow = applyReasoningToPayload({ model: "deepseek-v4.1-flash" }, lowIntent, "workbuddy", "deepseek-v4.1-flash");
+  assert.equal(adaptedLow.reasoning_effort, "low");
+
+  const disabledIntent = { cleanModel: "deepseek-v4.1-flash", enabled: false };
+  const payload2 = {
+    model: "deepseek-v4.1-flash",
+    reasoning_effort: "high",
+    thinking: { type: "disabled" }
+  };
+  const adaptedDisabled = applyReasoningToPayload(payload2, disabledIntent, "workbuddy", "deepseek-v4.1-flash");
+  assert.equal(adaptedDisabled.reasoning_effort, undefined, "Must remove reasoning_effort when disabled");
+  assert.equal(adaptedDisabled.thinking, undefined, "Must remove thinking object for WorkBuddy");
 });
+

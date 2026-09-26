@@ -194,11 +194,18 @@ export function applyReasoningToPayload(payload, intent, providerType, targetMod
   }
 
   // ----------------------------------------------------
-  // 3. WorkBuddy / 腾讯云 (不支持外部动态调节推理强度的渠道)
+  // 3. WorkBuddy / 腾讯云 (支持标准 reasoning_effort: low, medium, high)
   // ----------------------------------------------------
   if (type === "workbuddy") {
-    // 严格清洗掉非标准推理参数，防止上游返回 400 parameter invalid 报错
-    delete payload.reasoning_effort;
+    if (intent.enabled && intent.level) {
+      let wbEffort = "medium";
+      if (intent.level === "minimal" || intent.level === "low") wbEffort = "low";
+      else if (intent.level === "high" || intent.level === "xhigh" || intent.level === "max") wbEffort = "high";
+      payload.reasoning_effort = wbEffort;
+    } else {
+      delete payload.reasoning_effort;
+    }
+    // 严格清洗掉非标准对象结构（thinking/reasoning 对象会导致 400 parameter invalid）
     delete payload.reasoning;
     delete payload.thinking;
     return payload;
