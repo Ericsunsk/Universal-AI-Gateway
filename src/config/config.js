@@ -170,7 +170,7 @@ async function refreshConfig(env) {
         raw = await kv.get("GATEWAY_CONFIG");
       }
       if (raw) {
-        let parsed = JSON.parse(raw);
+        let parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
         const defaults = getDefaultConfig(env);
         const validation = validateGatewayConfig(parsed);
         if (!validation.success) {
