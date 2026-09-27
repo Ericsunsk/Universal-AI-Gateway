@@ -17,8 +17,6 @@ jobs:
           node-version: 20
           cache: npm
 
-      # package.json 无 dependencies，此步只为装 eslint 等 devDependencies
       - run: npm ci
-
       - run: npm run lint
       - run: npm test

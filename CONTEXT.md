@@ -36,7 +36,7 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 ## Protocol translation (`src/exchange/`)
 
-Module layout: `transform.js` (request-side: transform / normalize / prune), `stream.js` (response-side: reduce / shared extractors / streaming + non-streaming translators), `dispatch.js` (route resolution and failover). `exchange.js` is a re-export facade; import from it to stay decoupled from the layout.
+Module layout: `transform.js` (request-side: transform / normalize / prune), `reduce.js` (response-side: pure reduction, block state machine, extractors, line-source), `stream.js` (response-side: I/O orchestration, keepalive, stall breaker), `dispatch.js` (route resolution and failover). `exchange.js` is a re-export facade; import from it to stay decoupled from the layout.
 
 - **exchange / dispatch** — the layer that translates between the client-facing protocol (Anthropic or OpenAI) and the upstream protocol, in both directions. Debug attribution (`X-Gateway-Account/Model/Fallback`) is master-gated: `dispatchExchange` takes the caller `principal` and only emits these headers for `isMaster`; the WorkBuddy `accountResponse` seam honors the same flag via `options.principal`.
 
@@ -46,15 +46,15 @@ Module layout: `transform.js` (request-side: transform / normalize / prune), `st
 
 - **transform** — the request-side mapping: Anthropic `tool_use`/`tool_result` blocks → OpenAI `tool_calls`/`tool` messages, and vice versa for the response.
 
-- **reduce** — 纯分类器（`reduceOpenAIChunkAll` in `src/exchange/stream.js`）：单个已解析 chunk → 按序发射数组
+- **reduce** — 纯分类器（`reduceOpenAIChunkAll` in `src/exchange/reduce.js`）：单个已解析 chunk → 按序发射数组
   （thinking / text / tool_use / finish）。流式与非流式两条消费路径都遍历数组，不再各写字段读取；
   error 独占。最高回归面（tool-use 交错、thinking 切换、stop 映射）至此可当纯数据单测。
 
-- **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/stream.js`).
+- **shared extractors** — small pure helpers shared by the streaming and non-streaming paths to avoid divergent implementations: `extractErrorMessage`, `isUpstreamError`, `extractUsage` (`src/exchange/reduce.js`).
 
 - **reasoning intent** — one parse per request (`parseReasoningIntent` in `src/exchange/reasoning.js`): model-suffix / Anthropic thinking / `reasoning_effort` / generic `reasoning` all normalize to `{ enabled, level, budgetTokens }`. Dispatch parses once and applies the intent exactly once per request (`transformAnthropicToOpenAI` 输出已含 OpenAI 映射，不二次 apply；唯 WorkBuddy 方言需清洗）。
 
-- **line-source** — the shared upstream-SSE parsed-chunk source (`iterSseParsedChunks` in `src/exchange/stream.js`): powered by industry-standard `eventsource-parser` with full W3C SSE compliance (handling CRLF, multi-line data, comments, keepalives, and multi-byte UTF-8 split reads). Yields `{ parsed, rawLine }` with bad-line warning caps; safely exports unparsed payload via `tail` for robust single-JSON fallbacks (even when terminated with newlines).
+- **line-source** — the shared upstream-SSE parsed-chunk source (`iterSseParsedChunks` in `src/exchange/reduce.js`): powered by industry-standard `eventsource-parser` with full W3C SSE compliance (handling CRLF, multi-line data, comments, keepalives, and multi-byte UTF-8 split reads). Yields `{ parsed, rawLine }` with bad-line warning caps; safely exports unparsed payload via `tail` for robust single-JSON fallbacks (even when terminated with newlines).
 
 - **message sequence** — the single owner of OpenAI message ordering (`OpenAIMessageSequence` in `src/exchange/transform.js`): tool fan-out and `11148` re-hanging are its internals, exposed only as `appendToolExchange` + `finalize`.
 

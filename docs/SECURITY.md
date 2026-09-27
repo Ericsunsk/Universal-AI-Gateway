@@ -135,8 +135,6 @@ curl -H "x-cron-secret: $CRON_SECRET" \
 
 ---
 
-## 已知安全防护机制
-
 ### ✅ 已实现
 
 1. **常数时间密钥比较** (`timingSafeEqual`)
@@ -160,19 +158,14 @@ curl -H "x-cron-secret: $CRON_SECRET" \
 7. **Failover 与 Cooldown**
    - 指数退避 + 账号健康度调度
 
-### ⚠️ 当前限制
+8. **分布式 Token Bucket 限流** (`src/ratelimit/ratelimit.js`)
+   - 基于客户端 IP 与 API Key 的分级速率控制，防超频滥用，KV 故障时 Fail-Open
 
-1. **无 Rate Limiting**
-   - 客户端可无限调用（依赖上游限流）
-   - 建议: 补充基于 KV 的 token bucket
+9. **全链路凭据脱敏护栏** (`src/http/redact.js` / `logger.js`)
+   - 结构化日志与客户端错误回吐全量经过 `redactUpstreamText`，杜绝内部端点与凭据泄漏
 
-2. **日志未脱敏**
-   - `console.error` 可能打印完整 payload
-   - 建议: 脱敏敏感字段（token/userId）
-
-3. **无审计日志**
-   - 关键操作（签到/刷新 token）无持久化记录
-   - 建议: 写入 KV 或 S3
+10. **SSRF 防御** (`src/providers/urlGuard.js`)
+    - 阻断十进制/十六进制/八进制 IPv4 变种、私有网段与云 metadata 地址
 
 ---
 
@@ -208,7 +201,7 @@ curl -H "x-cron-secret: $CRON_SECRET" \
 
 ### 第三方依赖
 
-- 零 npm 依赖（纯 Node.js 标准库）
+- 严格锁版本的核心依赖（`@upstash/ratelimit`, `@upstash/redis`, `eventsource-parser`, `gpt-tokenizer`, `valibot`, `ipaddr.js`）
 - Upstash KV: REST API（HTTPS + Bearer Token）
 - WorkBuddy: OAuth2 RefreshToken 流程
 
