@@ -162,6 +162,68 @@ test("sanitize normalizes snake/kebab keys and exact key", () => {
   assert.equal(output.monkey, "banana", "monkey must not be killed by substring key");
 });
 
+test("sanitize redacts userId, masterKey and cronKey (P1-2 security fix)", () => {
+  const input = {
+    userId: "user-12345",
+    USER_ID: "uid-67890",
+    masterKey: "sk-master-secret",
+    MASTER_KEY: "master-key-abc",
+    cronKey: "cron-key-xyz",
+    CRON_SECRET: "cron-secret-123",
+    nested: {
+      userId: "nested-user",
+      masterKey: "nested-master"
+    }
+  };
+  const output = sanitize(input);
+  // userId 系列
+  assert.ok(output.userId.endsWith("****"), "userId must be redacted");
+  assert.ok(!output.userId.includes("12345"), "userId value must not leak");
+  assert.ok(output.USER_ID.endsWith("****"), "USER_ID must be redacted");
+  // masterKey 系列
+  assert.ok(output.masterKey.endsWith("****"), "masterKey must be redacted");
+  assert.ok(!output.masterKey.includes("secret"), "masterKey value must not leak");
+  assert.ok(output.MASTER_KEY.endsWith("****"), "MASTER_KEY must be redacted");
+  // cron 系列
+  assert.ok(output.cronKey.endsWith("****"), "cronKey must be redacted");
+  assert.ok(output.CRON_SECRET.endsWith("****"), "CRON_SECRET must be redacted");
+  // 递归脱敏
+  assert.ok(output.nested.userId.endsWith("****"), "nested userId must be redacted");
+  assert.ok(output.nested.masterKey.endsWith("****"), "nested masterKey must be redacted");
+});
+
+test("sanitize cache returns same object for repeated calls (perf optimization #3)", () => {
+  const input = { username: "alice", data: "public" };
+
+  const output1 = sanitize(input);
+  const output2 = sanitize(input);
+
+  // 无敏感字段对象应该零拷贝（返回原对象）
+  assert.strictEqual(output1, input, "should return original object when no sensitive fields");
+  assert.strictEqual(output2, input, "cached result should be same object");
+});
+
+test("sanitize respects max depth limit", () => {
+  // 构造深度嵌套对象
+  let deep = { value: "leaf" };
+  for (let i = 0; i < 20; i++) {
+    deep = { nested: deep };
+  }
+
+  const output = sanitize(deep);
+
+  // 应该在某个深度截断
+  let current = output;
+  let depth = 0;
+  while (current && typeof current === "object" && current.nested) {
+    current = current.nested;
+    depth++;
+    if (depth > 15) break; // 安全阈值
+  }
+
+  assert.ok(depth <= 15, "should limit recursion depth");
+});
+
 test("runWithLogger propagates trace_id through async depth without threading params", async () => {
   const logs = [];
   setLogSink((line) => logs.push(line));

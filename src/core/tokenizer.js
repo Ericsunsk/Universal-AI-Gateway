@@ -1,6 +1,31 @@
 // Token 估算器 —— 基于 gpt-tokenizer (GPT-4o BPE 字典) 的精确分词
 import { countTokens as bpeCount } from "gpt-tokenizer/model/gpt-4o";
 
+// Token 估算缓存（性能优化 #1）：避免重复计算相同 payload
+const tokenCache = new Map();
+const CACHE_MAX_SIZE = 1000;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
+
+function cacheKey(payload) {
+  // 快速哈希（避免完整 JSON.stringify）
+  if (typeof payload === "string") {
+    return `s:${payload.length}:${payload.slice(0, 100)}`;
+  }
+
+  if (typeof payload !== "object" || !payload) {
+    return `p:${typeof payload}`;
+  }
+
+  // 对象：只哈希关键字段（消息数量 + 首尾内容片段）
+  const msgCount = payload.messages?.length || 0;
+  const firstContent = payload.messages?.[0]?.content || "";
+  const lastContent = payload.messages?.[msgCount - 1]?.content || "";
+  const firstSnippet = String(firstContent).slice(0, 50);
+  const lastSnippet = String(lastContent).slice(0, 50);
+
+  return `o:${msgCount}:${firstSnippet}:${lastSnippet}`;
+}
+
 /**
  * 字符串 Token 计数（基于 gpt-4o BPE 字典）
  * @param {string} text - 待分词文本
@@ -19,6 +44,16 @@ export function countTokens(text) {
  */
 export function estimateTokens(payload, options = {}) {
   if (!payload) return 0;
+
+  // 缓存查询（除非显式要求精确计算）
+  if (!options?.exact) {
+    const key = cacheKey(payload);
+    const cached = tokenCache.get(key);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
+      return cached.value;
+    }
+  }
+
   if (typeof payload === "string") return Math.max(1, countTokens(payload));
   if (typeof payload !== "object") return 0;
 
@@ -86,10 +121,32 @@ export function estimateTokens(payload, options = {}) {
   // 会耗时数百毫秒并严重阻塞 Node 事件循环，导致请求在网关入口处排队超时。
   // 此时走极低 CPU 开销的加权估算（约 3.5 字符/token）；常规请求或显式 exact: true 走完整分词。
   if (!options?.exact && totalChars > 8000) {
-    return Math.max(1, Math.ceil(totalChars / 3.5) + messageOverhead);
+    const result = Math.max(1, Math.ceil(totalChars / 3.5) + messageOverhead);
+
+    // 缓存写入
+    const key = cacheKey(payload);
+    if (tokenCache.size >= CACHE_MAX_SIZE) {
+      const firstKey = tokenCache.keys().next().value;
+      tokenCache.delete(firstKey);
+    }
+    tokenCache.set(key, { value: result, timestamp: Date.now() });
+
+    return result;
   }
 
   const text = parts.join(" ");
   const count = countTokens(text);
-  return Math.max(1, count + messageOverhead);
+  const result = Math.max(1, count + messageOverhead);
+
+  // 缓存写入
+  if (!options?.exact) {
+    const key = cacheKey(payload);
+    if (tokenCache.size >= CACHE_MAX_SIZE) {
+      const firstKey = tokenCache.keys().next().value;
+      tokenCache.delete(firstKey);
+    }
+    tokenCache.set(key, { value: result, timestamp: Date.now() });
+  }
+
+  return result;
 }

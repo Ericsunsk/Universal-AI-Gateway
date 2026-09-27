@@ -15,6 +15,13 @@ function replaceAllInsensitive(text, needle, replacement) {
 // 只有命中才做一次 toLowerCase 精确判定，避免 99% benign 长上下文每次都分配小写副本。
 const FAST_GATE = /claude|codex|main branch|billing-header|cc_/i;
 
+// 预编译正则表达式（性能优化 #4）：避免每次调用都创建新正则
+const REGEX_CLAUDE_CODE = /You are Claude Code, Anthropic's official CLI for Claude\./gi;
+const REGEX_MAIN_BRANCH = /Main branch \(you will usually use this for PRs\)/gi;
+const REGEX_CODEX_CLI = /You are a coding agent running in the Codex CLI, a terminal-based coding assistant\./gi;
+const REGEX_BILLING = /x-anthropic-billing-header:[^;\n]*;?\s*/gi;
+const REGEX_CC_PREFIX = /\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi;
+
 // 剥离/改写 Claude Code 及相关客户端指纹，绕过上游（如腾讯 11128）关键字拦截
 function sanitizeText(text) {
   if (!text || typeof text !== "string") return text;
@@ -22,39 +29,15 @@ function sanitizeText(text) {
   // 极速快路径：99% 的用户代码与对话不包含拦截特征词，直接返回，避免长上下文（100k+ tokens）下的无谓拷贝与正则扫描
   if (!FAST_GATE.test(text)) return text;
 
-  // 检测统一使用小写副本，保证大小写不敏感的同时仍只计算一次（仅门控命中后才分配）
-  const lower = text.toLowerCase();
+  // 使用预编译正则直接替换（避免 toLowerCase 和 includes 检查）
+  let result = text;
+  result = result.replace(REGEX_CLAUDE_CODE, "You are Claude Code, Anthropic's official CLI tool for Claude.");
+  result = result.replace(REGEX_MAIN_BRANCH, "Default branch (you will usually use this for PRs)");
+  result = result.replace(REGEX_CODEX_CLI, "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.");
+  result = result.replace(REGEX_BILLING, "");
+  result = result.replace(REGEX_CC_PREFIX, "");
 
-  // 精准匹配替换：避免无目标项时触发无谓的 string 遍历与正则表达式开销
-  if (lower.includes("you are claude code, anthropic's official cli for claude.")) {
-    text = replaceAllInsensitive(
-      text,
-      "You are Claude Code, Anthropic's official CLI for Claude.",
-      "You are Claude Code, Anthropic's official CLI tool for Claude."
-    );
-  }
-  if (lower.includes("main branch (you will usually use this for prs)")) {
-    text = replaceAllInsensitive(
-      text,
-      "Main branch (you will usually use this for PRs)",
-      "Default branch (you will usually use this for PRs)"
-    );
-  }
-  if (lower.includes("you are a coding agent running in the codex cli")) {
-    text = replaceAllInsensitive(
-      text,
-      "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-      "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
-    );
-  }
-  if (lower.includes("billing-header")) {
-    text = text.replace(/x-anthropic-billing-header:[^;\n]*;?\s*/gi, "");
-  }
-  if (lower.includes("cc_")) {
-    text = text.replace(/\bcc_[a-z0-9_]+=[^;\n]*;?\s*/gi, "");
-  }
-
-  return text;
+  return result;
 }
 
 export function sanitizeMessages(messages) {

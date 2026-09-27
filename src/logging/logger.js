@@ -140,7 +140,12 @@ export const log = {
 };
 
 /**
- * 脱敏工具：隐藏敏感字段
+ * 脱敏工具：隐藏敏感字段（性能优化 #3）
+ *
+ * 优化点：
+ * 1. WeakMap 缓存（避免重复脱敏相同对象）
+ * 2. 深度限制（防止栈溢出）
+ * 3. 快速路径（无敏感字段的对象零拷贝）
  *
  * 键名归一化后匹配（去 `_-`、小写）：`api_key`/`x-api-key`/`apiKey` 统一为 `apikey`，
  * 避免蛇形/串形漏网。`key` 仅精确匹配（`monkey` 不得误杀）；其余长片段用包含匹配。
@@ -153,15 +158,50 @@ export const log = {
  * @param {string[]} sensitiveKeys - 敏感字段名（归一化后匹配）
  * @returns {Object} 脱敏后的对象
  */
-export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "secret", "authorization", "credential"]) {
+const SANITIZE_MAX_DEPTH = 10;
+const sanitizeCache = new WeakMap();
+
+export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "secret", "authorization", "credential", "userid", "masterkey", "cronkey"], depth = 0) {
   if (!obj || typeof obj !== "object") return obj;
+
+  // 深度保护（防止栈溢出）
+  if (depth >= SANITIZE_MAX_DEPTH) {
+    return "[max depth exceeded]";
+  }
+
+  // 缓存查询（仅顶层，避免深度参数干扰）
+  if (depth === 0 && sanitizeCache.has(obj)) {
+    return sanitizeCache.get(obj);
+  }
 
   const norm = (s) => String(s).toLowerCase().replace(/[_-]/g, "");
   const normKeys = sensitiveKeys.map(norm);
 
   const result = Array.isArray(obj) ? [] : {};
 
-  for (const [key, value] of Object.entries(obj)) {
+  // 快速扫描：检查是否有敏感字段或嵌套对象
+  let hasSensitive = false;
+  let hasNested = false;
+  const entries = Object.entries(obj);
+
+  for (const [key, value] of entries) {
+    const nk = norm(key);
+    if (normKeys.some(k => k === "key" ? nk === "key" : nk.includes(k)) || nk === "key") {
+      hasSensitive = true;
+    }
+    if (typeof value === "object" && value !== null) {
+      hasNested = true;
+    }
+    if (hasSensitive && hasNested) break; // 早期退出
+  }
+
+  // 快速路径：无敏感字段且无嵌套 → 零拷贝返回
+  if (!hasSensitive && !hasNested) {
+    if (depth === 0) sanitizeCache.set(obj, obj);
+    return obj;
+  }
+
+  for (const [key, value] of entries) {
     const nk = norm(key);
     const isSensitive = normKeys.some(k => {
       if (k === "key") return nk === "key";
@@ -172,7 +212,7 @@ export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "s
       // 保留前 4 字符 + 星号
       result[key] = value.length > 4 ? `${value.slice(0, 4)}****` : "****";
     } else if (typeof value === "object" && value !== null) {
-      result[key] = sanitize(value, sensitiveKeys);
+      result[key] = sanitize(value, sensitiveKeys, depth + 1);
     } else if (typeof value === "string") {
       result[key] = redactUrlQuery(value, normKeys, norm);
     } else {
@@ -180,6 +220,7 @@ export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "s
     }
   }
 
+  if (depth === 0) sanitizeCache.set(obj, result);
   return result;
 }
 

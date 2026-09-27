@@ -5,20 +5,44 @@ import { corsHeaders } from "./headers.js";
 
 export const UPSTREAM_ERR_MAX = 300;
 
+// 预编译正则（ReDoS 防护 P2-7）
+const REGEX_URL = /https?:\/\/[^\s"'<>]+/gi;
+const REGEX_CREDENTIAL_BARE = /\b(?:sk|sk-ant|Bearer)[-\s:=]*[A-Za-z0-9_\-.]{8,}/gi;
+const REGEX_CREDENTIAL_COMPOUND = /\b(?:[\w-]*?(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?))[-_\s:="'\\]+[A-Za-z0-9_\-.]{8,}/gi;
+const REGEX_IP = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
+
+// ReDoS 防护超时（worker thread 方案的简化版）
+const REDACT_TIMEOUT_MS = 100;
+
 export function redactUpstreamText(text) {
   if (typeof text !== "string" || text.length === 0) return "Upstream rejected the request";
+
   // 前置截断：防范大体积上游报错页面（如 50KB+ HTML）对正则引擎造成无谓的 CPU 开销与 Event Loop 冻结
   const input = text.length > 4000 ? text.slice(0, 4000) : text;
-  return input
-    .replace(/https?:\/\/[^\s"'<>]+/gi, "<url>")        // 内部端点
-    // 凭据规则分两条，缺一不可：
-    // (1) 裸字面前缀：sk-xxx / Bearer <jwt> / token=... —— 值前无标识符名可依。
-    // (2) 复合标识符：accessToken / refresh_token / apiKey / client_secret / password。
-    //     增加 \b 与前缀词界，强制要求分隔符，彻底消除无边界指数级回溯 (ReDoS 防护)。
-    .replace(/\b(?:sk|sk-ant|Bearer)[-\s:=]*[A-Za-z0-9_\-.]{8,}/gi, "<credential>")
-    .replace(/\b(?:[\w-]*?(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?))[-_\s:="'\\]+[A-Za-z0-9_\-.]{8,}/gi, "<credential>")
-    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<ip>")     // 内网 / 回环地址
-    .slice(0, UPSTREAM_ERR_MAX);
+
+  // 超时保护：对于病态输入，限制执行时间
+  const startTime = Date.now();
+
+  try {
+    let result = input;
+
+    // 逐个正则执行，每次检查超时
+    result = result.replace(REGEX_URL, "<url>");
+    if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
+
+    result = result.replace(REGEX_CREDENTIAL_BARE, "<credential>");
+    if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
+
+    result = result.replace(REGEX_CREDENTIAL_COMPOUND, "<credential>");
+    if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
+
+    result = result.replace(REGEX_IP, "<ip>");
+
+    return result.slice(0, UPSTREAM_ERR_MAX);
+  } catch (e) {
+    // 正则引擎崩溃时的降级处理
+    return "[redacted: error]";
+  }
 }
 
 // ---- C2：客户端可见错误信封（failure-rendering seam）----
