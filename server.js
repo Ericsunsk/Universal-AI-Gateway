@@ -6,6 +6,15 @@ const port = Number(process.env.PORT) || 3000;
 const host = "0.0.0.0";
 
 const server = http.createServer((req, res) => {
+  const start = Date.now();
+  res.once("finish", () => {
+    log.info("HTTP Request", {
+      method: req.method,
+      path: req.url,
+      status: res.statusCode,
+      duration_ms: Date.now() - start
+    });
+  });
   handler(req, res);
 });
 
