@@ -3,14 +3,20 @@ import cluster from "node:cluster";
 import { setGlobalDispatcher, Agent } from "undici";
 import handler from "./api/index.js";
 import { log } from "./src/logging/logger.js";
+import { makeSafeLookup } from "./src/providers/urlGuard.js";
 
 // 配置 Node.js 出站全局连接池：保持到上游的 TCP 长连接 60 秒（覆盖常见人机交互间隔），
-// 避免每次请求都重新执行跨国 TCP 三次握手与 TLS 1.3 协商（消除 150~200ms TTFB 延迟）
+// 避免每次请求都重新执行跨国 TCP 三次握手与 TLS 1.3 协商（消除 150~200ms TTFB 延迟）。
+//
+// M1：connect.lookup 复用 urlGuard 的**校验+解析同一次**逻辑，使「校验通过的 IP」==
+// 「实际连接的 IP」，根除 DNS TOCTOU / rebinding。注意不能改用每请求 dispatcher ——
+// 全局 fetch 不认该选项（实测抛 invalid onRequestStart method）。
 setGlobalDispatcher(new Agent({
   keepAliveTimeout: 60_000,      // 空闲连接保持 60 秒
   keepAliveMaxTimeout: 300_000,  // 最长复用 5 分钟
   connections: 64,               // 连接池大小上限
-  pipelining: 1
+  pipelining: 1,
+  connect: { lookup: makeSafeLookup() }
 }));
 
 const port = Number(process.env.PORT) || 3000;

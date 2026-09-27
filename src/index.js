@@ -4,7 +4,7 @@ import { corsHeaders } from "./http/headers.js";
 import { errorBody } from "./http/redact.js";
 import { dispatchExchange } from "./exchange/exchange.js";
 import { recordCacheControl, getCacheControlStats } from "./exchange/cacheControlStats.js";
-import { getProviderFleet } from "./core/fleet.js";
+import { getProviderFleet } from "./providers/fleet.js";
 import { checkRateLimit, RATE_LIMIT_PRESETS, extractRateLimitKey, rateLimitResponse } from "./ratelimit/ratelimit.js";
 import { runWithLogger, extractTraceId, generateTraceId, log } from "./logging/logger.js";
 import { estimateTokens } from "./core/tokenizer.js";

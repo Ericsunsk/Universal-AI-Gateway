@@ -255,7 +255,7 @@ test("urlGuard does not false-positive on legitimate public upstreams", async ()
 
 // Fleet：不 bump 版本、只加 provider 也重建
 test("getProviderFleet rebuilds when providers change without version bump", async () => {
-  const { getProviderFleet } = await import("../src/core/fleet.js");
+  const { getProviderFleet } = await import("../src/providers/fleet.js");
   const env = {};
   const v = Date.now();
   const a = { config_version: v, providers: [] };
@@ -482,4 +482,60 @@ test("normal model content is never over-redacted", async () => {
   const body = await res.text();
   assert.ok(body.includes("https://api.example.com/v1/models"), "normal URL must be preserved");
   assert.ok(body.includes("process.env.OPENAI_API_KEY"), "normal env reference must be preserved");
+});
+
+test("P3: src/config/config.js VERSION must match package.json version", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { VERSION } = await import("../src/config/config.js");
+  const pkg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8"));
+  assert.equal(VERSION, pkg.version,
+    "duplicated version sources must agree (update both or read from package.json)");
+});
+
+test("M1: safeLookup pins to validated IP and rejects private resolutions", async () => {
+  const { makeSafeLookup } = await import("../src/providers/urlGuard.js");
+  const lookup = makeSafeLookup();
+
+  const call = (hostname, options) => new Promise((resolve) => {
+    lookup(hostname, options, (err, address, family) => resolve({ err, address, family }));
+  });
+
+  // 公网域名：返回数组形式（undici 以 {all:true} 调用，签名必须是数组）
+  const pub = await call("example.com", { all: true, family: 0 });
+  assert.equal(pub.err, null, "public host must resolve");
+  assert.ok(Array.isArray(pub.address), "undici {all:true} requires an ARRAY callback");
+  assert.equal(pub.address.length, 1);
+  assert.ok(typeof pub.address[0].address === "string" && pub.address[0].address.length > 0);
+
+  // 私网解析：必须**拒绝**（fail-closed），不得放行
+  const priv = await call("localhost", { all: true, family: 0 });
+  assert.ok(priv.err, "private/loopback resolution must be refused, not allowed");
+  assert.match(priv.err.message, /non-public|Refusing/);
+
+  // 非 all 模式：回调为标量形式
+  const one = await call("example.com", { all: false, family: 4 });
+  assert.equal(one.err, null);
+  assert.equal(typeof one.address, "string", "non-all mode returns a scalar address");
+});
+
+test("M1: global-dispatcher lookup is actually honored by fetch (integration)", async () => {
+  // 这是此前缺失的测试类型：真发一次请求，验证 pinning 生效而非仅断言对象形状。
+  const { Agent, setGlobalDispatcher, getGlobalDispatcher } = await import("undici");
+  const prev = getGlobalDispatcher();
+  let lookupCalled = false;
+  const { makeSafeLookup } = await import("../src/providers/urlGuard.js");
+  const inner = makeSafeLookup();
+  setGlobalDispatcher(new Agent({
+    connect: {
+      lookup: (h, o, cb) => { lookupCalled = true; return inner(h, o, cb); }
+    }
+  }));
+  try {
+    const resp = await fetch("https://example.com/");
+    assert.equal(resp.status, 200, "request through pinned global dispatcher must succeed");
+    assert.equal(lookupCalled, true, "the pinned lookup must be invoked by fetch");
+  } finally {
+    setGlobalDispatcher(prev);
+  }
 });

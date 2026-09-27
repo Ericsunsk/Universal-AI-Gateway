@@ -109,12 +109,13 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       try { upstreamReader?.cancel(reason); } catch {}
       try { writer.abort(reason instanceof Error ? reason : new Error("Client aborted")); } catch {}
     };
+    const onClientAbort = () => abortUpstream(clientSignal.reason);
     if (clientSignal) {
       if (clientSignal.aborted) {
         abortUpstream(clientSignal.reason);
         return new Response(readable, { status: 200, headers: sseHeaders });
       }
-      clientSignal.addEventListener("abort", () => abortUpstream(clientSignal.reason), { once: true });
+      clientSignal.addEventListener("abort", onClientAbort, { once: true });
     }
 
     // reader 必须在首次 await 之前创建并挂到 upstreamReader：
@@ -348,6 +349,10 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       } catch {}
     } finally {
       clearInterval(pingInterval);
+      // P1-3 修复：移除 abort 监听器。正常完成时 once 不触发，闭包会持续被
+      // clientSignal（= request.signal）持有，连带保住 upstreamReader/pingInterval/readable。
+      // 与 failover.js 的既有惯例一致（那里在 finally/setTimeout 中 removeEventListener）。
+      try { clientSignal?.removeEventListener("abort", onClientAbort); } catch {}
       // 无论正常收尾还是异常断流都记一次：命中率 = cachedResponses / responses
       try { recordUpstreamCache(maxCachedTokens); } catch {}
       try { await writer.close(); } catch {}

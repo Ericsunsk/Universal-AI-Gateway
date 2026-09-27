@@ -11,7 +11,11 @@ export const maxDuration = 300;
 
 // 网关只读取白名单内的环境变量/密钥，其余进程环境变量不可达
 // （导出供测试锁定覆盖率：src/ 与 api/ 消费的每个 env 键必须在此出现，见 test/entry.test.js）。
-// 防止意外泄露或读取未声明的机密字段
+// 防止意外泄露或读取未声明的机密字段。
+//
+// ⚠️ 新增 env 变量的两步（漏掉第一步会被 test/entry.test.js 拒绝）：
+//   1. 在此加入键名 —— 否则 test/entry.test.js「allowlist must cover every consumed env key」失败；
+//   2. 在 .env.example 补一行说明 —— 否则部署方无从得知该开关存在。
 export const ENV_ALLOWLIST = new Set([
   "API_KEY", "MASTER_KEY", "CRON_SECRET",
   "USER_ID", "ACCESS_TOKEN", "REFRESH_TOKEN",
@@ -24,6 +28,7 @@ export const ENV_ALLOWLIST = new Set([
   "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN",
   "REDIS_REST_API_URL", "REDIS_REST_API_TOKEN",
   "VERCEL_URL", "VERCEL_PROJECT_DOMAINS",
+  "CORS_ALLOWED_ORIGINS",
   "DEBUG",
   "LOG_LEVEL", "LOG_FORMAT", "NODE_ENV",
 ]);

@@ -55,7 +55,11 @@ export function extractRateLimitKey(request, principal = null) {
     return `key:${principal.rateLimitId}`;
   }
   if (principal?.name) {
-    const hash = hashString32(principal.name);
+    // L2 修复：此处是**无 rateLimitId** 时的回落路径（正常三条 auth 路径都会设 rateLimitId）。
+    // 原用 32-bit FNV，生日界下约 77k 个不同 name 即碰撞 → 两个主体共享限流桶，
+    // 一个可耗尽另一个的配额。改为对 name 做双 32-bit 拼接（64-bit 有效空间），
+    // 在保持同步、无 crypto 依赖的前提下把碰撞概率降到可忽略。
+    const hash = `${hashString32(principal.name)}${hashString32(`\u0000${principal.name}`)}`;
     return `key:${hash}`;
   }
 

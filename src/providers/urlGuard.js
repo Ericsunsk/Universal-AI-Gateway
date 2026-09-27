@@ -80,6 +80,52 @@ export async function assertPublicHttps(rawUrl, label) {
   return u;
 }
 
+// M1 修复（正确版）：把校验与连接合并为**同一次**解析，根除 DNS TOCTOU / rebinding。
+//
+// 此前 assertPublicHttps 解析一次、Node 的 fetch 再解析一次 —— 两次独立查询之间，
+// 攻击者可用 TTL=0 的 DNS 把结果切到 169.254.169.254 / 127.0.0.1，而请求携带
+// Authorization / x-api-key → SSRF + 上游密钥外泄。
+//
+// 注意：**不能**用每请求 `fetch(url, { dispatcher })` 来 pin —— 实测（Node v22）
+// 全局 fetch 不认 `dispatcher` 选项，会抛 `invalid onRequestStart method`。
+// 正确做法是把它作为**全局 dispatcher** 的 connect.lookup（见 server.js），
+// 该 lookup 会被 fetch 采纳，且连接池共用（无每请求 Agent 开销）。
+//
+// 语义：任何非公网解析结果一律拒绝（fail-closed），从而「校验通过的 IP」==
+// 「实际连接的 IP」。字面量 IP 直接放行（无需 DNS，不可劫持）。
+export function makeSafeLookup() {
+  return function safeLookup(hostname, options, callback) {
+    const done = (err, address, family) => {
+      // undici 以 { all: true } 调用 lookup，回调必须回数组形式；否则报
+      // `Invalid IP address: undefined`。此处统一按 options.all 归一。
+      if (options && options.all) {
+        if (err) return callback(err);
+        return callback(null, [{ address, family }]);
+      }
+      return callback(err, address, family);
+    };
+
+    // 字面量 IP：直接放行（isPrivateHostname 已在 assertPublicHttps 前置拦截）
+    if (ipaddr.isValid(unbracket(hostname))) {
+      const family = ipaddr.IPv6.isValid(unbracket(hostname)) ? 6 : 4;
+      return done(null, unbracket(hostname), family);
+    }
+
+    lookupCached(hostname).then((addresses) => {
+      const safe = (addresses || []).find(({ address }) => !isPrivateHostname(address));
+      if (!safe) {
+        // 全部解析到私网 / 无结果 → 拒绝连接（不降级为「放行」）
+        return callback(new Error(`Refusing to connect non-public host: ${hostname}`));
+      }
+      const wantFamily = options && options.family ? options.family : 0;
+      if (wantFamily && wantFamily !== safe.family) {
+        return callback(new Error(`Refusing to connect ${hostname}: no validated family ${wantFamily}`));
+      }
+      return done(null, safe.address, safe.family);
+    }).catch((e) => callback(e));
+  };
+}
+
 // 护栏只校验【初始 URL】。fetch 默认 redirect:"follow" 会自行跟随后续跳转，
 // 而跳转目标不经本模块——一个合法公网 https 上游回 302 Location: http://169.254.169.254/...
 // 即可把请求送进云 metadata。故所有出站 fetch 必须显式 redirect:"manual"：

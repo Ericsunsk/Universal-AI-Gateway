@@ -90,6 +90,9 @@ export async function dispatchExchange({
         model: c.model || cleanModel
       }));
     } else {
+      // 兜底链：显式配置 → fleet 首个活跃 provider → 单厂商部署的引导默认值。
+      // 末位字面量是**刻意的引导默认**（本网关主供 WorkBuddy），与 src/index.js 同款；
+      // 仅当既未配 default_provider 也无活跃 provider 时才会走到，非正常路由期不参与。
       const defaultProviderId = config.default_provider || (fleet?.getAllActive?.()[0]?.id) || "workbuddy";
       const defaultProvider = fleet?.getProvider?.(defaultProviderId);
       if (defaultProvider) {
@@ -172,9 +175,12 @@ export async function dispatchExchange({
           // 无需二次 apply）；唯 WorkBuddy 上游拒收推理参数，需清洗一次。OpenAI 协议客户端
           // 直传 payload，未经过 transform，仍需按方言完整适配一次。
           // 方言身份经能力谓词判定（needsReasoningScrub），不 switch provider.type。
+          // 方言**取值**直接读 provider 的自声明 reasoningDialect —— 此前用
+          // `scrub ? "workbuddy" : "openai"` 从布尔反推开名字，等于把刚抽象掉的
+          // provider 名又写回调用点：一旦出现第二个需要清洗的方言，会被静默当作 openai。
           const scrub = needsReasoningScrub(provider);
           if (!isAnthropic || scrub) {
-            applyReasoningToPayload(openaiPayload, reasoningIntent, scrub ? "workbuddy" : "openai");
+            applyReasoningToPayload(openaiPayload, reasoningIntent, provider.reasoningDialect);
           }
           if (wantsStreamedChat(provider)) {
             openaiPayload.stream = true;

@@ -294,3 +294,29 @@ test("createUpstashKv preserves persistence seam and does not leak redis", async
   assert.equal(typeof kv.delete, "function");
 });
 
+
+test("M3/P1-2: limiter keys must not be evicted ahead of business keys", async () => {
+  const kv = createMemoryKv();
+  // 先塞满一个限流桶（写进 store 供可观测性）
+  await kv.limit("busy", { capacity: 10, refillRate: 0 });
+  assert.ok(await kv.get("ratelimit:busy"), "limiter state is observable in store");
+
+  // 再灌入远超 MEMORY_KV_MAX_ENTRIES(1000) 的业务写
+  for (let i = 0; i < 1200; i++) {
+    await kv.put(`biz:${i}`, `v${i}`);
+  }
+  // 限流键必须存活（驱逐优先淘汰业务键），否则等于配额被重置 → 限流绕过
+  const survived = await kv.get("ratelimit:busy");
+  assert.ok(survived, "limiter bucket must survive business-key churn (no rate-limit bypass)");
+});
+
+test("M3/P1-2: limiter map growth is bounded (no unbounded Map from noisy traffic)", async () => {
+  const kv = createMemoryKv();
+  // 制造远超 LIMITER_MAX_ENTRIES(5000) 的唯一限流 key
+  for (let i = 0; i < 6000; i++) {
+    await kv.limit(`ip:${i}`, { capacity: 5, refillRate: 1 });
+  }
+  // 不应抛错、不应无限增长；最早被淘汰，最新仍在
+  const recent = await kv.limit("ip:5999", { capacity: 5, refillRate: 1 });
+  assert.equal(recent.allowed, true, "recent key still works after eviction pressure");
+});

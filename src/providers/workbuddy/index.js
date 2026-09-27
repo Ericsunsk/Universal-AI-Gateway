@@ -248,10 +248,17 @@ export class WorkBuddyProvider {
       }
     }
 
-    // 2. KV 持久缓存检查
+    // 2. KV 持久缓存检查（优先原子凭据包，回落旧分键格式）
     let kvToken = null;
     if (this.kv) {
-      kvToken = await this.kv.get(`WB_ACCESS_TOKEN_${cacheKey}`);
+      const creds = await this.kv.get(`WB_CREDENTIALS_${cacheKey}`);
+      if (creds) {
+        try { kvToken = JSON.parse(creds)?.accessToken || null; }
+        catch { /* 畸形 JSON 视为无缓存 */ }
+      }
+      if (!kvToken) {
+        kvToken = await this.kv.get(`WB_ACCESS_TOKEN_${cacheKey}`);
+      }
       if (kvToken && !isJwtExpiringSoon(kvToken, bufferSec)) {
         memoryTokenCache.set(cacheKey, { token: kvToken, timestamp: now });
         return kvToken;
@@ -309,8 +316,17 @@ export class WorkBuddyProvider {
     const allowEnv = account.allowEnvFallback === true;
     let refreshToken = account.refreshToken || (allowEnv ? this.env.REFRESH_TOKEN || "" : "");
     if (this.kv) {
-      const cachedRefresh = await this.kv.get(`WB_REFRESH_TOKEN_${cacheKey}`);
-      if (cachedRefresh) refreshToken = cachedRefresh;
+      // 优先读原子凭据包（P0-2）；无则回落旧的分键格式（向后兼容既有部署）。
+      const creds = await this.kv.get(`WB_CREDENTIALS_${cacheKey}`);
+      if (creds) {
+        try {
+          const parsed = JSON.parse(creds);
+          if (parsed?.refreshToken) refreshToken = parsed.refreshToken;
+        } catch { /* 畸形 JSON 视为无凭据，回落 account/env */ }
+      } else {
+        const cachedRefresh = await this.kv.get(`WB_REFRESH_TOKEN_${cacheKey}`);
+        if (cachedRefresh) refreshToken = cachedRefresh;
+      }
     }
     if (!refreshToken) {
       if (!allowEnv) warnNoCredential(this.id, account);
@@ -341,10 +357,15 @@ export class WorkBuddyProvider {
         memoryTokenCache.set(cacheKey, { token: newAccess, timestamp: Date.now() });
 
         if (this.kv) {
-          await this.kv.put(`WB_ACCESS_TOKEN_${cacheKey}`, newAccess);
-          if (newRefresh) {
-            await this.kv.put(`WB_REFRESH_TOKEN_${cacheKey}`, newRefresh);
-          }
+          // P0-2 修复：access/refresh 必须原子落盘。此前分两次独立 put，
+          // 第二次失败会留下「新 accessToken + 已被上游消费的旧 refreshToken」，
+          // 而 refreshAccessTokenOnce 优先读 KV → 账号永久失效且无自愈路径。
+          // 现改为单条 JSON 一次 put，并保留旧键格式的读兼容（见 refreshAccessTokenOnce）。
+          await this.kv.put(`WB_CREDENTIALS_${cacheKey}`, JSON.stringify({
+            accessToken: newAccess,
+            refreshToken: newRefresh || refreshToken,
+            expiresAt: Date.now()
+          }));
           await this.kv.put("LAST_REFRESH", new Date().toISOString());
         }
         return newAccess;
@@ -362,7 +383,26 @@ export class WorkBuddyProvider {
     let token = await this.getActiveToken(account);
     let resp = await doRequest(token);
     if (resp.status !== 401) return { resp, token, refreshed: false };
+    // P0-3 修复：401 时必须同时清内存与 KV 的已失效 token。
+    // 此前只清内存 → 下一次 getActiveToken 内存未命中后回落 KV，
+    // 拿到已知 401 的旧 token 再打一次必然失败的请求，账号被封时上游调用 1→3。
     memoryTokenCache.delete(`${this.id}_${account.id}`);
+    if (this.kv) {
+      // 原子凭据包只失效 accessToken 字段、保留 refreshToken（否则会丢掉刷新能力）；
+      // 旧分键格式则直接删除整个 access 键。
+      const cacheKey = `${this.id}_${account.id}`;
+      const creds = await this.kv.get(`WB_CREDENTIALS_${cacheKey}`);
+      if (creds) {
+        try {
+          const parsed = JSON.parse(creds);
+          parsed.accessToken = "";
+          await this.kv.put(`WB_CREDENTIALS_${cacheKey}`, JSON.stringify(parsed));
+        } catch { await this.kv.delete(`WB_CREDENTIALS_${cacheKey}`); }
+      }
+      // 无论走哪个分支都清一次 legacy 键：混合/部分迁移态的部署里，
+      // 读取侧回退链可能命中残留的 stale WB_ACCESS_TOKEN_*，导致 401 循环。
+      await this.kv.delete(`WB_ACCESS_TOKEN_${cacheKey}`);
+    }
     const refreshed = await this.refreshAccessToken(account);
     if (!refreshed) return { resp, token, refreshed: false };
     token = refreshed;

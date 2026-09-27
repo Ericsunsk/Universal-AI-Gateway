@@ -8,6 +8,12 @@ export const UPSTREAM_ERR_MAX = 300;
 // 预编译正则（ReDoS 防护 P2-7）
 const REGEX_URL = /https?:\/\/[^\s"'<>]+/gi;
 const REGEX_CREDENTIAL_BARE = /\b(?:sk|sk-ant|Bearer)[-\s:=]*[A-Za-z0-9_\-.]{8,}/gi;
+// L1 修复：前缀枚举永远漏（AIza… 的 Google key、纯 hex token、自定义 `Token xxx`）。
+// 补一条**高熵**兜底：连续 32+ 位、且同时含字母与数字的 token 样串。
+// 要求同时含字母与数字可避开普通长单词/哈希路径的中文文本误伤，
+// 且 {32,} 的定长下界 + 无嵌套量词，不引入回溯爆炸。
+const REGEX_HIGH_ENTROPY = /\b(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g;
+// 形如 `token=xxx` / `key: xxx` / `secret xxx` 的宽松兜底（含非英文字段名场景）
 const REGEX_CREDENTIAL_COMPOUND = /\b(?:[\w-]*?(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?))[-_\s:="'\\]+[A-Za-z0-9_\-.]{8,}/gi;
 const REGEX_IP = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
@@ -34,6 +40,9 @@ export function redactUpstreamText(text) {
     if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
 
     result = result.replace(REGEX_CREDENTIAL_COMPOUND, "<credential>");
+    if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
+
+    result = result.replace(REGEX_HIGH_ENTROPY, "<credential>");
     if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
 
     result = result.replace(REGEX_IP, "<ip>");

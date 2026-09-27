@@ -1,5 +1,5 @@
-import { createProvider } from "../providers/index.js";
-import { hasGetBalance, hasDailyCheckin, hasTokenRefresh, REASONING_DIALECTS } from "./contract.js";
+import { createProvider } from "./index.js";
+import { hasGetBalance, hasDailyCheckin, hasTokenRefresh, REASONING_DIALECTS } from "../core/contract.js";
 import { log } from "../logging/logger.js";
 
 let cachedFleet = null;

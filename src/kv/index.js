@@ -21,6 +21,8 @@ import { log } from "../logging/logger.js";
 // 装配：入口经 createKvFromEnv(env) 构造一次，经 env 注入 core；core 只见 Interface，
 //   永不直引 Adapter。测试用 createMemoryKv() 拿 fresh 实例（与生产单例隔离）。
 const MEMORY_KV_MAX_ENTRIES = 1000;
+// 限流桶上限（独立于业务 store）。防止高噪声流量制造无界 Map 增长。
+const LIMITER_MAX_ENTRIES = 5000;
 const MEMORY_KV_DEFAULT_TTL_MS = 60 * 60 * 1000; // 1 小时（冷却记录自带分钟级 TTL，此处只防陈旧配置）
 
 function toStoredString(value) {
@@ -44,7 +46,9 @@ function ttlMs(opts) {
 // 测试与生产共用的内存 Adapter：每次调用返回 fresh 实例，测试间天然隔离。
 export function createMemoryKv() {
   const store = new Map(); // key -> { value: string, expiresAt: number }
-  const memoryLimiters = new Map(); // key -> { tokens: number, lastRefill: number }
+  // 限流桶的权威状态。与 store 分离，避免业务键与限流键互相驱逐。
+  // 上限存在（防无界增长），但淘汰只发生在**桶数量**层面，且不影响 store 中的业务状态。
+  const memoryLimiters = new Map(); // key -> { tokens, lastRefill }
 
   return {
     async limit(key, config) {
@@ -52,6 +56,11 @@ export function createMemoryKv() {
       const now = Date.now() / 1000;
       let bucket = memoryLimiters.get(key);
       if (!bucket) {
+        if (memoryLimiters.size >= LIMITER_MAX_ENTRIES) {
+          // 防无界增长：桶数超限时淘汰最旧的一个（Map 保持插入序）。
+          // 仅影响限流桶自身的状态，不触碰 store 中的业务键。
+          memoryLimiters.delete(memoryLimiters.keys().next().value);
+        }
         bucket = { tokens: capacity, lastRefill: now };
         memoryLimiters.set(key, bucket);
       }
@@ -67,7 +76,8 @@ export function createMemoryKv() {
       const resetAt = Math.ceil(now + (capacity - bucket.tokens) / refillRate);
       const retryAfter = allowed ? 0 : Math.ceil((cost - bucket.tokens) / refillRate);
 
-      // 同步写回 store，保证可观测性及 kv.get('ratelimit:...') 兼容
+      // 同步写回 store，保证可观测性及 kv.get('ratelimit:...') 兼容。
+      // 注意：put 的驱逐策略已改为「优先淘汰非限流键」，故此处不会挤掉业务状态。
       await this.put(`ratelimit:${key}`, { tokens: bucket.tokens, lastRefill: now });
 
       return {
@@ -94,8 +104,16 @@ export function createMemoryKv() {
     async put(key, value, opts) {
       const valStr = toStoredString(value);
       if (!store.has(key) && store.size >= MEMORY_KV_MAX_ENTRIES) {
-        // Map 按插入有序，删最旧一条
-        store.delete(store.keys().next().value);
+        // M3/P1-2 修复：驱逐时**优先保留限流键**。
+        // 限流键（ratelimit:*）是配额权威状态，被挤出即等于配额重置（限流绕过）；
+        // 且其幂等可重建（下一次 limit() 会写回）。故先逐出最旧的业务键，
+        // 只在全是限流键时才退而逐出限流键，避免高噪声流量把业务状态（凭据、冷却）挤掉。
+        let victim = null;
+        for (const k of store.keys()) {
+          if (!k.startsWith("ratelimit:")) { victim = k; break; }
+        }
+        if (victim === null) victim = store.keys().next().value;
+        store.delete(victim);
       }
       // 重复 put 刷新过期时间并移到队尾，保持 LRU 语义
       store.delete(key);

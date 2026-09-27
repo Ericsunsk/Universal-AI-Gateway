@@ -222,3 +222,34 @@ test("thinking-only conversation leaves no empty-content message upstream", () =
   );
   assert.ok(!JSON.stringify(payload.messages).includes("only thinking"));
 });
+
+test("decoupling: transform ignores ambient env; pruning comes only from injected config", () => {
+  // 锁死解耦性质：transform 是纯变换，不得因 shell 里存在 MAX_CONTEXT_* 而改变输出。
+  // 此前它会直接读进程环境变量，导致同一测试在不同开发者 shell 下结果不同。
+  const body = {
+    model: "m",
+    messages: Array.from({ length: 6 }, (_, i) => ({
+      role: i % 2 ? "assistant" : "user",
+      content: `msg${i}`
+    }))
+  };
+  const saved = { t: process.env.MAX_CONTEXT_TURNS, k: process.env.MAX_CONTEXT_TOKENS };
+  try {
+    process.env.MAX_CONTEXT_TURNS = "2";
+    process.env.MAX_CONTEXT_TOKENS = "1";
+    const withEnv = transformAnthropicToOpenAI(body, "m", {}).messages.length;
+    delete process.env.MAX_CONTEXT_TURNS;
+    delete process.env.MAX_CONTEXT_TOKENS;
+    const withoutEnv = transformAnthropicToOpenAI(body, "m", {}).messages.length;
+    assert.equal(withEnv, withoutEnv,
+      "ambient env must not affect transform output — config is the only pruning input");
+    assert.equal(withEnv, 6, "empty config means no pruning");
+
+    // 而注入的 config 必须生效
+    const pruned = transformAnthropicToOpenAI(body, "m", { max_context_turns: 2 }).messages.length;
+    assert.ok(pruned < 6, "injected config must still drive pruning");
+  } finally {
+    if (saved.t === undefined) delete process.env.MAX_CONTEXT_TURNS; else process.env.MAX_CONTEXT_TURNS = saved.t;
+    if (saved.k === undefined) delete process.env.MAX_CONTEXT_TOKENS; else process.env.MAX_CONTEXT_TOKENS = saved.k;
+  }
+});

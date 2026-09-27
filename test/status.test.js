@@ -99,7 +99,7 @@ test("getConfig singleflights concurrent refreshes into one KV read", async () =
 });
 
 test("getProviderFleet reuses instance across config refreshes with same version", async () => {
-  const { getProviderFleet } = await import("../src/core/fleet.js");
+  const { getProviderFleet } = await import("../src/providers/fleet.js");
   const env = {};
   const a = { config_version: 41, providers: [] };
   const b = { config_version: 41, providers: [] };
@@ -111,7 +111,7 @@ test("getProviderFleet reuses instance across config refreshes with same version
 });
 
 test("fleet.getBalance caches upstream balance briefly", async () => {
-  const { ProviderFleet } = await import("../src/core/fleet.js");
+  const { ProviderFleet } = await import("../src/providers/fleet.js");
   const fleet = new ProviderFleet(
     { providers: [{ id: "cacheprobe", type: "openai", config: {} }], usage_provider_id: "cacheprobe" },
     {}
@@ -129,7 +129,7 @@ test("fleet.getBalance caches upstream balance briefly", async () => {
 });
 
 test("balanceCache keeps previous providers cached and evicts only the oldest (M5)", async () => {
-  const { ProviderFleet } = await import("../src/core/fleet.js");
+  const { ProviderFleet } = await import("../src/providers/fleet.js");
   const fleet = new ProviderFleet({ providers: [] }, {});
   const BALANCE_CACHE_MAX_ENTRIES = 100;
 

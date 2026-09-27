@@ -34,7 +34,7 @@ function toolResultChunkText(c) {
 
 // tool_result 内容展平为 string：string / 文本块数组 / 任意对象统一口径。
 // normalize 孤儿包、Anthropic→OpenAI 映射、prune 三处共用，不再各写一遍。
-export function toolResultBlockText(content) {
+function toolResultBlockText(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content.map(toolResultChunkText).join("\n");
@@ -46,7 +46,7 @@ export function toolResultBlockText(content) {
 //   - source.type "base64" → data URI（media_type 按 Anthropic 规范必填，缺失不猜、直接 400）
 //   - source.type "url"    → 原样透传（由上游去取，本仓库不 fetch，故不套 providers/urlGuard）
 // 非法 source 属客户端错误：抛 400 让 dispatch short-circuit，既不静默丢图也不进故障转移。
-export function imageBlockToImagePart(block) {
+function imageBlockToImagePart(block) {
   const fail = (why) => {
     const err = new Error(`Invalid image block: ${why}`);
     err.status = 400;
@@ -70,7 +70,7 @@ export function imageBlockToImagePart(block) {
 // 若按 toolResultBlockText 整体序列化，工具返回的截图（Claude Code Read 图片正是这条路径）
 // 会把几 MB base64 当成 JSON 灌进 token。图片由此抽出，由调用方作为紧随的 user 消息发出。
 // 文本口径复用 toolResultChunkText，与 toolResultBlockText 逐块一致。
-export function toolResultSplit(content) {
+function toolResultSplit(content) {
   if (typeof content === "string") return { text: content, images: [] };
   if (Array.isArray(content)) {
     const texts = [];
@@ -475,20 +475,16 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
     containsCompactMarker(lastText);
 
   // 动态上下文保留策略：双轨驱动（max_context_turns 轮次上限 + max_context_tokens 预算上限）
-  const maxTurns = parseMaxContextTurns(
-    config?.max_context_turns !== undefined
-      ? config.max_context_turns
-      : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TURNS !== undefined
-          ? process.env.MAX_CONTEXT_TURNS
-          : 0)
-  );
-  const maxTokens = parseMaxContextTokens(
-    config?.max_context_tokens !== undefined
-      ? config.max_context_tokens
-      : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TOKENS !== undefined
-          ? process.env.MAX_CONTEXT_TOKENS
-          : 0)
-  );
+  //
+  // 解耦：只认**注入的 config**，不再回落到进程环境变量。
+  // 此前当 config 未给出该字段时会直接读环境变量 —— 这条旁路
+  // 在真实链路里不可达（config.js 恒产出这两个字段，见 config.js:77-78 与
+  // schema.js:48-49 的默认值 0），却让 transform 这个纯函数依赖了环境全局状态：
+  // 手工构造的 `{}` config 会因开发者 shell 是否设置该变量而产出不同结果
+  // （实测 MAX_CONTEXT_TURNS=2 时 6 条消息被裁成 3 条），等于把纯变换变成了
+  // 隐式环境依赖。裁剪策略的唯一入口是 config —— 组装 config 是 config 层的职责。
+  const maxTurns = parseMaxContextTurns(config?.max_context_turns ?? 0);
+  const maxTokens = parseMaxContextTokens(config?.max_context_tokens ?? 0);
 
   const messages = windowAnthropicMessages(rawMessages, isCompact, maxTurns, maxTokens, body.system, body.tools);
 
@@ -526,6 +522,9 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
     const turnAge = total - mIdx;
 
     if (typeof msg.content === "string") {
+      // P1-4 修复：空串 / 纯空白的 string content 直达上游会被判 400 invalid_request。
+      // 与下方 block 分支的 `!combined` 守卫对齐，在此一并拦下（此前只在 block 分支生效）。
+      if (!msg.content.trim()) continue;
       sequence.push({
         role: msg.role === "assistant" ? "assistant" : "user",
         content: msg.content
@@ -607,6 +606,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
         }
         // 纯 thinking 消息（丢弃后已无任何可发内容且无图片）整体跳过：
         // 发 content:"" 的空气泡既无信息量，又会被部分上游判为非法请求。
+        // 取舍已定：宁可丢掉该轮次，也不上送空气泡（见 arch-c5-sequence 测试）。
         if (!combined && imageParts.length === 0) continue;
         sequence.push({
           role: msg.role === "assistant" ? "assistant" : "user",

@@ -4,11 +4,51 @@ Domain glossary for the Universal AI Gateway. These terms carry load-bearing mea
 
 ## Module layout (DDD-lite: one context, role-based folders)
 
-- `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `fleet` (provider orchestration), `tokenizer` (gpt-4o BPE token estimation).
-- `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
+- `src/core/` — shared kernel, no adapter imports: `contract` (capability predicates), `scheduler` (pure account scheduling), `failover` (shared attempt loop), `tokenizer` (gpt-4o BPE token estimation). Kernel imports are restricted to `./` (within core) or the leaf layers `logging` / `http` / `kv` / `config`; enforced by `test/arch-c6-kernel-purity.test.js`.
+- `src/providers/` — upstream adapters only: one directory per multi-file provider (`workbuddy/`, with an `index.js` adapter entry), single-file adapters (`openai_standard.js`, `anthropic_standard.js`), `registry.js` (type → constructor map) + `index.js` (built-in wiring), and `fleet.js` (provider orchestration — instantiates the fleet, so it lives here rather than in the kernel). Convention for new providers: new directory + `index.js` + one `registerProvider` line; shared kernel lives in `src/core/`, never in provider dirs.
 - `src/exchange/` — protocol translation context: `transform` / `stream` / `dispatch` (+ `exchange.js` facade), `reasoning`, `sanitizer` (vendors-neutral output pruning only).
 - `src/config/`, `src/auth/`, `src/http/` — single-responsibility modules; `src/index.js` is the core Fetch handler, `api/index.js` the Vercel serverless entry.
 - `src/kv/` — persistence seam: `get` / `put` / `delete` (+ `json`) and `limit` behind one interface; memory / Upstash (via `@upstash/redis` and `@upstash/ratelimit`) adapters inside. Constructed once at the entry (`createKvFromEnv`), injected via env — core never imports adapters directly.
+
+### Architecture invariants (C1–C6)
+
+A **C-constraint** is a load-bearing structural rule that is machine-checked by an
+`test/arch-cN-*.test.js` invariant test and recorded in an ADR. `C<N>` = the ADR
+number minus 3 — i.e. the constraints were carved out of ADR-0004..0009 in order.
+**Adding a new architectural invariant means: write the next ADR, then add
+`test/arch-c<N+1>-*.test.js` carrying the `C<N+1>` label in its title.** A
+constraint with no ADR, or an ADR whose rule has no test, is an incomplete
+change — the rule will drift exactly as C6's did before it existed.
+
+| C | Rule | ADR | Guard test |
+|---|---|---|---|
+| C1 | SSE 行源收敛为单一读循环 (`iterSseParsedChunks`) | 0004 | `arch-c1-linesource` |
+| C2 | 客户端可见错误一律经 `src/http/redact.js` 信封 | 0005 | `arch-c2-envelope` |
+| C3 | fail 构造收归 failover driver（`buildFail` 唯一构造点） | 0006 | `arch-c3-fail` |
+| C4 | Fleet 重建规则显式化为 `FleetConfig` 值对象 | 0007 | `arch-c4-fleet` |
+| C5 | 11148 消息序列收归单一序列模块 | 0008 | `arch-c5-sequence` |
+| C6 | `src/core/` 不得 import adapters（依赖白名单 + 叶子层） | 0009 | `arch-c6-kernel-purity` |
+
+### Module-level mutable state (convention)
+
+Several modules keep process-lifetime mutable state at **module scope** (not on
+`this`), keyed by `${providerId}_${accountId}`: `memoryTokenCache` /
+`noCredentialWarned` / `inflightTokenRefresh` (`src/providers/workbuddy/index.js`),
+`accountCooldownRecord` (`src/providers/workbuddy/cooldown.js`), `dnsCache`
+(`src/providers/urlGuard.js`), `balanceCache` (`src/providers/fleet.js`).
+
+This is **deliberate and correct**: the state must survive provider-instance
+rebuild (fleet reconstruction on config change), and `cacheKey` is namespaced by
+provider id so no two tenants share an entry. `inflightTokenRefresh` in
+particular relies on being module-level — that is what makes token refresh
+**single-flight across instances**, deduplicating upstream refresh calls. Moving
+it onto `this` would silently regress performance (one refresh per instance);
+moving `memoryTokenCache` onto `this` is safe but must come with instance-level
+cleanup.
+
+**Rule for new state:** only hoist to module scope when it must outlive an
+instance rebuild, always namespace the key by provider id, and keep a bounded
+cache bounded (see `dnsCache` / `balanceCache` for the LRU pattern).
 
 ## Core concepts
 

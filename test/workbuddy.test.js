@@ -437,3 +437,98 @@ test("getActiveToken gracefully falls back to best effort token if proactive ref
 });
 
 
+
+test("P0-2: refreshed credentials are written atomically as one JSON record", async () => {
+  const puts = [];
+  const kv = {
+    store: new Map(),
+    async get(k) { return this.store.get(k) ?? null; },
+    async put(k, v) { puts.push(k); this.store.set(k, v); },
+    async delete(k) { this.store.delete(k); }
+  };
+  globalThis.fetch = async () => jsonResp(200, {
+    code: 0,
+    data: { accessToken: makeMockJwt(Math.floor(Date.now() / 1000) + 3600), refreshToken: "rt-new" }
+  });
+
+  const account = { id: "atomic", userId: "u1", accessToken: "old", refreshToken: "rt-old" };
+  const p = new WorkBuddyProvider({ id: "wb-atomic", config: { accounts: [account] } }, { GATEWAY_KV: kv });
+  await p.refreshAccessTokenOnce(account, "wb-atomic_atomic");
+
+  const credKeys = puts.filter(k => k.startsWith("WB_CREDENTIALS_"));
+  assert.equal(credKeys.length, 1, "credentials must be written in exactly ONE put (atomic)");
+  assert.equal(puts.filter(k => k.startsWith("WB_REFRESH_TOKEN_")).length, 0,
+    "legacy split refresh key must no longer be written");
+  const stored = JSON.parse(kv.store.get("WB_CREDENTIALS_wb-atomic_atomic"));
+  assert.equal(stored.refreshToken, "rt-new", "new refresh token persisted together with access token");
+});
+
+test("P0-2: reads legacy split-format refresh token for backward compatibility", async () => {
+  let sawLegacyRefresh = false;
+  const kv = {
+    store: new Map([["WB_REFRESH_TOKEN_wb-legacy_acc", "rt-legacy"]]),
+    async get(k) { return this.store.get(k) ?? null; },
+    async put() {}, async delete() {}
+  };
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes("refresh") || init?.headers?.["X-Refresh-Token"]) {
+      sawLegacyRefresh = init.headers["X-Refresh-Token"] === "rt-legacy";
+    }
+    return jsonResp(200, { code: 0, data: { accessToken: makeMockJwt(Math.floor(Date.now() / 1000) + 3600) } });
+  };
+
+  const account = { id: "acc", userId: "u1", accessToken: "old" };
+  const p = new WorkBuddyProvider({ id: "wb-legacy", config: { accounts: [account] } }, { GATEWAY_KV: kv });
+  await p.refreshAccessTokenOnce(account, "wb-legacy_acc");
+  assert.ok(sawLegacyRefresh, "legacy WB_REFRESH_TOKEN_* must still be honored when atomic record absent");
+});
+
+test("P0-3: 401 clears the KV access token so it is not reused", async () => {
+  const kv = {
+    store: new Map([["WB_CREDENTIALS_wb-401_acc", JSON.stringify({ accessToken: "stale", refreshToken: "rt" })]]),
+    puts: [],
+    async get(k) { return this.store.get(k) ?? null; },
+    async put(k, v) { this.puts.push([k, v]); this.store.set(k, v); },
+    async delete(k) { this.store.delete(k); }
+  };
+  // 上游恒 401；刷新端点也失败，模拟账号被封
+  globalThis.fetch = async () => new Response("unauthorized", { status: 401 });
+
+  const account = { id: "acc", userId: "u1", accessToken: "stale", refreshToken: "rt" };
+  const p = new WorkBuddyProvider({ id: "wb-401", config: { accounts: [account] } }, { GATEWAY_KV: kv });
+
+  // 记录 401 前的状态，仅用于调试可读性
+  await p.getActiveToken(account).catch(() => {});
+  await p.callChat({ messages: [] }, {}).catch(() => {});
+
+  const after = kv.store.get("WB_CREDENTIALS_wb-401_acc");
+  if (after === undefined) {
+    assert.ok(true, "atomic record deleted on 401");
+  } else {
+    const parsed = JSON.parse(after);
+    assert.equal(parsed.accessToken, "", "stale accessToken must be invalidated in KV");
+    assert.equal(parsed.refreshToken, "rt", "refreshToken must be preserved (refresh capability retained)");
+  }
+});
+
+test("P0-3: 401 also clears a stale legacy WB_ACCESS_TOKEN (partial-migration state)", async () => {
+  // 混合态：既有原子凭据包、又有残留的 legacy access 键（迁移中途）。
+  // 若只清原子包，读取侧的 legacy 回退链会命中 stale → 401 循环。
+  const kv = {
+    store: new Map([
+      ["WB_CREDENTIALS_wb-mix_acc", JSON.stringify({ accessToken: "stale-atomic", refreshToken: "rt" })],
+      ["WB_ACCESS_TOKEN_wb-mix_acc", "stale-legacy"]
+    ]),
+    async get(k) { return this.store.get(k) ?? null; },
+    async put(k, v) { this.store.set(k, v); },
+    async delete(k) { this.store.delete(k); }
+  };
+  globalThis.fetch = async () => new Response("unauthorized", { status: 401 });
+
+  const account = { id: "acc", userId: "u1", accessToken: "stale-atomic", refreshToken: "rt" };
+  const p = new WorkBuddyProvider({ id: "wb-mix", config: { accounts: [account] } }, { GATEWAY_KV: kv });
+  await p.callChat({ messages: [] }, {}).catch(() => {});
+
+  assert.equal(kv.store.get("WB_ACCESS_TOKEN_wb-mix_acc"), undefined,
+    "stale legacy access token must be cleared on 401 to prevent a refresh loop");
+});

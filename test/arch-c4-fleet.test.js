@@ -5,7 +5,7 @@ import {
   getProviderFleet,
   toFleetConfig,
   fleetConfigEquals,
-} from "../src/core/fleet.js";
+} from "../src/providers/fleet.js";
 
 // C4：fleet 重建规则显式化为 FleetConfig 值对象。
 // 锁定修复的核心回归面：凭据漂移（baseUrl/apiKey/balanceUrl/账号 token）
