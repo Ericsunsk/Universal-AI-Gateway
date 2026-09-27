@@ -314,13 +314,9 @@ export class StreamBlockState {
     // 上游为 OpenAI 协议，无 signature 概念，合成非空占位串满足协议形状即可；
     // 客户端回传的该块会在请求侧被丢弃（见 transform.js），不会打到上游。
     if (this.blockType === "thinking") {
-      out.push(this.#frame("content_block_delta", {
-        type: "content_block_delta",
-        index: this.blockIndex,
-        delta: { type: "signature_delta", signature: SYNTHETIC_THINKING_SIGNATURE }
-      }));
+      out.push(`event: content_block_delta\ndata: {"type":"content_block_delta","index":${this.blockIndex},"delta":{"type":"signature_delta","signature":${JSON.stringify(SYNTHETIC_THINKING_SIGNATURE)}}}\n\n`);
     }
-    out.push(this.#frame("content_block_stop", { type: "content_block_stop", index: this.blockIndex }));
+    out.push(`event: content_block_stop\ndata: {"type":"content_block_stop","index":${this.blockIndex}}\n\n`);
     this.blockType = null;
     return out;
   }
@@ -356,10 +352,8 @@ export class StreamBlockState {
   thinkingDelta(text) {
     if (this.blockType !== "thinking") return [];
     this.emittedChars += text.length;
-    return [this.#frame("content_block_delta", {
-      type: "content_block_delta", index: this.blockIndex,
-      delta: { type: "thinking_delta", thinking: text }
-    })];
+    const jsonStr = JSON.stringify(typeof text === "string" ? text : String(text ?? ""));
+    return [`event: content_block_delta\ndata: {"type":"content_block_delta","index":${this.blockIndex},"delta":{"type":"thinking_delta","thinking":${jsonStr}}}\n\n`];
   }
 
   /** 正文增量帧；自动累计 emittedChars（供字符数/4 回退估算）。 */
@@ -373,19 +367,15 @@ export class StreamBlockState {
         ? joined.slice(joined.length - this.tailWindow)
         : joined;
     }
-    return [this.#frame("content_block_delta", {
-      type: "content_block_delta", index: this.blockIndex,
-      delta: { type: "text_delta", text }
-    })];
+    const jsonStr = JSON.stringify(typeof text === "string" ? text : String(text ?? ""));
+    return [`event: content_block_delta\ndata: {"type":"content_block_delta","index":${this.blockIndex},"delta":{"type":"text_delta","text":${jsonStr}}}\n\n`];
   }
 
   /** 工具入参增量帧（partial_json）。 */
   inputJsonDelta(partialJson) {
     if (this.blockType !== "tool_use") return [];
-    return [this.#frame("content_block_delta", {
-      type: "content_block_delta", index: this.blockIndex,
-      delta: { type: "input_json_delta", partial_json: partialJson }
-    })];
+    const jsonStr = JSON.stringify(typeof partialJson === "string" ? partialJson : String(partialJson ?? ""));
+    return [`event: content_block_delta\ndata: {"type":"content_block_delta","index":${this.blockIndex},"delta":{"type":"input_json_delta","partial_json":${jsonStr}}}\n\n`];
   }
 
   /**

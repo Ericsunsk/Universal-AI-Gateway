@@ -1313,6 +1313,62 @@ test("StreamBlockState.applyEmission drives block transitions for each kind", as
   assert.deepEqual(s.applyEmission(null), []);
 });
 
+test("StreamBlockState zero-allocation delta templating outputs valid and correctly-escaped SSE frames", async () => {
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
+  const s = new StreamBlockState();
+
+  // 1. Text delta: 特殊字符、换行、引号、转义、unicode
+  s.open("text");
+  const complexText = 'Line 1\nLine 2\t"quoted" \\escaped\\ 🚀 你好世界';
+  const textFrames = s.textDelta(complexText);
+  assert.equal(textFrames.length, 1);
+  assert.ok(textFrames[0].startsWith("event: content_block_delta\ndata: "));
+  assert.ok(textFrames[0].endsWith("\n\n"));
+  const textDataLine = textFrames[0].split("\n")[1].slice(6);
+  const textParsed = JSON.parse(textDataLine);
+  assert.deepEqual(textParsed, {
+    type: "content_block_delta",
+    index: 0,
+    delta: { type: "text_delta", text: complexText }
+  });
+
+  // 2. Thinking delta: 思维链内容与特殊字符
+  s.open("thinking");
+  const complexThinking = 'Thinking step: {"analysis": "valid \n test"}';
+  const thinkFrames = s.thinkingDelta(complexThinking);
+  assert.equal(thinkFrames.length, 1);
+  const thinkDataLine = thinkFrames[0].split("\n")[1].slice(6);
+  const thinkParsed = JSON.parse(thinkDataLine);
+  assert.deepEqual(thinkParsed, {
+    type: "content_block_delta",
+    index: 1,
+    delta: { type: "thinking_delta", thinking: complexThinking }
+  });
+
+  // Thinking 关闭时验证 signature_delta 与 stop 帧
+  const closeFrames = s.close();
+  assert.equal(closeFrames.length, 2);
+  const sigData = JSON.parse(closeFrames[0].split("\n")[1].slice(6));
+  assert.equal(sigData.type, "content_block_delta");
+  assert.equal(sigData.delta.type, "signature_delta");
+  assert.ok(sigData.delta.signature.length > 0);
+  const stopData = JSON.parse(closeFrames[1].split("\n")[1].slice(6));
+  assert.deepEqual(stopData, { type: "content_block_stop", index: 1 });
+
+  // 3. Input JSON delta: 工具调用参数片段
+  s.open("tool_use", { toolId: "call_1", toolName: "bash" });
+  const complexJsonPart = '{"cmd": "echo \\"hello\\""}';
+  const toolFrames = s.inputJsonDelta(complexJsonPart);
+  assert.equal(toolFrames.length, 1);
+  const toolDataLine = toolFrames[0].split("\n")[1].slice(6);
+  const toolParsed = JSON.parse(toolDataLine);
+  assert.deepEqual(toolParsed, {
+    type: "content_block_delta",
+    index: 2,
+    delta: { type: "input_json_delta", partial_json: complexJsonPart }
+  });
+});
+
 // --- stop_sequences 透传与 stop_reason 判定 ---
 
 test("stop_sequences is translated to upstream stop", async () => {

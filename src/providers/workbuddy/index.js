@@ -23,6 +23,7 @@ let roundRobinCounter = 0;
 export function resetSchedulingCounterForTests() {
   roundRobinCounter = 0;
   inflightTokenRefresh = new Map();
+  memoryTokenCache.clear();
 }
 
 // 抖动重试基准延迟（Q6 可配置）：env RETRY_BASE_MS，默认 600ms。
@@ -32,6 +33,49 @@ export function retryDelayMs(env) {
   const raw = Number(env?.RETRY_BASE_MS);
   if (!Number.isFinite(raw) || raw < 0) return DEFAULT_RETRY_DELAY_MS;
   return Math.floor(raw);
+}
+
+// JWT 预过期静默刷新时间缓冲（默认 300 秒 = 5 分钟）：env JWT_REFRESH_BUFFER_SEC 可配置。
+// 在 AccessToken 真正失效前 5 分钟由 getActiveToken 主动静默发起刷新，消除用户调用撞 401 的 1.5~2.5s 额外延迟。
+export const DEFAULT_JWT_REFRESH_BUFFER_SEC = 300;
+export function jwtRefreshBufferSec(env) {
+  const raw = Number(env?.JWT_REFRESH_BUFFER_SEC);
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_JWT_REFRESH_BUFFER_SEC;
+  return Math.floor(raw);
+}
+
+/**
+ * 从 JWT 格式 Token 中解析过期时间戳（UNIX epoch，秒）。
+ * 若不是合法的 JWT 结构或缺失数值型 exp 字段，安全返回 null。
+ */
+export function parseJwtExp(token) {
+  if (!token || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    let jsonStr;
+    if (typeof Buffer !== "undefined") {
+      jsonStr = Buffer.from(parts[1], "base64url").toString("utf8");
+    } else {
+      const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+      jsonStr = atob(padded);
+    }
+    const payload = JSON.parse(jsonStr);
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp) ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 判定 JWT Token 是否已过期或即将过期（在 bufferSeconds 内）。
+ * 若 Token 并非有效 JWT（如测试占位凭证），返回 false，不干扰非 JWT 凭证的既有逻辑。
+ */
+export function isJwtExpiringSoon(token, bufferSeconds = DEFAULT_JWT_REFRESH_BUFFER_SEC) {
+  const exp = parseJwtExp(token);
+  if (exp === null) return false;
+  return (Date.now() / 1000) >= (exp - bufferSeconds);
 }
 
 // 显式池成员缺自身凭证时 fail-closed：env 兜底只属于无 accounts 数组时的合成单账号。
@@ -190,31 +234,55 @@ export class WorkBuddyProvider {
     return [];
   }
 
-  // 获取特定账号的有效 Token（所有账号平级读取缓存；env 兜底仅合成单账号可用）
+  // 获取特定账号的有效 Token（所有账号平级读取缓存；支持 JWT 预过期主动静默刷新；env 兜底仅合成单账号可用）
   async getActiveToken(account) {
     const cacheKey = `${this.id}_${account.id}`;
     const now = Date.now();
+    const bufferSec = jwtRefreshBufferSec(this.env);
+
+    // 1. 内存级热缓存检查
     const cached = memoryTokenCache.get(cacheKey);
     if (cached && (now - cached.timestamp < TOKEN_CACHE_TTL_MS)) {
-      return cached.token;
+      if (!isJwtExpiringSoon(cached.token, bufferSec)) {
+        return cached.token;
+      }
     }
 
+    // 2. KV 持久缓存检查
+    let kvToken = null;
     if (this.kv) {
-      const kvToken = await this.kv.get(`WB_ACCESS_TOKEN_${cacheKey}`);
-      if (kvToken) {
+      kvToken = await this.kv.get(`WB_ACCESS_TOKEN_${cacheKey}`);
+      if (kvToken && !isJwtExpiringSoon(kvToken, bufferSec)) {
         memoryTokenCache.set(cacheKey, { token: kvToken, timestamp: now });
         return kvToken;
       }
     }
 
+    // 3. 初始静态配置 / 单账号 env 兜底
     const allowEnv = account.allowEnvFallback === true;
     const fallback = account.accessToken || (allowEnv ? this.env.ACCESS_TOKEN || "" : "");
-    if (fallback) {
+    if (fallback && !isJwtExpiringSoon(fallback, bufferSec)) {
       memoryTokenCache.set(cacheKey, { token: fallback, timestamp: now });
-    } else if (!allowEnv) {
+      return fallback;
+    }
+
+    // 4. Token 临期 / 过期或未缓存：尝试通过 RefreshToken 主动静默预刷新（带 singleflight 去重）
+    const refreshed = await this.refreshAccessToken(account);
+    if (refreshed) {
+      return refreshed;
+    }
+
+    // 5. 主动刷新未成功（网络抖动或无 refreshToken）：降级返回手头尚有的 token
+    const bestEffort = cached?.token || kvToken || fallback;
+    if (bestEffort) {
+      memoryTokenCache.set(cacheKey, { token: bestEffort, timestamp: now });
+      return bestEffort;
+    }
+
+    if (!allowEnv) {
       warnNoCredential(this.id, account);
     }
-    return fallback;
+    return "";
   }
 
   // 刷新特定账号或全部账号的 AccessToken（所有账号平级刷新与存储）

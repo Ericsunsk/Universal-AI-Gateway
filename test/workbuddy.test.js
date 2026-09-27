@@ -1,6 +1,14 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { WorkBuddyProvider, retryDelayMs, DEFAULT_RETRY_DELAY_MS, resetSchedulingCounterForTests } from "../src/providers/workbuddy/index.js";
+import {
+  WorkBuddyProvider,
+  retryDelayMs,
+  DEFAULT_RETRY_DELAY_MS,
+  resetSchedulingCounterForTests,
+  parseJwtExp,
+  isJwtExpiringSoon,
+  jwtRefreshBufferSec
+} from "../src/providers/workbuddy/index.js";
 import { accountCooldownRecord, hydrateCooldowns } from "../src/providers/workbuddy/cooldown.js";
 
 const originalFetch = globalThis.fetch;
@@ -313,4 +321,119 @@ test("getBalance correctly aggregates cyclical packages and trial packages with 
   assert.equal(bal.balance, 600);
   assert.equal(bal.total, 600);
 });
+
+// --- JWT 预过期主动静默刷新（Direction 2）单元测试 ---
+
+function makeMockJwt(expSeconds) {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ sub: "user-1", exp: expSeconds })).toString("base64url");
+  return `${header}.${payload}.mock-signature`;
+}
+
+test("parseJwtExp parses exp timestamp correctly and tolerates malformed inputs", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const jwt = makeMockJwt(nowSec + 3600);
+  assert.equal(parseJwtExp(jwt), nowSec + 3600);
+
+  // 非 JWT 字符串
+  assert.equal(parseJwtExp("plain-api-token"), null);
+  assert.equal(parseJwtExp(""), null);
+  assert.equal(parseJwtExp(null), null);
+  assert.equal(parseJwtExp(undefined), null);
+
+  // 格式异常或 payload 损坏
+  assert.equal(parseJwtExp("header.invalid_base64!.sig"), null);
+  const badPayloadJwt = `header.${Buffer.from("not-json").toString("base64url")}.sig`;
+  assert.equal(parseJwtExp(badPayloadJwt), null);
+
+  // 缺失 exp 或 exp 非数值
+  const noExpJwt = `header.${Buffer.from(JSON.stringify({ sub: "u" })).toString("base64url")}.sig`;
+  assert.equal(parseJwtExp(noExpJwt), null);
+  const strExpJwt = `header.${Buffer.from(JSON.stringify({ exp: "12345" })).toString("base64url")}.sig`;
+  assert.equal(parseJwtExp(strExpJwt), null);
+});
+
+test("isJwtExpiringSoon detects expiring and valid JWTs accurately", () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // 充足有效期（1 小时后过期，缓冲区 300 秒）
+  const validToken = makeMockJwt(nowSec + 3600);
+  assert.equal(isJwtExpiringSoon(validToken), false);
+
+  // 濒临过期（剩 100 秒，缓冲区 300 秒）
+  const expiringToken = makeMockJwt(nowSec + 100);
+  assert.equal(isJwtExpiringSoon(expiringToken), true);
+
+  // 已过期（50 秒前过期）
+  const expiredToken = makeMockJwt(nowSec - 50);
+  assert.equal(isJwtExpiringSoon(expiredToken), true);
+
+  // 非 JWT 凭证返回 false（不破坏普通测试与静态 key）
+  assert.equal(isJwtExpiringSoon("non-jwt-token"), false);
+
+  // 自定义 bufferSeconds
+  assert.equal(isJwtExpiringSoon(validToken, 7200), true);
+  assert.equal(isJwtExpiringSoon(expiringToken, 50), false);
+});
+
+test("jwtRefreshBufferSec honors env override with safe fallback", () => {
+  assert.equal(jwtRefreshBufferSec(undefined), 300);
+  assert.equal(jwtRefreshBufferSec({}), 300);
+  assert.equal(jwtRefreshBufferSec({ JWT_REFRESH_BUFFER_SEC: "600" }), 600);
+  assert.equal(jwtRefreshBufferSec({ JWT_REFRESH_BUFFER_SEC: "invalid" }), 300);
+  assert.equal(jwtRefreshBufferSec({ JWT_REFRESH_BUFFER_SEC: "-50" }), 300);
+  assert.equal(jwtRefreshBufferSec({ JWT_REFRESH_BUFFER_SEC: "120.8" }), 120);
+});
+
+test("getActiveToken proactively refreshes JWT token expiring soon without hitting 401", async () => {
+  resetSchedulingCounterForTests();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiringToken = makeMockJwt(nowSec + 60); // 60s 后过期（在 300s 缓冲期内）
+  const freshToken = makeMockJwt(nowSec + 7200);
+
+  let refreshCalls = 0;
+  scriptFetch({
+    refresh: { code: 0, data: { accessToken: freshToken, refreshToken: "refreshed-rt" } }
+  });
+  const baseFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/auth/token/refresh")) refreshCalls += 1;
+    return baseFetch(url);
+  };
+
+  const account = { id: "proactive-1", userId: "u1", accessToken: expiringToken, refreshToken: "rt-1" };
+  const p = new WorkBuddyProvider(
+    { id: "wb-proactive", config: { accounts: [account] } },
+    {}
+  );
+
+  // 首次取 token：探测到 expiringToken 即将过期，主动静默发起刷新
+  const token = await p.getActiveToken(account);
+  assert.equal(token, freshToken, "getActiveToken must return the fresh proactively refreshed token");
+  assert.equal(refreshCalls, 1, "refresh endpoint must be called once proactively");
+
+  // 再次取 token：命中内存缓存中的 freshToken，不再发刷新
+  const cachedToken = await p.getActiveToken(account);
+  assert.equal(cachedToken, freshToken, "subsequent call must hit memory cache with fresh token");
+  assert.equal(refreshCalls, 1, "subsequent getActiveToken call must hit cache without additional refresh");
+});
+
+test("getActiveToken gracefully falls back to best effort token if proactive refresh fails", async () => {
+  resetSchedulingCounterForTests();
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiringToken = makeMockJwt(nowSec + 60);
+
+  // 上游刷新失败（如 500）
+  globalThis.fetch = async () => new Response("internal error", { status: 500 });
+
+  const account = { id: "proactive-fail", userId: "u1", accessToken: expiringToken, refreshToken: "rt-1" };
+  const p = new WorkBuddyProvider(
+    { id: "wb-proactive-fail", config: { accounts: [account] } },
+    {}
+  );
+
+  const token = await p.getActiveToken(account);
+  assert.equal(token, expiringToken, "fallback to best effort available token when proactive refresh fails");
+});
+
 
