@@ -75,66 +75,9 @@ export async function assertPublicHttps(rawUrl, label) {
     if (!addresses.length || addresses.some(({ address }) => isPrivateHostname(address))) {
       throw new Error(`Refusing to fetch non-public upstream URL for ${label}`);
     }
-
-    // DNS pinning：用解析出的第一个 IP 替换 hostname（向后兼容清理：移除旧接口）
-    const pinnedIp = addresses[0].address;
-    const pinnedHost = addresses[0].family === 6 ? `[${pinnedIp}]` : pinnedIp;
-    const pinnedUrl = new URL(u.toString());
-    pinnedUrl.hostname = pinnedHost;
-
-    return { url: pinnedUrl, sni: u.hostname };
   }
 
-  // 已经是 IP 字面量，无需 pinning
-  return { url: u, sni: null };
-}
-
-/**
- * DNS rebinding 防护版本：验证 URL 并返回 DNS-pinned 结果。
- *
- * 防护原理：
- * 1. 对域名执行 DNS 解析并验证所有 IP 为公网地址
- * 2. 将 hostname 替换为解析出的第一个 IP（DNS pinning）
- * 3. 返回 pinned URL + 原始 hostname（用于 TLS SNI 和 Host header）
- *
- * 这样可以避免 TOCTOU 窗口：验证通过后、fetch 执行前，攻击者无法通过修改 DNS
- * 将请求重定向到内网（因为 fetch 直接使用已验证的 IP）。
- *
- * @param {string} rawUrl - 待验证的 URL
- * @param {string} label - 标识符（用于错误消息）
- * @returns {Promise<{url: URL, sni: string|null}>}
- *   - url: DNS-pinned URL（域名已替换为 IP）
- *   - sni: 原始 hostname（用于 TLS SNI），IP 字面量时为 null
- */
-export async function assertPublicHttpsWithPinning(rawUrl, label) {
-  let u = null;
-  try { u = new URL(rawUrl); } catch { /* fallthrough */ }
-  if (!u || u.protocol !== "https:" || isPrivateHostname(u.hostname)) {
-    throw new Error(`Refusing to fetch non-public upstream URL for ${label}`);
-  }
-
-  if (!ipaddr.isValid(unbracket(u.hostname))) {
-    let addresses;
-    try {
-      addresses = await lookupCached(u.hostname);
-    } catch {
-      throw new Error(`Refusing to fetch unresolved upstream URL for ${label}`);
-    }
-    if (!addresses.length || addresses.some(({ address }) => isPrivateHostname(address))) {
-      throw new Error(`Refusing to fetch non-public upstream URL for ${label}`);
-    }
-
-    // DNS pinning：用解析出的第一个 IP 替换 hostname
-    const pinnedIp = addresses[0].address;
-    const pinnedHost = addresses[0].family === 6 ? `[${pinnedIp}]` : pinnedIp;
-    const pinnedUrl = new URL(u.toString());
-    pinnedUrl.hostname = pinnedHost;
-
-    return { url: pinnedUrl, sni: u.hostname };
-  }
-
-  // 已经是 IP 字面量，无需 pinning
-  return { url: u, sni: null };
+  return u;
 }
 
 // 护栏只校验【初始 URL】。fetch 默认 redirect:"follow" 会自行跟随后续跳转，

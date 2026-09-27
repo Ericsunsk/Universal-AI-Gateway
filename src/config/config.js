@@ -1,12 +1,6 @@
 export const VERSION = "2.5.0";
 import { validateGatewayConfig } from "./schema.js";
 import { log } from "../logging/logger.js";
-import crypto from "node:crypto";
-
-// 生成随机十六进制字符串（用于自动生成 CRON_SECRET，P2-8）
-function randomHex(length) {
-  return crypto.randomBytes(length).toString("hex");
-}
 
 let cachedConfig = null;
 let cachedConfigTimestamp = 0;
@@ -61,7 +55,7 @@ export function getDefaultConfig(env) {
   return {
     config_version: 1,
     master_key: masterKey,
-    cron_secret: env.CRON_SECRET || `cron-${randomHex(32)}`,
+    cron_secret: env.CRON_SECRET || "",
     // NaN 护栏：非法值（如 "abc"）回退 0（不剪枝）。否则 NaN 会绕过 `<= 0` 的
     // “全量保真”分支、让 maxWindow/cutIdx 变成 NaN，静默裁掉整段历史。
     max_context_turns: parseMaxContextTurns(env.MAX_CONTEXT_TURNS),

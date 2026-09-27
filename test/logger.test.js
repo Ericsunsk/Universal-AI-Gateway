@@ -288,7 +288,10 @@ test("log level is resolved at emit time, not construction time", () => {
 // 故 sanitize 需在值侧做纵深防御：URL 形态的字符串也要打码敏感 query 参数。
 test("sanitize redacts sensitive query params in URL-shaped values", () => {
   assert.equal(sanitize({ path: "/checkin?secret=SUPERSECRET123" }).path, "/checkin?secret=****");
+  assert.equal(sanitize({ path: "/checkin?cron_secret=SUPERSECRET123" }).path, "/checkin?cron_secret=****");
   assert.equal(sanitize({ path: "/v1/messages?api_key=sk-live-X" }).path, "/v1/messages?api_key=****");
+  assert.equal(sanitize({ path: "/x?access_token=tok_1&page=2" }).path, "/x?access_token=****&page=2");
+  assert.equal(sanitize({ path: "/x?refresh_token=tok_2&limit=5" }).path, "/x?refresh_token=****&limit=5");
   assert.equal(sanitize({ path: "/x?token=tok_1&page=2" }).path, "/x?token=****&page=2");
   assert.equal(sanitize({ path: "/x?secret=a&secret=b" }).path, "/x?secret=****&secret=****");
   // 非敏感参数保留原值（排障需要）

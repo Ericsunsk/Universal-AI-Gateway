@@ -134,47 +134,6 @@ test("urlGuard blocks private hosts, allows public https", async () => {
   assert.ok(await assertPublicHttps("https://api.openai.com/v1", "t"));
 });
 
-test("assertPublicHttpsWithPinning returns DNS-pinned URL for domains", async () => {
-  const { assertPublicHttpsWithPinning } = await import("../src/providers/urlGuard.js");
-
-  // 真实域名测试（api.anthropic.com 应解析到公网 IP）
-  const result = await assertPublicHttpsWithPinning("https://api.anthropic.com/v1/messages", "test");
-  assert.ok(result.url, "should return pinned URL");
-  assert.ok(result.sni, "should return original hostname for SNI");
-  assert.equal(result.sni, "api.anthropic.com", "SNI should be original hostname");
-
-  // pinned URL 的 hostname 应该是 IP 地址
-  const pinnedHost = result.url.hostname;
-  assert.notEqual(pinnedHost, "api.anthropic.com", "hostname should be replaced with IP");
-  // 验证是有效的 IP（IPv4 或 IPv6）
-  const isIpv4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(pinnedHost);
-  const isIpv6 = pinnedHost.startsWith("[") && pinnedHost.endsWith("]");
-  assert.ok(isIpv4 || isIpv6, `pinned hostname should be IP, got: ${pinnedHost}`);
-
-  // 路径应该保持不变
-  assert.equal(result.url.pathname, "/v1/messages", "path should be preserved");
-});
-
-test("assertPublicHttpsWithPinning handles IP literals without pinning", async () => {
-  const { assertPublicHttpsWithPinning } = await import("../src/providers/urlGuard.js");
-
-  // IP 字面量不需要 DNS pinning
-  const result = await assertPublicHttpsWithPinning("https://8.8.8.8/test", "test");
-  assert.equal(result.url.hostname, "8.8.8.8", "IP literal should remain unchanged");
-  assert.equal(result.sni, null, "IP literal should have null SNI");
-});
-
-test("assertPublicHttpsWithPinning rejects domains resolving to private IPs", async () => {
-  const { assertPublicHttpsWithPinning } = await import("../src/providers/urlGuard.js");
-
-  // localhost 应该被拒绝（解析到 127.0.0.1）
-  await assert.rejects(
-    () => assertPublicHttpsWithPinning("https://localhost/test", "test"),
-    /non-public/,
-    "localhost should be rejected"
-  );
-});
-
 test("chunked oversized request body is rejected before upstream dispatch", async () => {
   const { default: app, MAX_BODY_BYTES } = await import("../src/index.js");
   const chunk = new Uint8Array(MAX_BODY_BYTES + 1);

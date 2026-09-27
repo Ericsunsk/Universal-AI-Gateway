@@ -3,12 +3,6 @@ import worker, { MAX_BODY_BYTES } from "../src/index.js";
 import { createKvFromEnv } from "../src/kv/index.js";
 import { log } from "../src/logging/logger.js";
 
-// 生产环境压制 stack trace：避免泄露文件系统路径、内部函数名和环境变量片段。
-// 开发环境保留 stack trace 便于调试（默认 stackTraceLimit=10）。
-if (process.env.NODE_ENV === "production") {
-  Error.stackTraceLimit = 0;
-}
-
 export const config = {
   maxDuration: 300, // 允许最大 300 秒执行时长（适配长时间思考模型与深度代码审计）
 };

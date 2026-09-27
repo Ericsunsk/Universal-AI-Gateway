@@ -158,6 +158,8 @@ export const log = {
  * @param {string[]} sensitiveKeys - 敏感字段名（归一化后匹配）
  * @returns {Object} 脱敏后的对象
  */
+// 形如 `...?a=1&b=2` 且不含空白（排除自然语言里的问号）才按 URL 处理。
+const URLISH_QUERY = /\?[^\s]*=[^\s]*/;
 const SANITIZE_MAX_DEPTH = 10;
 const sanitizeCache = new WeakMap();
 
@@ -226,9 +228,6 @@ export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "s
   return result;
 }
 
-// 形如 `...?a=1&b=2` 且不含空白（排除自然语言里的问号）才按 URL 处理。
-const URLISH_QUERY = /\?[^\s]*=[^\s]*/;
-
 /**
  * 打码 URL/路径中敏感 query 参数的值，保留参数名（便于排障时看出「传了什么」）。
  * 例：`/checkin?secret=abc123&x=1` -> `/checkin?secret=****&x=1`
@@ -248,8 +247,9 @@ function redactUrlQuery(value, normKeys, norm) {
     }
     const name = pair.slice(0, eq);
     const nn = norm(name);
-    // 只认「参数名整体等于敏感名」，避免子串误伤（如 page 含 key 的子串）。
-    if (normKeys.some((k) => (k === "key" ? nn === "key" : nn === k))) {
+    // 敏感判定：key 精确匹配（防止 monkey/page 误杀）；其余复合凭据（access_token, cron_secret, apiKey 等）按子串与后缀命中
+    const hit = nn === "key" || normKeys.some((k) => (k === "key" ? nn === "key" : nn.includes(k)));
+    if (hit) {
       didHit = true;
       pairs.push(`${name}=****`);
     } else {
