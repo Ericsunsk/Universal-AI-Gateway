@@ -195,8 +195,10 @@ export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "s
     if (hasSensitive && hasNested) break; // 早期退出
   }
 
-  // 快速路径：无敏感字段且无嵌套 → 零拷贝返回
-  if (!hasSensitive && !hasNested) {
+  // 快速路径：无敏感字段且无嵌套 → 零拷贝返回。
+  // 注意：字符串值仍可能是 URL 形态（如 req.url）而携带敏感 query 参数，
+  // 故必须先确认没有需要值侧脱敏的字符串，否则会绕过 redactUrlQuery。
+  if (!hasSensitive && !hasNested && !entries.some(([, v]) => typeof v === "string" && URLISH_QUERY.test(v))) {
     if (depth === 0) sanitizeCache.set(obj, obj);
     return obj;
   }
@@ -236,13 +238,23 @@ function redactUrlQuery(value, normKeys, norm) {
   const qi = value.indexOf("?");
   const head = value.slice(0, qi);
   const query = value.slice(qi + 1);
-  const masked = query.split("&").map((pair) => {
+  const pairs = [];
+  let didHit = false;
+  for (const pair of query.split("&")) {
     const eq = pair.indexOf("=");
-    if (eq === -1) return pair;
+    if (eq === -1) {
+      pairs.push(pair);
+      continue;
+    }
     const name = pair.slice(0, eq);
     const nn = norm(name);
-    const hit = normKeys.some((k) => (k === "key" ? nn === "key" : nn.includes(k))) || nn === "key";
-    return hit ? `${name}=****` : pair;
-  }).join("&");
-  return `${head}?${masked}`;
+    // 只认「参数名整体等于敏感名」，避免子串误伤（如 page 含 key 的子串）。
+    if (normKeys.some((k) => (k === "key" ? nn === "key" : nn === k))) {
+      didHit = true;
+      pairs.push(`${name}=****`);
+    } else {
+      pairs.push(pair);
+    }
+  }
+  return didHit ? `${head}?${pairs.join("&")}` : value;
 }
