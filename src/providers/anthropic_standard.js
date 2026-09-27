@@ -22,7 +22,7 @@ export class AnthropicStandardProvider {
 
   // Anthropic 原生 messages
   async callMessages(payload, options = {}) {
-    assertPublicHttps(this.baseUrl, `${this.id} baseUrl`);
+    await assertPublicHttps(this.baseUrl, `${this.id} baseUrl`);
     const url = `${this.baseUrl}/v1/messages`;
     const headers = {
       "Content-Type": "application/json",

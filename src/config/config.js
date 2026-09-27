@@ -179,15 +179,16 @@ async function refreshConfig(env) {
       if (raw) {
         let parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
         const defaults = getDefaultConfig(env);
-        // 校验策略：**尽力校验（fail-open）**。
-        // 校验失败仅告警并继续使用未清洗的对象——KV 中的一条脏配置不应让整个网关
-        // 无法启动；结构性缺失由下方 backfillMissingRoutes 就地回填默认值兜底。
-        // 若未来改为 fail-closed（回退 defaults），须同步更新此注释与相关测试。
+        // Schema 失败时回退到最近一次有效配置或默认配置，避免执行未经验证的 KV 数据。
         const validation = validateGatewayConfig(parsed);
         if (!validation.success) {
-          log.warn("GATEWAY_CONFIG schema validation failed, proceeding with raw config", {
+          log.warn("GATEWAY_CONFIG schema validation failed; using fallback config", {
             errors: validation.errors,
           });
+          const fallback = cachedConfig || defaults;
+          cachedConfig = fallback;
+          cachedConfigTimestamp = now;
+          return fallback;
         } else if (validation.output) {
           // 注意：looseObject 会返回新对象，后续 in-place 变更（backfill/master_key）
           // 作用于该副本，最终整体赋给 cachedConfig，无引用丢失问题。
@@ -286,7 +287,6 @@ function warnIfCronMisconfigured(cronSecret) {
     "Set CRON_SECRET, or comment out the \"crons\" block in vercel.json (docs/SECURITY.md 解决方案 A/B)."
   );
 }
-
 
 
 

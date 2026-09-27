@@ -130,8 +130,30 @@ test("urlGuard blocks private hosts, allows public https", async () => {
   assert.equal(isPrivateHostname("172.15.0.1"), false, "172.15 is public");
   assert.equal(isPrivateHostname("172.32.0.1"), false, "172.32 is public");
   assert.equal(isPrivateHostname("api.anthropic.com"), false);
-  assert.throws(() => assertPublicHttps("http://api.openai.com/v1", "t"), /non-public/);
-  assert.ok(assertPublicHttps("https://api.openai.com/v1", "t"));
+  await assert.rejects(() => assertPublicHttps("http://api.openai.com/v1", "t"), /non-public/);
+  assert.ok(await assertPublicHttps("https://api.openai.com/v1", "t"));
+});
+
+test("chunked oversized request body is rejected before upstream dispatch", async () => {
+  const { default: app, MAX_BODY_BYTES } = await import("../src/index.js");
+  const chunk = new Uint8Array(MAX_BODY_BYTES + 1);
+  const request = new Request("https://gateway.test/v1/messages", {
+    method: "POST",
+    headers: { Authorization: "Bearer k1" },
+    duplex: "half",
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(chunk);
+        controller.close();
+      }
+    })
+  });
+  const response = await app.fetch(request, {
+    API_KEY: "k1",
+    MASTER_KEY: "master",
+    GATEWAY_KV: { limit: async () => ({ allowed: true, remaining: 1, resetAt: 0, retryAfter: 0 }), get: async () => null, put: async () => {} }
+  });
+  assert.equal(response.status, 413);
 });
 
 // 非十进制 / 混合进制 IPv4 字面量：字符串前缀匹配拦不住，必须在 URL 解析层归一化后判定。
@@ -147,19 +169,15 @@ test("urlGuard blocks encoded-literal IP bypasses that defeat string prefix matc
     "https://127.1/",             // 短式回环
   ];
   for (const u of encoded) {
-    assert.throws(() => assertPublicHttps(u, "t"), /non-public/, `${u} must be refused`);
+    await assert.rejects(() => assertPublicHttps(u, "t"), /non-public/, `${u} must be refused`);
   }
   // 尾部点 / IPv6 包裹形态
-  assert.throws(() => assertPublicHttps("https://10.0.0.1./", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://[::ffff:127.0.0.1]/", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://[::ffff:169.254.169.254]/", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://[::ffff:7f00:1]/", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://[::1]/", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://[fc00::1]/", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://[fe80::1]/", "t"), /non-public/);
+  for (const u of ["https://10.0.0.1./", "https://[::ffff:127.0.0.1]/", "https://[::ffff:169.254.169.254]/", "https://[::ffff:7f00:1]/", "https://[::1]/", "https://[fc00::1]/", "https://[fe80::1]/"]) {
+    await assert.rejects(() => assertPublicHttps(u, "t"), /non-public/);
+  }
   // CGNAT 100.64/10
-  assert.throws(() => assertPublicHttps("https://100.64.0.1/", "t"), /non-public/);
-  assert.throws(() => assertPublicHttps("https://100.127.255.255/", "t"), /non-public/);
+  await assert.rejects(() => assertPublicHttps("https://100.64.0.1/", "t"), /non-public/);
+  await assert.rejects(() => assertPublicHttps("https://100.127.255.255/", "t"), /non-public/);
 });
 
 // RFC 6890 特殊用途地址中不可全局路由的全部区间：护栏必须 fail-closed。
@@ -231,7 +249,7 @@ test("urlGuard does not false-positive on legitimate public upstreams", async ()
   }
   for (const u of ["https://api.openai.com/v1", "https://api.anthropic.com/v1",
     "https://open.bigmodel.cn/api/paas/v4", "https://[2606:4700::1111]/v1"]) {
-    assert.ok(assertPublicHttps(u, "t"), `${u} must be allowed`);
+    assert.ok(await assertPublicHttps(u, "t"), `${u} must be allowed`);
   }
 });
 

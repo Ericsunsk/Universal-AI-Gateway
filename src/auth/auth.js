@@ -1,5 +1,14 @@
 import { corsHeaders } from "../http/headers.js";
 
+function hashString32(str) {
+  let hash = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
 // 常数时间字符串比较：先比较长度，再对每个字符做等价的按位累加，避免 === 短路泄露前缀信息。
 // 攻击者通过响应耗时逐字节推断 token 的时序侧信道即被消除。
 export function timingSafeEqual(a, b) {
@@ -41,14 +50,14 @@ export function authenticateAccess(request, config, { model = null, requireMaste
 
   // 1. 验证 Master Key
   if (config.master_key && timingSafeEqual(token, config.master_key)) {
-    return { ok: true, principal: { isMaster: true, role: "admin", name: "Master Admin" } };
+    return { ok: true, principal: { isMaster: true, role: "admin", name: "Master Admin", rateLimitId: hashString32(token) } };
   }
 
   // 1.1 验证 Cron Secret (仅在 allowCron=true 时启用)
   // 顺序必须在 requireMaster 之前：/checkin 用 {requireMaster:true, allowCron:true}
   // 同时接受 master 与 cron（cron 降权 isMaster:false）；其他 admin 接口 allowCron=false，cron 落到下面的 requireMaster 被拒
   if (config.cron_secret && timingSafeEqual(token, config.cron_secret) && allowCron) {
-    return { ok: true, principal: { isMaster: false, role: "cron", name: "Cron Trigger" } };
+    return { ok: true, principal: { isMaster: false, role: "cron", name: "Cron Trigger", rateLimitId: hashString32(token) } };
   }
 
   // 1.2 当 requireMaster 时：仅 Master Key 可访问（cron 已在上一步按 allowCron 处理）
@@ -93,7 +102,12 @@ export function authenticateAccess(request, config, { model = null, requireMaste
 
     return {
       ok: true,
-      principal: { isMaster: false, role: keyObj.role || "client", name: keyObj.name || "Client" }
+      principal: {
+        isMaster: false,
+        role: keyObj.role || "client",
+        name: keyObj.name || "Client",
+        rateLimitId: hashString32(token)
+      }
     };
   }
 

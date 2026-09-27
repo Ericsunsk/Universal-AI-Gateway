@@ -107,6 +107,13 @@ test("extractRateLimitKey prioritizes API key over IP", () => {
   assert.equal(key2, "ip:1.2.3.4", "should use IP for unauthenticated");
 });
 
+test("extractRateLimitKey isolates API keys with the same display name", () => {
+  const req = new Request("https://x/y", { headers: { "x-forwarded-for": "1.2.3.4" } });
+  const keyA = extractRateLimitKey(req, { name: "Client", rateLimitId: "token-a" });
+  const keyB = extractRateLimitKey(req, { name: "Client", rateLimitId: "token-b" });
+  assert.notEqual(keyA, keyB);
+});
+
 test("platformClientIp handles multi-hop proxies and Cloudflare correctly", () => {
   // 1. Cloudflare + Render 多级代理：有 cf-ray 时优先信任 cf-connecting-ip
   const cfReq = new Request("https://x/y", {
@@ -280,5 +287,4 @@ test("createUpstashKv preserves persistence seam and does not leak redis", async
   assert.equal(typeof kv.put, "function");
   assert.equal(typeof kv.delete, "function");
 });
-
 

@@ -88,3 +88,17 @@ console.log(JSON.stringify({ master: cfg.master_key, puts }));
   assert.equal(out.master, "sk-master", "falls back to defaults");
   assert.equal(out.puts, 0, "a rejected read must NOT be treated as a first run");
 });
+
+test("refreshConfig rejects malformed KV config and uses defaults without writing", () => {
+  const out = runScenario(`
+let puts = 0;
+const env = { API_KEY: "sk-test", MASTER_KEY: "sk-master", CRON_SECRET: "cs-test",
+  GATEWAY_KV: { getWithStatus: async () => ({ value: JSON.stringify({ providers: "invalid" }), ok: true }),
+    get: async () => null, put: async () => { puts++; } } };
+const cfg = await getConfig(env, true);
+console.log(JSON.stringify({ master: cfg.master_key, providers: Array.isArray(cfg.providers), puts }));
+`);
+  assert.equal(out.master, "sk-master");
+  assert.equal(out.providers, true);
+  assert.equal(out.puts, 0);
+});

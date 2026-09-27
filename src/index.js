@@ -17,6 +17,33 @@ function bodyTooLarge(request) {
   return Number.isFinite(len) && len > MAX_BODY_BYTES;
 }
 
+class RequestBodyTooLargeError extends Error {}
+
+async function readJsonBody(request) {
+  if (!request.body) return await request.json();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY_BYTES) throw new RequestBodyTooLargeError("Request body too large");
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(body));
+}
+
 export default {
   // HTTP 请求核心分发入口
   // 整个请求在 ALS 作用域内运行：任意深度的 log.* 自动携带 trace_id。
@@ -249,8 +276,17 @@ async function authenticateAndParseRequest(request, env, config, { defaultModel 
 
   let body;
   try {
-    body = await request.json();
-  } catch {
+    body = await readJsonBody(request);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return {
+        ok: false,
+        response: new Response(errorBody("Request body too large"), {
+          status: 413,
+          headers: { "Content-Type": "application/json", ...corsHeaders }
+        })
+      };
+    }
     return {
       ok: false,
       response: new Response(errorBody("Invalid JSON body"), {

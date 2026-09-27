@@ -51,6 +51,9 @@ export const RATE_LIMIT_PRESETS = {
  */
 export function extractRateLimitKey(request, principal = null) {
   // 1. 已认证用户：使用 API Key 哈希（避免泄露密钥）
+  if (principal?.rateLimitId) {
+    return `key:${principal.rateLimitId}`;
+  }
   if (principal?.name) {
     const hash = hashString32(principal.name);
     return `key:${hash}`;

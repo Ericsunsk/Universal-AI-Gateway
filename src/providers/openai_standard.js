@@ -21,7 +21,7 @@ export class OpenAIStandardProvider {
   }
 
   async callChat(payload, options = {}) {
-    assertPublicHttps(this.baseUrl, `${this.id} baseUrl`);
+    await assertPublicHttps(this.baseUrl, `${this.id} baseUrl`);
     const url = `${this.baseUrl}/chat/completions`;
     const headers = {
       "Content-Type": "application/json",
@@ -44,7 +44,7 @@ export class OpenAIStandardProvider {
     // 部分兼容服务支持 /dashboard/billing/credit_grants 或类似接口
     if (this.config.balanceUrl) {
       try {
-        assertPublicHttps(this.config.balanceUrl, `${this.id} balanceUrl`);
+        await assertPublicHttps(this.config.balanceUrl, `${this.id} balanceUrl`);
         const resp = await fetch(this.config.balanceUrl, {
           ...outboundFetchInit(`${this.id} balanceUrl`),
           headers: { "Authorization": `Bearer ${this.apiKey}` }

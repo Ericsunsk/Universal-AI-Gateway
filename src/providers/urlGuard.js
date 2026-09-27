@@ -4,6 +4,7 @@
 // 策略：仅允许 https 公网；拒绝 localhost/内网/metadata（169.254.169.254）。
 // 依托工业级 ipaddr.js 库处理 IPv4/IPv6 RFC 6890 / 4291 / CGNAT 各种边界，不做脆弱的手写位运算。
 import ipaddr from "ipaddr.js";
+import dns from "node:dns/promises";
 
 // 去掉 IPv6 字面量的方括号（new URL 的 hostname 形如 "[::ffff:7f00:1]"）。
 function unbracket(hostname) {
@@ -34,11 +35,22 @@ export function isPrivateHostname(hostname) {
   return false;
 }
 
-export function assertPublicHttps(rawUrl, label) {
+export async function assertPublicHttps(rawUrl, label) {
   let u = null;
   try { u = new URL(rawUrl); } catch { /* fallthrough */ }
   if (!u || u.protocol !== "https:" || isPrivateHostname(u.hostname)) {
     throw new Error(`Refusing to fetch non-public upstream URL for ${label}`);
+  }
+  if (!ipaddr.isValid(unbracket(u.hostname))) {
+    let addresses;
+    try {
+      addresses = await dns.lookup(u.hostname, { all: true, verbatim: true });
+    } catch {
+      throw new Error(`Refusing to fetch unresolved upstream URL for ${label}`);
+    }
+    if (!addresses.length || addresses.some(({ address }) => isPrivateHostname(address))) {
+      throw new Error(`Refusing to fetch non-public upstream URL for ${label}`);
+    }
   }
   return u;
 }
