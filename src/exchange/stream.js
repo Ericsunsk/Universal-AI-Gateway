@@ -153,6 +153,22 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
     const writeAll = async (frames) => {
       for (const f of frames) await writer.write(textEncoder.encode(f));
     };
+    // 冲洗 DSML 缓冲区中挂起的事件（文本增量 / 合成工具调用）。
+    // 正常收尾与异常断流都必须调用：缓冲区里可能已解析到一半的工具调用，
+    // 丢弃会让客户端看到「工具调用凭空消失」；异常路径更需保留以便归因。
+    const flushDsml = async () => {
+      const flushed = dsmlParser.flush();
+      for (const ev of flushed) {
+        if (ev.type === "text") {
+          await writeAll(blockState.applyEmission({ kind: "text", text: ev.text }));
+        } else if (ev.type === "tool_use") {
+          await writeAll(blockState.applyEmission({
+            kind: "tool_use",
+            calls: [{ id: ev.id, name: ev.name, args: JSON.stringify(ev.args), ident: true }]
+          }));
+        }
+      }
+    };
     // 本次响应见到的最大缓存命中 token 数（上游 usage 逐 chunk 到达，取最大记一次）
     let maxCachedTokens = 0;
     // 真实输出 token 数：优先采信上游 usage.completion_tokens（终局 chunk 常带），
@@ -221,17 +237,7 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       }
 
       // 流读取完毕，冲洗 DSML 缓冲区中挂起的所有内容
-      const flushedEvents = dsmlParser.flush();
-      for (const ev of flushedEvents) {
-        if (ev.type === "text") {
-          await writeAll(blockState.applyEmission({ kind: "text", text: ev.text }));
-        } else if (ev.type === "tool_use") {
-          await writeAll(blockState.applyEmission({
-            kind: "tool_use",
-            calls: [{ id: ev.id, name: ev.name, args: JSON.stringify(ev.args), ident: true }]
-          }));
-        }
-      }
+      await flushDsml();
 
       buffer = tail.text;
 
@@ -318,6 +324,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
         }
         const interruptText = `\n[Gateway Warning: Upstream stream interrupted (${err.message || "EOF"})]\n`;
         await writeAll(blockState.textDelta(interruptText));
+        // 断流前 DSML 缓冲区可能已解析到一半的工具调用：与正常收尾同样冲洗，
+        // 否则客户端看到工具调用凭空消失，且无从归因是上游中断所致。
+        try { await flushDsml(); } catch {}
         await writeAll(blockState.close());
         // 错误路径同样发射真实计数（含警告文本），与正常闭环保持一致，避免硬编码漂移。
         const errOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
@@ -329,6 +338,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
         };
         await writer.write(textEncoder.encode(`event: message_delta\ndata: ${JSON.stringify({
           type: "message_delta",
+          // 线路协议约束：Anthropic 无「中断」枚举，只能发 end_turn 才能让客户端正常闭环。
+          // 中断信号由正文内的 "[Gateway Warning: Upstream stream interrupted ...]" 承载——
+          // 客户端若需区分正常结束与中断，应扫描该标记，而非依赖 stop_reason。
           delta: { stop_reason: "end_turn", stop_sequence: null },
           usage: errUsage
         })}\n\n`));

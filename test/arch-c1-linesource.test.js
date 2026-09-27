@@ -234,4 +234,44 @@ test("iterSseParsedChunks correctly parses multiline SSE data containing newline
   assert.equal(items[0].parsed.choices[0].delta.content, "line 1\nline 2");
 });
 
+// ---- 结尾 flush TextDecoder：流在字符中间结束时不得静默丢字节 ----
+// 触发条件很窄，必须同时满足：
+//   1) 流在某个多字节字符【中途】结束（末拍只携带该字符的一部分字节）
+//   2) 其后不再有任何数据 —— 否则下一次 decode({stream:true}) 会自行补全该字符
+// 此时解码器持有永不补全的 pending 字节，只有无参 decode() 能吐出它们。
+// 不 flush 则静默丢弃（实测整段内容凭空消失）；flush 后转为 U+FFFD，损坏可见可归因。
+// rawBuffer 正是「上游返回非 SSE 整块 JSON」的兜底数据源，静默丢字节会让兜底解析出残缺 JSON。
+test("iterSseParsedChunks flushes decoder when stream ends mid-character", async () => {
+  const bytes = enc.encode("好"); // 3 字节
+  const upstream = sseResponse([
+    enc.encode('{"choices":[{"delta":{"content":"'), // preamble，不含闭合引号
+    bytes.slice(0, 1),                                // 仅「好」的第 1 字节，流到此结束
+  ]);
+  const tail = { text: "" };
+  await collect(upstream.body.getReader(), { tail });
+  // 关键断言：末拍 pending 字节必须浮现（U+FFFD 或完整字符），而非被静默丢弃。
+  assert.ok(
+    tail.text.includes("�") || tail.text.includes("好"),
+    `pending bytes must surface (as U+FFFD or the char), got: ${JSON.stringify(tail.text)}`
+  );
+});
+
+// ---- rawBuffer 裁剪必须对齐 data: 边界 ----
+// 触发条件：某个 data: 标记之后紧跟的正文超过裁剪窗口（>RAW_TAIL_MAX）。
+// 原先按字节直接 slice(-4096)，截点会切掉该标记本身 → lastDataIdx === -1
+// → 兜底正文被整体丢弃（实测 tail 长度为 0，内容凭空消失）。
+// 对齐到「最后一个 data: 标记」后，标记与其后正文始终同在，正文可完整还原。
+test("iterSseParsedChunks keeps the data: anchor when the trailing body exceeds the trim window", async () => {
+  const first = `data: ${JSON.stringify({ choices: [{ delta: { content: "A" } }] })}\n\n`;
+  const filler = "C".repeat(5000); // 使标记后的正文远超 RAW_TAIL_MAX
+  const lastLine = `data: {"choices":[{"delta":{"content":"${filler}KEEP"}}]}`;
+  const upstream = sseResponse([first, lastLine]);
+  const tail = { text: "" };
+  await collect(upstream.body.getReader(), { tail });
+
+  // 关键断言：兜底正文不得被整体丢弃。
+  assert.ok(tail.text.length > 0, "兜底正文不得为空（裁剪切掉 data: 标记会使其全丢）");
+  assert.ok(tail.text.includes("KEEP"), `末段正文必须保留，got len=${tail.text.length}`);
+});
+
 

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { containsDsml, parseDsmlInvocations, stripDsml, DsmlStreamParser } from "../src/exchange/dsml.js";
+import { encodeAnthropicResponse } from "../src/exchange/stream.js";
 
 test("containsDsml correctly detects DSML markup variations", () => {
   assert.equal(containsDsml("Hello world"), false);
@@ -183,4 +184,44 @@ test("encodeAnthropicResponse(stream:false) intercepts leaked DSML and populates
   assert.ok(!textBlock.text.includes("DSML"));
 });
 
+// DSML 标记用码点拼装，避免源码中出现字面全角竖线（易被工具链破坏）。
+const BAR = "｜"; // ｜
+const OPEN = `<${BAR}${BAR}DSML${BAR}${BAR}`;
 
+function sseThenError(textChunk) {
+  const enc = new TextEncoder();
+  let sent = false;
+  return new ReadableStream({
+    pull(c) {
+      if (!sent) {
+        sent = true;
+        // 必须是【完整 SSE 事件】（空行收尾），否则解析器不会派发，
+        // 内容会滞留在 iterSseParsedChunks 内部，错误路径根本看不到它。
+        c.enqueue(enc.encode("data: " + JSON.stringify({
+          choices: [{ delta: { content: textChunk } }]
+        }) + "\n\n"));
+        return;
+      }
+      c.error(new Error("upstream reset"));
+    },
+  });
+}
+
+test("flushes pending DSML buffer when upstream errors mid-stream", async () => {
+  // push() 会把「疑似 DSML 开头的尾段」挂起，等待后续增量确认是否为 DSML。
+  // 上游恰好死在挂起状态时，只有 flush() 能放出该尾段；不 flush 则这段正文静默丢失。
+  const pendingFrag = "Working on it.\n\n" + OPEN.slice(0, 4); // 形如 "<｜｜D"，会被挂起
+  const upstream = new Response(sseThenError(pendingFrag), {
+    headers: { "Content-Type": "text/event-stream" },
+  });
+  const res = encodeAnthropicResponse({ upstream, model: "m", stream: true });
+  const text = await res.text();
+
+  // 中断信号必须存在（客户端据此归因）
+  assert.ok(text.includes("interrupted"), "中断提示必须出现");
+  // 挂起的尾段必须被放出，不得丢失
+  assert.ok(
+    text.includes("Working on it.") && text.includes(OPEN.slice(0, 4)),
+    `挂起的尾段必须被 flush 出来, got: ${text.slice(-400)}`
+  );
+});

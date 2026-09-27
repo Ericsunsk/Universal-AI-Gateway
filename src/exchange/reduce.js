@@ -11,6 +11,10 @@ import { createParser } from "eventsource-parser";
 import { SYNTHETIC_THINKING_SIGNATURE } from "./thinking.js";
 import { log } from "../logging/logger.js";
 
+// 已派发 SSE 事件后，rawBuffer 只需保留的尾部上限（非 SSE 正文兜底用）。
+// 上限存在的意义是不让 rawBuffer 随长流无限增长；裁剪必须对齐 data: 边界，见使用处。
+const RAW_TAIL_MAX = 4096;
+
 // 纯函数：把单个已解析的 OpenAI SSE chunk 归约为一条「发射指令」。
 // 不做任何 I/O，只做分类与字段提取 —— 这是流式转译里最易回归、也最该被测试的部分。
 // 返回 null 表示该 chunk 无需发射任何事件（如空 delta、[DONE] 已在外层过滤）。
@@ -540,13 +544,28 @@ export async function* iterSseParsedChunks(reader, options = {}) {
       if (onBytes) onBytes(value);
       const text = decoder.decode(value, { stream: true });
       rawBuffer += text;
-      if (dispatchedCount > 0 && rawBuffer.length > 4096) {
-        rawBuffer = rawBuffer.slice(rawBuffer.length - 4096);
+      // 已派发过 SSE 事件后，尾部缓冲只需保留「最后一段非 SSE 正文」用于兜底。
+      // 但不可直接按字节截断：截点可能落在正文中间、甚至切掉最后一处 "data:" 标记，
+      // 使 tail 提取失效（lastDataIdx === -1 → 兜底正文全丢）。
+      // 故优先按「最后一个 data: 标记」对齐裁剪，保证标记与其后完整正文始终同在；
+      // 无标记时（纯非 SSE 正文）保留有限尾部即可——此时 tail 提取本就不依赖标记。
+      if (dispatchedCount > 0 && rawBuffer.length > RAW_TAIL_MAX) {
+        const cut = rawBuffer.lastIndexOf("\ndata:", rawBuffer.length - RAW_TAIL_MAX);
+        rawBuffer = cut > 0 ? rawBuffer.slice(cut) : rawBuffer.slice(-RAW_TAIL_MAX);
       }
       parser.feed(text);
       while (queue.length > 0) {
         yield queue.shift();
       }
+    }
+
+    // flush 解码器中挂起的字节：上游若在流的最后一拍截断多字节字符
+    // （连接被砍 / 进程崩溃），这些 pending 字节会被静默丢弃。
+    // rawBuffer 正是「上游返回非 SSE 整块 JSON」的兜底数据源，丢字节会让兜底解析出残缺 JSON。
+    const pending = decoder.decode();
+    if (pending) {
+      rawBuffer += pending;
+      parser.feed(pending);
     }
 
     parser.feed("\n\n");
