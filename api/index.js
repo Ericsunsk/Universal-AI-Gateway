@@ -27,7 +27,25 @@ export const ENV_ALLOWLIST = new Set([
   "LOG_LEVEL", "LOG_FORMAT", "NODE_ENV",
 ]);
 
+// 进程级环境与 KV 上下文单例缓存：
+// 环境变量在 Node.js / Serverless 容器运行时保持不变，
+// 缓存可彻底消除每请求重新读取白名单 env、重新初始化 Upstash Redis 客户端与 Limiter 的 GC 开销。
+let cachedEnv = null;
+let cachedEnvFingerprint = "";
+
 function getEnvContext() {
+  let fp = "";
+  for (const key of ENV_ALLOWLIST) {
+    const val = process.env[key];
+    if (val !== undefined) {
+      fp += `${key}=${val};`;
+    }
+  }
+
+  if (cachedEnv && cachedEnvFingerprint === fp) {
+    return cachedEnv;
+  }
+
   // 只复制白名单内的环境变量，不泄露未声明的机密
   const env = {};
   for (const key of ENV_ALLOWLIST) {
@@ -40,6 +58,9 @@ function getEnvContext() {
   const kv = createKvFromEnv(env);
   env.GATEWAY_KV = kv;
   env.WORKBUDDY_KV = kv;
+
+  cachedEnv = env;
+  cachedEnvFingerprint = fp;
   return env;
 }
 
@@ -96,9 +117,17 @@ function resolveUrl(req) {
 
 // Web / Node 双入口共享的请求上下文：白名单 env + KV 适配。
 // 注意：无 waitUntil —— Serverless 下响应结束后台即可能冻结，所有 KV 写必须在请求内 await。
+let cachedRequestContext = null;
+let cachedRequestContextEnv = null;
+
 function makeRequestContext() {
   const env = getEnvContext();
-  return { env };
+  if (cachedRequestContext && cachedRequestContextEnv === env) {
+    return cachedRequestContext;
+  }
+  cachedRequestContext = { env };
+  cachedRequestContextEnv = env;
+  return cachedRequestContext;
 }
 
 async function handleWebRequest(request) {
