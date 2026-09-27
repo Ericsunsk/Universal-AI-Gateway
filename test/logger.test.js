@@ -339,3 +339,28 @@ test("prematurely closed request logs warning with 499 status", () => {
   assert.ok(logs[0].includes("499"));
 });
 
+test("cache-stats debug output is gated by logger level, not a literal DEBUG check", async () => {
+  // 回归：recordUpstreamCache / cacheControlStats 曾自行判断 process.env.DEBUG === "true"，
+  // 只认字面量 "true"，导致 DEBUG=1 / DEBUG=* 时 debug 行被静默吞掉（观测性丢失）。
+  // 现统一交给 logger 的级别门控。
+  const { recordUpstreamCache } = await import("../src/core/cacheStats.js");
+  const logs = [];
+  setLogSink((line) => logs.push(line));
+  const saved = process.env.DEBUG;
+  try {
+    for (const v of ["1", "true", "*"]) {
+      logs.length = 0;
+      process.env.DEBUG = v;
+      recordUpstreamCache(42);
+      assert.ok(logs.some(l => l.includes("prefix-cache hit")),
+        `DEBUG=${v} must surface the debug line (logger accepts 1/true/*)`);
+    }
+    logs.length = 0;
+    process.env.DEBUG = "false";
+    recordUpstreamCache(42);
+    assert.equal(logs.length, 0, "DEBUG=false must stay silent");
+  } finally {
+    if (saved === undefined) delete process.env.DEBUG; else process.env.DEBUG = saved;
+    setLogSink(null);
+  }
+});

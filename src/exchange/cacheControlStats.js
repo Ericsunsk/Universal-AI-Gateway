@@ -79,9 +79,9 @@ export function recordCacheControl(body) {
     if (found > 0) {
       stats.requestsWithBreakpoints += 1;
       stats.breakpoints += found;
-      if (process.env.DEBUG === "true") {
-        log.debug("cache_control breakpoints observed", { count: found, layers: stats.byLayer });
-      }
+      // 级别门控交给 logger（DEBUG=1/true/* 或 LOG_LEVEL=debug）；
+      // 自行判断 DEBUG 只认字面量 "true"，会漏掉 "1"/"*" 并静默吞掉 debug 行。
+      log.debug("cache_control breakpoints observed", { count: found, layers: stats.byLayer });
     }
   } catch {
     // 观测永不阻断主链路
