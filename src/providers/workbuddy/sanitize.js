@@ -3,14 +3,6 @@
 // exchange 只保留厂商无关的通用输出修剪（optimizeToolOutput）。
 // 对待替换字面量做大小写不敏感替换：上游拦截特征词可能被客户端以任意大小写下发（如全小写），
 // 因此检测与改写都必须忽略大小写，否则 `claude code` 变体可绕过 11128 过滤。
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function replaceAllInsensitive(text, needle, replacement) {
-  return text.replace(new RegExp(escapeRegExp(needle), "gi"), replacement);
-}
-
 // 快路径门控：大小写不敏感扫描但零分配（regex test 不拷贝整串）；
 // 只有命中才做一次 toLowerCase 精确判定，避免 99% benign 长上下文每次都分配小写副本。
 const FAST_GATE = /claude|codex|main branch|billing-header|cc_/i;

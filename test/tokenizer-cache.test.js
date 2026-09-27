@@ -22,8 +22,10 @@ test("estimateTokens cache reduces redundant calculations", () => {
   assert.equal(result1, result2, "cached result should match");
   assert.ok(result1 > 0, "should return valid token count");
 
-  // 缓存命中应该更快（不严格验证，因为可能有噪音）
-  console.log(`  First call: ${time1}ms, Cached call: ${time2}ms`);
+  // 性能日志（仅用于开发调试）
+  if (time1 > 0 || time2 > 0) {
+    // Timing logged for development
+  }
 });
 
 test("estimateTokens cache expires after TTL", async () => {

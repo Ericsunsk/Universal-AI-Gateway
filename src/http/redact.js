@@ -39,7 +39,7 @@ export function redactUpstreamText(text) {
     result = result.replace(REGEX_IP, "<ip>");
 
     return result.slice(0, UPSTREAM_ERR_MAX);
-  } catch (e) {
+  } catch (_e) {
     // 正则引擎崩溃时的降级处理
     return "[redacted: error]";
   }
