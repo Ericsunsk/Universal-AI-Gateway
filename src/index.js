@@ -9,13 +9,8 @@ import { checkRateLimit, RATE_LIMIT_PRESETS, extractRateLimitKey, rateLimitRespo
 import { runWithLogger, extractTraceId, generateTraceId, log } from "./logging/logger.js";
 import { estimateTokens } from "./core/tokenizer.js";
 
-// 未鉴权请求不解析 body：Content-Length 预检，超限直接 413。
 // 单一来源：api/index.js（Node 层流式累积）复用同一值。
 export const MAX_BODY_BYTES = 8 * 1024 * 1024;
-function bodyTooLarge(request) {
-  const len = Number(request.headers.get("content-length"));
-  return Number.isFinite(len) && len > MAX_BODY_BYTES;
-}
 
 class RequestBodyTooLargeError extends Error {}
 
@@ -262,16 +257,6 @@ async function authenticateAndParseRequest(request, env, config, { defaultModel 
   const rateLimitResult = await checkRateLimit(kv, rateLimitKey, RATE_LIMIT_PRESETS.standard);
   if (!rateLimitResult.allowed) {
     return { ok: false, response: rateLimitResponse(rateLimitResult, corsHeaders) };
-  }
-
-  if (bodyTooLarge(request)) {
-    return {
-      ok: false,
-      response: new Response(errorBody("Request body too large"), {
-        status: 413,
-        headers: { "Content-Type": "application/json", ...corsHeaders }
-      })
-    };
   }
 
   let body;
