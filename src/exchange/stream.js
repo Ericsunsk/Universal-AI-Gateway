@@ -445,6 +445,10 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
       }
     }
   } finally {
+    // 正常路径由生成器读尽上游后闭环；此处兜底取消未耗尽的上游流。
+    // 消费循环因 JSON 解析异常等提前退出时，for-await 会 return() 生成器（其 finally 已 cancel），
+    // 但生成器在 yield 中抛出的错误会先冒泡到这里 —— 故此处再 cancel 一次确保 socket 释放。
+    try { await reader.cancel(new Error("Non-streaming consumer finished")); } catch {}
     reader.releaseLock();
   }
 

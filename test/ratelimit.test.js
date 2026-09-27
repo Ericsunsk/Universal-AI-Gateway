@@ -200,7 +200,7 @@ test("createUpstashKv limit blocks and computes retryAfter with @upstash/ratelim
   assert.ok(res.retryAfter > 0);
 });
 
-test("createUpstashKv limit falls back to memory if redis throws", async () => {
+test("createUpstashKv limit degrades to tightened memory quota if redis throws", async () => {
   const memKv = createMemoryKv();
   const failingRedis = {
     eval: async () => { throw new Error("Connection reset"); },
@@ -210,8 +210,14 @@ test("createUpstashKv limit falls back to memory if redis throws", async () => {
   const { createUpstashKv } = await import("../src/kv/index.js");
   const kv = createUpstashKv({ redis: failingRedis, fallback: memKv });
   const res = await kv.limit("test-fallback-key", { capacity: 10, refillRate: 1 });
-  assert.equal(res.allowed, true);
-  assert.equal(res.remaining, 9);
+  // 远端故障不得静默 fail-open：内存桶是 per-isolate 的，原样放行会让聚合配额
+  // 放大到 ~副本数×capacity。此处按收紧系数降级，capacity 10 -> 1。
+  assert.equal(res.allowed, true, "首请求仍应放行（降级为收紧而非直接拒绝）");
+  assert.equal(res.remaining, 0, "降级后容量已收紧，首个令牌即耗尽桶");
+
+  // 收紧必须真实生效：桶耗尽后紧随的请求应被拒，而非继续放行。
+  const res2 = await kv.limit("test-fallback-key", { capacity: 10, refillRate: 1 });
+  assert.equal(res2.allowed, false, "降级期间超配额请求必须被拒");
 });
 
 test("checkRateLimit delegates to kv.limit when present (clean seam encapsulation)", async () => {

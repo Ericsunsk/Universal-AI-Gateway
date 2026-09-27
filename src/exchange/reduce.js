@@ -528,39 +528,50 @@ export async function* iterSseParsedChunks(reader, options = {}) {
     }
   });
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (onBytes) onBytes(value);
-    const text = decoder.decode(value, { stream: true });
-    rawBuffer += text;
-    if (dispatchedCount > 0 && rawBuffer.length > 4096) {
-      rawBuffer = rawBuffer.slice(rawBuffer.length - 4096);
+  // 迭代器被提前放弃（调用方 break / 抛错 / 未耗尽）时，必须 cancel 上游 reader。
+  // 生成器 return() 会在此 finally 收尾：不 cancel 则上游 HTTP 请求不中止，
+  // undici 会保持 body 流与 socket 存活至 GC —— 每请求泄漏一个连接并持续计费。
+  // completed 标志确保正常读完（done===true）时不重复 cancel。
+  let completed = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) { completed = true; break; }
+      if (onBytes) onBytes(value);
+      const text = decoder.decode(value, { stream: true });
+      rawBuffer += text;
+      if (dispatchedCount > 0 && rawBuffer.length > 4096) {
+        rawBuffer = rawBuffer.slice(rawBuffer.length - 4096);
+      }
+      parser.feed(text);
+      while (queue.length > 0) {
+        yield queue.shift();
+      }
     }
-    parser.feed(text);
+
+    parser.feed("\n\n");
+    parser.reset({ consume: true });
     while (queue.length > 0) {
       yield queue.shift();
     }
-  }
 
-  parser.feed("\n\n");
-  parser.reset({ consume: true });
-  while (queue.length > 0) {
-    yield queue.shift();
-  }
-
-  if (tail && typeof tail === "object") {
-    if (dispatchedCount === 0) {
-      tail.text = rawBuffer;
-    } else {
-      const lastDataIdx = Math.max(rawBuffer.lastIndexOf("\ndata:"), rawBuffer.startsWith("data:") ? 0 : -1);
-      if (lastDataIdx !== -1) {
-        const afterLastData = rawBuffer.slice(lastDataIdx);
-        const nextNl = afterLastData.indexOf("\n");
-        tail.text = nextNl !== -1 ? afterLastData.slice(nextNl + 1).replace(/^[\r\n]+/, "") : "";
+    if (tail && typeof tail === "object") {
+      if (dispatchedCount === 0) {
+        tail.text = rawBuffer;
       } else {
-        tail.text = "";
+        const lastDataIdx = Math.max(rawBuffer.lastIndexOf("\ndata:"), rawBuffer.startsWith("data:") ? 0 : -1);
+        if (lastDataIdx !== -1) {
+          const afterLastData = rawBuffer.slice(lastDataIdx);
+          const nextNl = afterLastData.indexOf("\n");
+          tail.text = nextNl !== -1 ? afterLastData.slice(nextNl + 1).replace(/^[\r\n]+/, "") : "";
+        } else {
+          tail.text = "";
+        }
       }
+    }
+  } finally {
+    if (!completed) {
+      try { await reader.cancel(new Error("SSE consumer abandoned")); } catch {}
     }
   }
 }

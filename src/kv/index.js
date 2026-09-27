@@ -128,6 +128,20 @@ function restEnv(env) {
 // Upstash Adapter：完全依托 @upstash/redis 与 @upstash/ratelimit，封装超时与降级
 export function createUpstashKv({ url, token, timeoutMs = DEFAULT_TIMEOUT_MS, fallback = null, redis: customRedis = null } = {}) {
   const memory = fallback || createMemoryKv();
+
+  // 远端限流不可用时的降级收紧系数。内存桶是 per-isolate 的，若原样放行，
+  // 聚合配额 ≈ 副本数 × capacity（Vercel 多 isolate / cluster 多 worker），等于限流失效。
+  // 除以该系数后，即便按 8 副本估算，聚合上限仍收敛于配置意图；宁可误拒也不被绕过。
+  const DEGRADED_QUOTA_DIVISOR = 8;
+
+  // 返回收紧后的限流配置（capacity/refillRate 同比例缩小，cost 保持不变，
+  // 否则 cost > capacity 会让所有请求恒被拒绝）。
+  function degradedConfig(config) {
+    const capacity = Math.max(1, Math.floor((config.capacity || 1) / DEGRADED_QUOTA_DIVISOR));
+    const refillRate = Math.max(0.0001, (config.refillRate || 1) / DEGRADED_QUOTA_DIVISOR);
+    return { ...config, capacity, refillRate };
+  }
+
   let redis = customRedis;
   if (!redis && url && token) {
     try {
@@ -202,7 +216,13 @@ export function createUpstashKv({ url, token, timeoutMs = DEFAULT_TIMEOUT_MS, fa
             retryAfter: res.success ? 0 : Math.max(1, Math.ceil((res.reset - now) / 1000)),
           };
         } catch (e) {
-          log.warn("Upstash ratelimit error, falling back to memory", { key, error: e?.message });
+          // 远端故障不得静默 fail-open：内存桶是 per-isolate 的，多 isolate/cluster 下
+          // 聚合配额会放大到 ~副本数×capacity，等于限流失效。此处按 DEGRADED_QUOTA_DIVISOR
+          // 收紧内存桶容量，使聚合上限仍收敛于配置意图；拒绝优于被绕过。
+          log.warn("Upstash ratelimit error, degrading to tightened memory limit", {
+            key, error: e?.message,
+          });
+          return memory.limit(key, degradedConfig(config));
         }
       }
       return memory.limit(key, config);

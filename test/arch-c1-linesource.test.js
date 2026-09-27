@@ -87,6 +87,42 @@ test("iterSseParsedChunks works without options (default decoder, streaming word
   }
 });
 
+// ---- 迭代器提前放弃时必须 cancel 上游 reader（连接泄漏回归） ----
+// 生成器被 break/抛错放弃时若不 cancel，上游 HTTP 请求不中止，
+// undici 会保持 body 流与 socket 存活至 GC —— 每请求泄漏一个连接并持续计费。
+test("iterSseParsedChunks cancels upstream reader when consumer abandons early", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode('data: {"a":1}\n\n'));
+      c.enqueue(enc.encode('data: {"b":2}\n\n'));
+      // 不关闭：模拟上游持续推流
+    },
+    cancel() { cancelled = true; },
+  });
+
+  for await (const chunk of iterSseParsedChunks(body.getReader())) {
+    if (chunk) break; // 首个 chunk 后放弃，触发生成器 return() -> finally
+  }
+
+  assert.equal(cancelled, true, "abandoning iteration must cancel the upstream reader");
+});
+
+test("iterSseParsedChunks does not cancel when stream read to completion", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(c) {
+      c.enqueue(enc.encode('data: {"a":1}\n\n'));
+      c.close();
+    },
+    cancel() { cancelled = true; },
+  });
+
+  const items = await collect(body.getReader());
+  assert.equal(items.length, 1);
+  assert.equal(cancelled, false, "normal completion must not trigger a spurious cancel");
+});
+
 // ---- onBytes 钩子：每批字节各调一次（含空块也透传，由调用方判定） ----
 test("iterSseParsedChunks reports each read via onBytes", async () => {
   const upstream = sseResponse(["a", "b", "c"]);
