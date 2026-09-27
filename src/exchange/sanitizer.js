@@ -73,8 +73,16 @@ export function optimizeToolOutput(text, turnAge = 0, isCompact = false) {
   // 7. 阶梯式渐进退火（Progressive Tool Annealing）：
   // - 活跃期（turnAge <= 4）：100% 原始细节无损传输
   // - 中期（5 <= turnAge <= 14）：如果单个工具输出超过 1500 字符，保留头 400 + 尾 200 字符
-  // - 远古期（turnAge >= 15）：如果单个工具输出超过 800 字符，保留头 250 + 尾 100 字符
-  if (turnAge >= 15 && cleaned.length > 800) {
+  // - 远古期（15 <= turnAge <= 24）：如果单个工具输出超过 800 字符，保留头 250 + 尾 100 字符
+  // - 归档期（turnAge >= 25）：深度历史极简存根，单个工具输出超过 500 字符保留头 150 + 尾 80 字符
+  if (turnAge >= 25 && cleaned.length > 500) {
+    const omitted = cleaned.length - 230;
+    return (
+      cleaned.slice(0, 150) +
+      `\n...[Gateway: ${omitted} chars of archived tool output collapsed for token economy]...\n` +
+      cleaned.slice(-80)
+    );
+  } else if (turnAge >= 15 && cleaned.length > 800) {
     const omitted = cleaned.length - 350;
     return (
       cleaned.slice(0, 250) +

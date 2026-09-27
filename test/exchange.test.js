@@ -114,6 +114,31 @@ test("transformAnthropicToOpenAI still prunes when max_context_turns is a valid 
   assert.ok(payload.messages.some(m => typeof m.content === "string" && m.content.includes("omitted")), "bridge notice present");
 });
 
+test("transformAnthropicToOpenAI maintains stable prefix across consecutive turns (Prompt Cache friendly)", () => {
+  const buildMsgs = (count) => {
+    const list = [];
+    for (let i = 0; i < count; i++) {
+      list.push({ role: i % 2 === 0 ? "user" : "assistant", content: [{ type: "text", text: `turn_${i}` }] });
+    }
+    return list;
+  };
+
+  const payload35 = transformAnthropicToOpenAI({ messages: buildMsgs(35) }, "m", { max_context_turns: 30 });
+  const payload36 = transformAnthropicToOpenAI({ messages: buildMsgs(36) }, "m", { max_context_turns: 30 });
+  const payload37 = transformAnthropicToOpenAI({ messages: buildMsgs(37) }, "m", { max_context_turns: 30 });
+
+  // 验证在同一 stepSize 区间内，前缀与桥接消息完全恒定，锁定 KV Cache
+  assert.equal(payload35.messages[0].content, payload36.messages[0].content, "messages[0] matches");
+  assert.equal(payload35.messages[1].content, payload36.messages[1].content, "bridgeMsg matches (static)");
+  assert.equal(payload35.messages[2].content, payload36.messages[2].content, "first sliced turn matches");
+
+  // 验证 payload36/37 是 payload35 的稳定扩展（前缀 100% 缓存命中）
+  for (let i = 0; i < payload35.messages.length; i++) {
+    assert.deepEqual(payload35.messages[i], payload36.messages[i]);
+    assert.deepEqual(payload35.messages[i], payload37.messages[i]);
+  }
+});
+
 test("transformAnthropicToOpenAI defaults model and preserves stream:false", () => {
   const payload = transformAnthropicToOpenAI({
     messages: [{ role: "user", content: [{ type: "text", text: "x" }] }],
@@ -1039,6 +1064,20 @@ test("pruneOpenAIMessages reduces old huge tool output but keeps fresh one intac
   assert.ok(oldMsg.content.length < huge.length, "old huge output annealed");
   assert.ok(oldMsg.content.includes("collapsed"), "anneal notice present");
   assert.equal(freshMsg.content, huge, "fresh output stays full-fidelity");
+});
+
+test("pruneOpenAIMessages applies Tier 4 deep archival annealing for turnAge >= 25", () => {
+  const huge = "A".repeat(2000);
+  const messages = [
+    { role: "tool", tool_call_id: "ancient", content: huge }
+  ];
+  for (let i = 0; i < 26; i++) {
+    messages.push({ role: "user", content: `u${i}` });
+  }
+  const out = pruneOpenAIMessages(messages, false);
+  const ancientMsg = out.find(m => m.tool_call_id === "ancient");
+  assert.ok(ancientMsg.content.includes("archived tool output collapsed"), "tier 4 archived notice present");
+  assert.ok(ancientMsg.content.length < 350, "deeply compressed to minimal stub");
 });
 
 // --- stream.js tool_call 分片合并（按 index 定址的唯一合并点）---

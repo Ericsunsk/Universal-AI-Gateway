@@ -350,11 +350,12 @@ export function pruneOpenAIMessages(messages, isCompact = false) {
 }
 
 /**
- * 智能上下文窗口切片与管理：
- * 1. 根治超长会话（如 Claude Code 累积数十上百轮、上千条消息）触发边缘运行时 CPU/内存上限。
- * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
- * 3. 历史工具执行结果（tool_result）的输出清洗（RTK 式 Token 压缩与渐进式退火）下沉至 OpenAIMessageSequence 单趟流式执行，
- *    彻底消除对全量消息数组的重复 deep-map 遍历与中间对象堆积。
+ * 智能上下文窗口切片与管理（Cache-Aware Stepped Window + 11148 Invariant Protection）：
+ * 1. 阶梯步进淘汰（Epoch / Stepped Eviction）：彻底杜绝每轮前移 1 条导致 DeepSeek / Anthropic
+ *    前缀缓存（Prompt Cache）100% 击穿的痛点。窗口超出时按阶梯步长对齐，在区间内保持 cutIdx 绝对稳定。
+ * 2. 静态无状态哨兵提示：移除动态变化的计数 (${truncatedCount})，保证前缀 Token 序列 100% 字节一致。
+ * 3. 守卫 11148 协议不变量：严格保证切片边界不落在孤立的 tool_result 上（避免破坏工具调用序列）。
+ * 4. 历史工具执行结果的 RTK 净化与阶梯退火由 OpenAIMessageSequence 单趟流式执行，零多余对象堆积。
  */
 function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
@@ -366,8 +367,13 @@ function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   const maxWindow = isCompact ? Math.max(maxTurnsLimit * 1.5, 70) : maxTurnsLimit;
   if (total <= maxWindow) return messages;
 
-  let cutIdx = Math.max(1, total - maxWindow);
-  while (cutIdx < total - 5) {
+  // 阶梯式步进裁剪：步长自适应 maxWindow（区间 2~10 轮），在同一 step 期间 cutIdx 保持不变
+  const stepSize = Math.max(2, Math.min(10, Math.floor(maxWindow / 3) || 5));
+  const excess = total - maxWindow;
+  const steppedCut = Math.ceil(excess / stepSize) * stepSize;
+
+  let cutIdx = Math.min(Math.max(1, steppedCut), total - 1);
+  while (cutIdx < total - 1) {
     const m = messages[cutIdx];
     const isToolResult = m && m.role === "user" && Array.isArray(m.content) && m.content.some(c => c && c.type === "tool_result");
     if (!isToolResult) break;
@@ -376,11 +382,11 @@ function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
 
   const firstMsg = messages[0];
   const recentMsgs = messages.slice(cutIdx);
-  const truncatedCount = cutIdx - 1;
   const firstRecent = recentMsgs[0];
+  // 静态无状态桥接消息：保持静态无变动，使得前缀在同一阶梯步进窗口内完全冻结，锁定上游 KV Cache
   const bridgeMsg = firstRecent && firstRecent.role === "assistant"
-    ? { role: "user", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Resuming from active context.]` }
-    : { role: "assistant", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Ready for next step.]` };
+    ? { role: "user", content: "[System Notice: Earlier conversation omitted to preserve context and latency limits. Resuming from active context.]" }
+    : { role: "assistant", content: "[System Notice: Earlier conversation omitted to preserve context and latency limits. Ready for next step.]" };
 
   return [firstMsg, bridgeMsg, ...recentMsgs];
 }
