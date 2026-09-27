@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   iterSseParsedChunks,
-  encodeAnthropicResponse,
-} from "../src/exchange/stream.js";
+} from "../src/exchange/reduce.js";
+import { encodeAnthropicResponse } from "../src/exchange/stream.js";
 import { setLogSink } from "../src/logging/logger.js";
 
 const enc = new TextEncoder();

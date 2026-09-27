@@ -974,14 +974,14 @@ test("pruneOpenAIMessages reduces old huge tool output but keeps fresh one intac
 // --- stream.js tool_call 分片合并（按 index 定址的唯一合并点）---
 
 test("reduceOpenAIChunkAll preserves tool_call index for sparse fragments", async () => {
-  const { reduceOpenAIChunkAll } = await import("../src/exchange/stream.js");
+  const { reduceOpenAIChunkAll } = await import("../src/exchange/reduce.js");
   const emissions = reduceOpenAIChunkAll({ choices: [{ delta: { tool_calls: [{ index: 1, function: { arguments: "x" } }] } }] });
   assert.equal(emissions.length, 1);
   assert.equal(emissions[0].calls[0].index, 1);
 });
 
 test("mergeSseToolFrags routes sparse fragments by index, not chunk position", async () => {
-  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const { mergeSseToolFrags } = await import("../src/exchange/reduce.js");
   const frags = new Map();
   // 真实流式形态：每 chunk 只带一个 index 的碎片，calls 数组长度恒为 1
   mergeSseToolFrags(frags, [{ index: 0, name: "f", args: '{"a":' }]);
@@ -992,7 +992,7 @@ test("mergeSseToolFrags routes sparse fragments by index, not chunk position", a
 });
 
 test("toolCallsToAnthropicBlocks parses args and preserves unparseable raw", async () => {
-  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/stream.js");
+  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/reduce.js");
   const blocks = toolCallsToAnthropicBlocks([
     { id: "c1", name: "search", args: '{"q":"x"}' },
     { id: "c2", name: "broken", args: "{not json" },
@@ -1007,19 +1007,19 @@ test("toolCallsToAnthropicBlocks parses args and preserves unparseable raw", asy
 });
 
 test("toolCallsToAnthropicBlocks returns empty for empty input", async () => {
-  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/stream.js");
+  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/reduce.js");
   assert.deepEqual(toolCallsToAnthropicBlocks([]), []);
   assert.deepEqual(toolCallsToAnthropicBlocks(null), []);
 });
 
 test("toolCallsToAnthropicBlocks generates an id when upstream omits it", async () => {
-  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/stream.js");
+  const { toolCallsToAnthropicBlocks } = await import("../src/exchange/reduce.js");
   const [b] = toolCallsToAnthropicBlocks([{ id: null, name: "f", args: "{}" }]);
   assert.ok(typeof b.id === "string" && b.id.startsWith("call_"), "must not emit id:null");
 });
 
 test("mergeSseToolFrags migrates placeholder key to real id when it arrives late", async () => {
-  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const { mergeSseToolFrags } = await import("../src/exchange/reduce.js");
   const frags = new Map();
   // 首片无 id -> 建占位键
   mergeSseToolFrags(frags, [{ name: "search", args: '{"a":' }]);
@@ -1033,7 +1033,7 @@ test("mergeSseToolFrags migrates placeholder key to real id when it arrives late
 });
 
 test("mergeSseToolFrags keeps distinct ids in separate slots", async () => {
-  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const { mergeSseToolFrags } = await import("../src/exchange/reduce.js");
   const frags = new Map();
   mergeSseToolFrags(frags, [{ id: "a", name: "f", args: "{" }]);
   mergeSseToolFrags(frags, [{ id: "b", name: "g", args: "{" }]);
@@ -1044,7 +1044,7 @@ test("mergeSseToolFrags keeps distinct ids in separate slots", async () => {
 });
 
 test("mergeSseToolFrags handles parallel calls where only some carry ids", async () => {
-  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const { mergeSseToolFrags } = await import("../src/exchange/reduce.js");
   const frags = new Map();
   // 第 0 个带 id，第 1 个无 id（首片）
   mergeSseToolFrags(frags, [
@@ -1064,7 +1064,7 @@ test("mergeSseToolFrags handles parallel calls where only some carry ids", async
 });
 
 test("mergeSseToolFrags leaves placeholder when upstream never sends an id", async () => {
-  const { mergeSseToolFrags } = await import("../src/exchange/stream.js");
+  const { mergeSseToolFrags } = await import("../src/exchange/reduce.js");
   const frags = new Map();
   mergeSseToolFrags(frags, [{ name: "f", args: "{" }]);
   mergeSseToolFrags(frags, [{ args: "}" }]);
@@ -1077,7 +1077,7 @@ test("mergeSseToolFrags leaves placeholder when upstream never sends an id", asy
 // --- StreamBlockState：流式 content block 状态机（纯函数，不发 IO）---
 
 test("StreamBlockState opens a block and closes the previous one", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   // 首个 block：无前置关闭
   const f1 = s.open("thinking");
@@ -1094,7 +1094,7 @@ test("StreamBlockState opens a block and closes the previous one", async () => {
 });
 
 test("non-thinking block closes without a signature_delta frame", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   s.open("text");
   const frames = s.open("tool_use", { toolId: "t1", toolName: "f" });
@@ -1102,7 +1102,7 @@ test("non-thinking block closes without a signature_delta frame", async () => {
 });
 
 test("StreamBlockState deltas are suppressed when block type does not match", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   // 未开块：任何 delta 都不应产出帧（否则会发出 index:-1 的非法帧）
   assert.deepEqual(s.textDelta("x"), []);
@@ -1114,7 +1114,7 @@ test("StreamBlockState deltas are suppressed when block type does not match", as
 });
 
 test("StreamBlockState counts emitted chars for text and thinking deltas", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   s.open("text");
   s.textDelta("hello");
@@ -1127,7 +1127,7 @@ test("StreamBlockState counts emitted chars for text and thinking deltas", async
 });
 
 test("StreamBlockState setStopReason does not downgrade a set reason", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   assert.equal(s.stopReason, "end_turn", "default stop reason");
   s.setStopReason("tool_use");
@@ -1138,7 +1138,7 @@ test("StreamBlockState setStopReason does not downgrade a set reason", async () 
 });
 
 test("StreamBlockState close is idempotent and no-ops when nothing is open", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   assert.deepEqual(s.close(), [], "closing with no open block emits nothing");
   s.open("text");
@@ -1147,7 +1147,7 @@ test("StreamBlockState close is idempotent and no-ops when nothing is open", asy
 });
 
 test("StreamBlockState.applyEmission drives block transitions for each kind", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState();
   const joined = (frames) => frames.join("");
 
@@ -1193,7 +1193,7 @@ test("absent stop_sequences leaves no stop field upstream", async () => {
 });
 
 test("finishReasonToAnthropic reports stop_sequence only on a confirmed tail hit", async () => {
-  const { finishReasonToAnthropic } = await import("../src/exchange/stream.js");
+  const { finishReasonToAnthropic } = await import("../src/exchange/reduce.js");
   // 未下发序列：即使上游回 stop 也只报 end_turn
   assert.equal(finishReasonToAnthropic("stop", { hasStopSequences: false, text: "abc</done>" }), "end_turn");
   // 下发且尾部命中：报 stop_sequence
@@ -1216,8 +1216,8 @@ test("finishReasonToAnthropic reports stop_sequence only on a confirmed tail hit
 // --- 停止序列：窗口长度与归一化（code review 修复）---
 
 test("stop sequence longer than 64 chars is still detected", async () => {
-  const { finishReasonToAnthropic } = await import("../src/exchange/stream.js");
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { finishReasonToAnthropic } = await import("../src/exchange/reduce.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   // 100 字符的哨兵：旧实现写死 64 字符尾部窗口，此类序列恒失配。
   const longSeq = "S".repeat(100);
   const s = new StreamBlockState([longSeq]);
@@ -1232,7 +1232,7 @@ test("stop sequence longer than 64 chars is still detected", async () => {
 });
 
 test("no tail accumulation when the request carried no stop sequences", async () => {
-  const { StreamBlockState } = await import("../src/exchange/stream.js");
+  const { StreamBlockState } = await import("../src/exchange/reduce.js");
   const s = new StreamBlockState([]);
   s.open("text");
   s.textDelta("some long output that would otherwise be buffered");
@@ -1259,7 +1259,7 @@ test("blank-only stop_sequences produce no upstream stop field", async () => {
 });
 
 test("resolveStopDetails handles upstream stop_sequence finish_reason", async () => {
-  const { resolveStopDetails, finishReasonToAnthropic } = await import("../src/exchange/stream.js");
+  const { resolveStopDetails, finishReasonToAnthropic } = await import("../src/exchange/reduce.js");
   const res1 = resolveStopDetails("stop_sequence", {
     hasStopSequences: true,
     text: "result </done>",
@@ -1278,7 +1278,7 @@ test("resolveStopDetails handles upstream stop_sequence finish_reason", async ()
 });
 
 test("resolveStopDetails returns consistent stopReason and stopSequence across all reasons", async () => {
-  const { resolveStopDetails } = await import("../src/exchange/stream.js");
+  const { resolveStopDetails } = await import("../src/exchange/reduce.js");
   assert.deepEqual(resolveStopDetails("length"), { stopReason: "max_tokens", stopSequence: null });
   assert.deepEqual(resolveStopDetails("tool_calls"), { stopReason: "tool_use", stopSequence: null });
   assert.deepEqual(resolveStopDetails("tool_use"), { stopReason: "tool_use", stopSequence: null });
@@ -1290,7 +1290,7 @@ test("resolveStopDetails returns consistent stopReason and stopSequence across a
 // 取代此前的三态歧义（解构默认 false、却用 !== undefined 判定），
 // 使 unset / false / [] / ["a"] 各有唯一且明确的语义。
 test("resolveStopDetail normalises the tri-state to one unambiguous boolean", async () => {
-  const { resolveStopDetail } = await import("../src/exchange/stream.js");
+  const { resolveStopDetail } = await import("../src/exchange/reduce.js");
 
   // 「未下发 / 下发空 / 下发非法」三种输入收敛为同一答案：不生效、无序列。
   for (const raw of [undefined, null, false, [], "", 0, {}, [[]], [42], [""]]) {
@@ -1312,7 +1312,7 @@ test("resolveStopDetail normalises the tri-state to one unambiguous boolean", as
 });
 
 test("resolveStopDetail.active is a plain boolean, never undefined", async () => {
-  const { resolveStopDetail } = await import("../src/exchange/stream.js");
+  const { resolveStopDetail } = await import("../src/exchange/reduce.js");
   for (const raw of [undefined, null, false, [], ["a"]]) {
     const d = resolveStopDetail(raw);
     assert.equal(typeof d.active, "boolean");
@@ -1321,7 +1321,7 @@ test("resolveStopDetail.active is a plain boolean, never undefined", async () =>
 });
 
 test("resolveStopDetails agrees with resolveStopDetail across the tri-state x finish_reason matrix", async () => {
-  const { resolveStopDetails, resolveStopDetail } = await import("../src/exchange/stream.js");
+  const { resolveStopDetails, resolveStopDetail } = await import("../src/exchange/reduce.js");
 
   // 关键回归：此前 unset 与 false 走不同分支；现在二者必须完全一致。
   const inputs = [undefined, null, false, [], ["</done>"], ["</done>", "STOP"]];
@@ -1412,7 +1412,8 @@ test("encodeAnthropicResponse drives both stream and non-stream from one fixture
 });
 
 test("encodeAnthropicResponse resolves the stop detail once and shares it across both paths", async () => {
-  const { encodeAnthropicResponse, resolveStopDetail } = await import("../src/exchange/stream.js");
+  const { resolveStopDetail } = await import("../src/exchange/reduce.js");
+  const { encodeAnthropicResponse } = await import("../src/exchange/stream.js");
 
   const sseBody = () => {
     const body = new ReadableStream({
@@ -1447,15 +1448,15 @@ test("encodeAnthropicResponse refuses a missing upstream", async () => {
   assert.throws(() => encodeAnthropicResponse({ model: "m" }), /upstream is required/);
 });
 
-// P0：流式必须向上游索取 usage，否则响应侧 token 全是字符数估算。
-test("transformAnthropicToOpenAI sets stream_options.include_usage on streams only", () => {
+// 恢复干净请求体：流式不强插 stream_options，保持对全量第三方渠道的最大兼容
+test("transformAnthropicToOpenAI keeps payload clean without injecting stream_options", () => {
   const streamed = transformAnthropicToOpenAI({ model: "m", messages: [{ role: "user", content: "hi" }] }, "m", {});
-  assert.deepEqual(streamed.stream_options, { include_usage: true });
+  assert.equal(streamed.stream_options, undefined, "streaming payload must stay clean without stream_options");
   const packed = transformAnthropicToOpenAI({ model: "m", stream: false, messages: [{ role: "user", content: "hi" }] }, "m", {});
   assert.equal(packed.stream_options, undefined, "non-stream must not carry stream_options");
 });
 
-test("dispatchExchange OpenAI path injects stream_options unless the client set it", async () => {
+test("dispatchExchange OpenAI path preserves client stream_options and does not force inject when unset", async () => {
   const seen = [];
   const fleet = {
     getAllActive: () => [{ id: "o" }],
@@ -1477,9 +1478,10 @@ test("dispatchExchange OpenAI path injects stream_options unless the client set 
     fleet, protocol: "openai"
   });
   await run({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] });
-  assert.deepEqual(seen[0], { include_usage: true });
-  await run({ model: "m", stream: true, stream_options: { include_usage: false }, messages: [{ role: "user", content: "hi" }] });
-  assert.deepEqual(seen[1], { include_usage: false }, "explicit client value must survive");
+  assert.equal(seen[0], undefined, "must not inject stream_options without client intent");
+  await run({ model: "m", stream: true, stream_options: { include_usage: true }, messages: [{ role: "user", content: "hi" }] });
+  assert.deepEqual(seen[1], { include_usage: true }, "explicit client value must survive");
   await run({ model: "m", messages: [{ role: "user", content: "hi" }] });
   assert.equal(seen[2], undefined, "non-stream must not gain stream_options");
 });
+

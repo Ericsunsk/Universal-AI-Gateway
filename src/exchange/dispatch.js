@@ -168,12 +168,6 @@ export async function dispatchExchange({
             }
             throw err;
           }
-          // OpenAI 直传：客户端未声明 stream_options 且本次走流式时补上，
-          // 否则上游不下发 usage，响应侧 token 只能估算。显式值一律尊重不覆盖。
-          // （Anthropic 路径由 transform 统一设置；WorkBuddy 侧由 sanitize 剥离。）
-          if (!isAnthropic && openaiPayload.stream === true && openaiPayload.stream_options == null) {
-            openaiPayload.stream_options = { include_usage: true };
-          }
           // 推理适配恰好一次：transformAnthropicToOpenAI 的输出已是 OpenAI 方言（含映射，幂等，
           // 无需二次 apply）；唯 WorkBuddy 上游拒收推理参数，需清洗一次。OpenAI 协议客户端
           // 直传 payload，未经过 transform，仍需按方言完整适配一次。

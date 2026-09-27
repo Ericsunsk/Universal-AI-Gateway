@@ -32,12 +32,12 @@ test("exchange.js facade contains ONLY pure re-exports", () => {
   }
 });
 
-test("exchange.js facade re-exports exactly the three domain modules", () => {
+test("exchange.js facade re-exports exactly the four domain modules", () => {
   const source = fs.readFileSync(facadePath, "utf8");
   const specifiers = [...source.matchAll(/from\s+["'](\.\/[^"']+)["']/g)].map((m) => m[1]);
   assert.deepEqual(
     specifiers.sort(),
-    ["./dispatch.js", "./stream.js", "./transform.js"],
+    ["./dispatch.js", "./reduce.js", "./stream.js", "./transform.js"],
     "facade re-export set must stay pinned"
   );
 });

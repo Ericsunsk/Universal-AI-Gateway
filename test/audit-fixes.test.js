@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reduceOpenAIChunkAll, encodeAnthropicResponse } from "../src/exchange/stream.js";
+import { reduceOpenAIChunkAll } from "../src/exchange/reduce.js";
+import { encodeAnthropicResponse } from "../src/exchange/stream.js";
 import { dispatchExchange } from "../src/exchange/exchange.js";
 import { needsReasoningScrub, hasCallChat, hasCallMessages } from "../src/core/contract.js";
 import { parseReasoningIntent } from "../src/exchange/reasoning.js";
