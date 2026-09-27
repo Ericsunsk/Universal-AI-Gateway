@@ -595,5 +595,12 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   const reasoningIntent = intent || parseReasoningIntent({ model: body.model || model, body });
   applyReasoningToPayload(payload, reasoningIntent, "openai");
 
+  // 流式必须索取 usage：OpenAI 上游默认不在 SSE 里下发 usage，不带
+  // stream_options.include_usage 响应侧就只能用字符数估算 token。
+  // WorkBuddy 侧由 sanitize 剥离本字段，故此处无条件设置是安全的。
+  if (payload.stream) {
+    payload.stream_options = { include_usage: true };
+  }
+
   return payload;
 }

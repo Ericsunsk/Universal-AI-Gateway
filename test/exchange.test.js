@@ -1446,3 +1446,40 @@ test("encodeAnthropicResponse refuses a missing upstream", async () => {
   const { encodeAnthropicResponse } = await import("../src/exchange/stream.js");
   assert.throws(() => encodeAnthropicResponse({ model: "m" }), /upstream is required/);
 });
+
+// P0：流式必须向上游索取 usage，否则响应侧 token 全是字符数估算。
+test("transformAnthropicToOpenAI sets stream_options.include_usage on streams only", () => {
+  const streamed = transformAnthropicToOpenAI({ model: "m", messages: [{ role: "user", content: "hi" }] }, "m", {});
+  assert.deepEqual(streamed.stream_options, { include_usage: true });
+  const packed = transformAnthropicToOpenAI({ model: "m", stream: false, messages: [{ role: "user", content: "hi" }] }, "m", {});
+  assert.equal(packed.stream_options, undefined, "non-stream must not carry stream_options");
+});
+
+test("dispatchExchange OpenAI path injects stream_options unless the client set it", async () => {
+  const seen = [];
+  const fleet = {
+    getAllActive: () => [{ id: "o" }],
+    getProvider: () => ({
+      id: "o",
+      reasoningDialect: "openai",
+      callChat: async (payload) => {
+        seen.push(payload.stream_options);
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+          status: 200, headers: { "Content-Type": "application/json" }
+        });
+      }
+    })
+  };
+  const run = (body) => dispatchExchange({
+    request: new Request("http://localhost/v1/chat/completions", { method: "POST" }),
+    body, model: "m",
+    config: { routes: { m: [{ provider: "o", model: "m" }] } },
+    fleet, protocol: "openai"
+  });
+  await run({ model: "m", stream: true, messages: [{ role: "user", content: "hi" }] });
+  assert.deepEqual(seen[0], { include_usage: true });
+  await run({ model: "m", stream: true, stream_options: { include_usage: false }, messages: [{ role: "user", content: "hi" }] });
+  assert.deepEqual(seen[1], { include_usage: false }, "explicit client value must survive");
+  await run({ model: "m", messages: [{ role: "user", content: "hi" }] });
+  assert.equal(seen[2], undefined, "non-stream must not gain stream_options");
+});
