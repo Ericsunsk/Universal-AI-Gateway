@@ -135,9 +135,9 @@ export class OpenAIMessageSequence {
   // 原子追加一次 tool 交换：assistant（含 tool_calls，可选）→ companion
   // tool 结果（纯文本，图片另走）→ 尾随图片 user 消息（若有，必在交换之末）。
   // 调用方不再分两次调用 fan-out + 补图，交错顺序在本方法内一次写死。
-  appendToolExchange({ assistantMessage = null, toolResultBlocks = [], imageParts = [] } = {}) {
+  appendToolExchange({ assistantMessage = null, toolResultBlocks = [], imageParts = [], turnAge = 0, isCompact = false } = {}) {
     if (assistantMessage) this._messages.push(assistantMessage);
-    const toolImages = this.#pushToolResults(toolResultBlocks);
+    const toolImages = this.#pushToolResults(toolResultBlocks, turnAge, isCompact);
     this.#pushTrailingImages(imageParts, toolImages);
     return this;
   }
@@ -152,7 +152,9 @@ export class OpenAIMessageSequence {
   // tool 消息 content 只能是文本，图片放不进去（整体序列化会把 base64 灌进 token），
   // 因此这里只发文本，图片交 #pushTrailingImages 补发。
   // tool_use_id 缺失在这里统一 400（原本两个分支各校验一次）。
-  #pushToolResults(toolResultBlocks) {
+  // 单趟流式清洗：在构造 OpenAI tool 消息时直接执行 optimizeToolOutput，
+  // 消除前置全量 deep-map 与中间数组分配。
+  #pushToolResults(toolResultBlocks, turnAge = 0, isCompact = false) {
     const images = [];
     for (const rb of toolResultBlocks) {
       if (!rb.tool_use_id) {
@@ -162,10 +164,11 @@ export class OpenAIMessageSequence {
       }
       const split = toolResultSplit(rb.content);
       for (const p of split.images) images.push(p);
+      const optimizedText = optimizeToolOutput(split.text, turnAge, isCompact);
       this._messages.push({
         role: "tool",
         tool_call_id: rb.tool_use_id,
-        content: split.text
+        content: optimizedText
       });
     }
     return images;
@@ -241,13 +244,20 @@ export function transformToolsToOpenAI(tools) {  if (!Array.isArray(tools) || to
 function sortToolSequence(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
+  let hasTools = false;
   const toolResultsMap = new Map();
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m.role === "tool" && m.tool_call_id) {
       toolResultsMap.set(m.tool_call_id, m);
+      hasTools = true;
+    } else if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
+      hasTools = true;
     }
   }
+
+  // 快路径：没有任何 tool_calls 也无 tool 结果（普通纯文本对话），零分配直接返回
+  if (!hasTools) return messages;
 
   const result = [];
   const seenToolResultIds = new Set();
@@ -299,54 +309,6 @@ export function normalizeOpenAIMessages(messages) {
 }
 
 /**
- * 智能上下文窗口剪枝与管理：
- * 1. 根治超长会话（如 Claude Code 累积数十上百轮、上千条消息）触发边缘运行时 CPU/内存上限导致的致命错误。
- * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
- * 3. 对历史工具执行结果（tool_result）的大块冗余终端输出进行两端保留式剪枝。
- */
-function pruneMessageContents(messages, isCompact) {
-  const total = messages.length;
-  return messages.map((msg, idx) => {
-    if (!msg || !Array.isArray(msg.content)) return msg;
-    const turnAge = total - idx;
-    let modified = false;
-    const newContent = msg.content.map(part => {
-      if (!part || typeof part !== "object") return part;
-      if (part.type === "tool_result") {
-        // 含图片块的 tool_result 绝不整体序列化：base64 会被当文本清洗/折叠，图片永久降级成 JSON 垃圾。
-        // 改为逐块处理——文本块照常 optimize，图片块原样保留（真正的映射在 transformAnthropicToOpenAI）。
-        if (Array.isArray(part.content) && part.content.some(c => c && typeof c === "object" && c.type === "image")) {
-          let innerModified = false;
-          const inner = part.content.map(c => {
-            if (typeof c === "string") {
-              const optimized = optimizeToolOutput(c, turnAge, isCompact);
-              if (optimized !== c) { innerModified = true; return optimized; }
-              return c;
-            }
-            if (c && typeof c === "object" && c.type !== "image" && typeof c.text === "string") {
-              const optimized = optimizeToolOutput(c.text, turnAge, isCompact);
-              if (optimized !== c.text) { innerModified = true; return { ...c, text: optimized }; }
-              return c;
-            }
-            return c; // image 块与未知块原样保留
-          });
-          if (innerModified) modified = true;
-          return innerModified ? { ...part, content: inner } : part;
-        }
-        const text = toolResultBlockText(part.content);
-        const optimized = optimizeToolOutput(text, turnAge, isCompact);
-        if (optimized !== text) {
-          modified = true;
-          return { ...part, content: optimized };
-        }
-      }
-      return part;
-    });
-    return modified ? { ...msg, content: newContent } : msg;
-  });
-}
-
-/**
  * OpenAI 协议路径的 compact 意图检测：与 Anthropic 路径同 markers（/compact 总结请求），
  * 只是 shape 不同（system 在 messages[0]，lastText 在末条 user）。供 dispatch OpenAI 直传路径
  * 调用，避免此前硬编码 false 导致 compact 截断分支永不生效。
@@ -375,7 +337,7 @@ export function pruneOpenAIMessages(messages, isCompact = false) {
     if (!msg || typeof msg !== "object" || msg.role !== "tool") return msg;
     if (typeof msg.content !== "string") return msg;
 
-    // turnAge 与 pruneMessageContents 完全一致：越靠前的消息年龄越大
+    // turnAge 语义：越靠前的消息年龄越大
     const turnAge = total - idx;
     const optimized = optimizeToolOutput(msg.content, turnAge, isCompact);
     // 无变化时保持对象同一性，避免下游无谓重建
@@ -387,17 +349,22 @@ export function pruneOpenAIMessages(messages, isCompact = false) {
   return anyModified ? result : messages;
 }
 
-function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
+/**
+ * 智能上下文窗口切片与管理：
+ * 1. 根治超长会话（如 Claude Code 累积数十上百轮、上千条消息）触发边缘运行时 CPU/内存上限。
+ * 2. 对长会话智能截取“首轮任务意图 + 最近活跃上下文”，并严格保证切片位于干净的 user 轮次，避免工具调用序列破坏 (11148)。
+ * 3. 历史工具执行结果（tool_result）的输出清洗（RTK 式 Token 压缩与渐进式退火）下沉至 OpenAIMessageSequence 单趟流式执行，
+ *    彻底消除对全量消息数组的重复 deep-map 遍历与中间对象堆积。
+ */
+function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
-  // 当 maxTurnsLimit <= 0 时，保留全部会话轮次，但仍执行工具结果清洗（RTK 式 Token 压缩、测试成功项折叠与渐进式退火）
-  if (maxTurnsLimit <= 0) {
-    return pruneMessageContents(messages, isCompact);
-  }
+  // 当 maxTurnsLimit <= 0 时，保留全部会话轮次（长上下文全量保真）
+  if (maxTurnsLimit <= 0) return messages;
 
   const total = messages.length;
   const maxWindow = isCompact ? Math.max(maxTurnsLimit * 1.5, 70) : maxTurnsLimit;
-  if (total <= maxWindow) return pruneMessageContents(messages, isCompact);
+  if (total <= maxWindow) return messages;
 
   let cutIdx = Math.max(1, total - maxWindow);
   while (cutIdx < total - 5) {
@@ -415,7 +382,7 @@ function pruneAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
     ? { role: "user", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Resuming from active context.]` }
     : { role: "assistant", content: `[System Notice: Earlier conversation (${truncatedCount} messages) omitted to preserve context and latency limits. Ready for next step.]` };
 
-  return pruneMessageContents([firstMsg, bridgeMsg, ...recentMsgs], isCompact);
+  return [firstMsg, bridgeMsg, ...recentMsgs];
 }
 
 // 内部协议工具：Anthropic 请求体 -> OpenAI 请求体
@@ -427,8 +394,8 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   const sequence = new OpenAIMessageSequence();
 
   const rawMessages = Array.isArray(body.messages) ? body.messages : [];
-  const totalMessages = rawMessages.length;
-  const lastMsg = totalMessages > 0 ? rawMessages[totalMessages - 1] : null;
+  const totalRawMessages = rawMessages.length;
+  const lastMsg = totalRawMessages > 0 ? rawMessages[totalRawMessages - 1] : null;
   const lastText = blockText(lastMsg?.content);
 
   // 检测是否为会话压缩 / 总结请求（如 Claude Code /compact），与 OpenAI 形探测同标记表
@@ -444,7 +411,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
           : 0)
   );
 
-  const messages = pruneAnthropicMessages(rawMessages, isCompact, maxTurns);
+  const messages = windowAnthropicMessages(rawMessages, isCompact, maxTurns);
 
   if (body.system) {
     if (typeof body.system === "string") {
@@ -472,10 +439,12 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
     }
   }
 
+  const total = messages.length;
   for (let mIdx = 0; mIdx < messages.length; mIdx++) {
     const msg = messages[mIdx];
     if (!msg) continue;
     assertNoAssistantImages(msg.role, msg.content);
+    const turnAge = total - mIdx;
 
     if (typeof msg.content === "string") {
       sequence.push({
@@ -534,7 +503,9 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
             tool_calls: toolCalls
           },
           toolResultBlocks,
-          imageParts
+          imageParts,
+          turnAge,
+          isCompact
         });
       } else if (toolResultBlocks.length > 0) {
         // 同消息的 text companion 不丢弃：先发文本再发 tool 结果。
@@ -547,7 +518,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
             });
           }
         }
-        sequence.appendToolExchange({ toolResultBlocks, imageParts });
+        sequence.appendToolExchange({ toolResultBlocks, imageParts, turnAge, isCompact });
       } else {
         let combined = "";
         if (textBlocks.length === 1) {

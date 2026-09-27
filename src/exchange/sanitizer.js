@@ -23,6 +23,17 @@ const EXCESSIVE_NEWLINES_REGEX = /\n{3,}/g;
 const NOISE_NOTICES_REGEX = /(?:\d+\s+packages are looking for funding\s+run `npm fund`[^\n]*\n?|found 0 vulnerabilities\s*\n?|npm notice created a lockfile[^\n]*\n?)/gi;
 const PASSING_TESTS_BLOCK_REGEX = /((?:^[ \t]*(?:✓|PASS|ok|\+)[^\n]+\n){4,})/gm;
 
+// 快速检测是否存在 6+ 连续重复分隔符候选，避免在无重复分隔符的大文本（如代码）上触发带回溯正则全局扫描
+function hasRepeatedSeparator(str) {
+  return str.includes("======") ||
+         str.includes("------") ||
+         str.includes("######") ||
+         str.includes("******") ||
+         str.includes("~~~~~~") ||
+         str.includes("______") ||
+         str.includes("......");
+}
+
 export function optimizeToolOutput(text, turnAge = 0, isCompact = false) {
   if (!text || typeof text !== "string") return text;
 
@@ -30,7 +41,7 @@ export function optimizeToolOutput(text, turnAge = 0, isCompact = false) {
   let cleaned = stripAnsi(text);
 
   // 2. 压缩 6+ 连续重复分隔符（保留 3 字符的语义分割，节约 80% 边框 Token）
-  if (cleaned.length > 20) {
+  if (cleaned.length > 20 && hasRepeatedSeparator(cleaned)) {
     cleaned = cleaned.replace(REPEATED_SEPARATOR_REGEX, "$1$1$1");
   }
 

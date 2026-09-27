@@ -69,6 +69,18 @@ function failForAccount(account, evidence, exposeAccount) {
   }, exposeAccount));
 }
 
+// Tools Schema 序列化弱引用缓存：相同 tools 对象引用在多轮调用或并发计算中免除重复 JSON.stringify
+const toolsSignatureCache = new WeakMap();
+
+function serializeToolsForAffinity(tools) {
+  if (!tools || !Array.isArray(tools) || tools.length === 0) return "[]";
+  const cached = toolsSignatureCache.get(tools);
+  if (cached !== undefined) return cached;
+  const str = JSON.stringify(tools);
+  toolsSignatureCache.set(tools, str);
+  return str;
+}
+
 // 会话粘性键：优先客户端透传的会话头；回退 system+tools 指纹
 // （同一编码会话内稳定；跨会话碰撞只影响落点、不影响正确性）。
 // 取不到返回 null → orderAccounts 走纯轮询。只读不写。
@@ -82,8 +94,8 @@ export function affinityKeyForCall(payload, options = {}) {
   try {
     const msgs = Array.isArray(payload?.messages) ? payload.messages : [];
     const first = msgs.length > 0 && msgs[0]?.role === "system" ? msgs[0].content : "";
-    const sys = typeof first === "string" ? first : JSON.stringify(first ?? "");
-    const tools = JSON.stringify(payload?.tools ?? []);
+    const sys = typeof first === "string" ? first : (first ? JSON.stringify(first) : "");
+    const tools = serializeToolsForAffinity(payload?.tools);
     const sig = sys + "\n" + tools;
     if (sig.trim().length > 8) return `sig:${hashString32(sig)}`;
   } catch {}
