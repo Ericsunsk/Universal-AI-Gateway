@@ -58,6 +58,7 @@ async function scenarioA(n) {
   const fleet = {
     getProvider: () => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async () => new Response(sseStream(CHAT_SSE), {
         status: 200, headers: { "Content-Type": "text/event-stream" }
       })
@@ -125,6 +126,7 @@ async function scenarioC(n) {
   const fleet = {
     getProvider: () => ({
       type: "openai",
+      reasoningDialect: "openai",
       callChat: async () => new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
         status: 200, headers: { "Content-Type": "application/json" }
       })
