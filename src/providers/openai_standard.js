@@ -1,3 +1,5 @@
+// OpenAI 兼容上游 adapter —— 单账号直连，无账号池/轮转。
+// 出站经 urlGuard 护栏（https + 公网校验 + redirect:manual）；故障转移由 exchange/failover 驱动。
 import { assertPublicHttps, outboundFetchInit } from "./urlGuard.js";
 
 export class OpenAIStandardProvider {

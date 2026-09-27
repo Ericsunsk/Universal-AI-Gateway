@@ -1,3 +1,5 @@
+// Anthropic 原生上游 adapter —— 单账号直连，请求体按原生方言直通。
+// 出站经 urlGuard 护栏；与 openai_standard 同构但保留 Anthropic 的 tools/system 形状。
 import { assertPublicHttps, outboundFetchInit } from "./urlGuard.js";
 
 export class AnthropicStandardProvider {

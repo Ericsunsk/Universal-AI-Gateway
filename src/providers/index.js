@@ -1,3 +1,5 @@
+// 内置 provider 注册 —— 把各 adapter 挂进 registry.js 的类型表。
+// 新增上游：新建目录 + index.js，然后在此加一行 registerProvider。
 import { WorkBuddyProvider } from "./workbuddy/index.js";
 import { OpenAIStandardProvider } from "./openai_standard.js";
 import { AnthropicStandardProvider } from "./anthropic_standard.js";

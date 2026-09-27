@@ -1,3 +1,6 @@
+// Provider 编排 —— 由 FleetConfig 快照构建并重建 provider 实例集。
+// 位于 providers 层（而非 core）：它 import createProvider，是唯一实例化
+// adapter 的模块。core 保持无 adapter 依赖，见 ADR-0009 / test/arch-c6。
 import { createProvider } from "./index.js";
 import { hasGetBalance, hasDailyCheckin, hasTokenRefresh, REASONING_DIALECTS } from "../core/contract.js";
 import { log } from "../logging/logger.js";

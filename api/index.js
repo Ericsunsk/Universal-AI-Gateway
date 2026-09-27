@@ -1,3 +1,5 @@
+// Vercel serverless 入口 —— 单请求生命周期内的 env/KV 装配与请求转译。
+// 真实网关逻辑在 src/index.js；此处只负责平台适配（body 上限、env 白名单、KV 单例）。
 import { Readable } from "node:stream";
 import worker, { MAX_BODY_BYTES } from "../src/index.js";
 import { createKvFromEnv } from "../src/kv/index.js";

@@ -1,3 +1,5 @@
+// 网关主入口 —— 装配 config / fleet / kv / ratelimit 并路由请求。
+// 组合根：唯一允许同时了解各层的地方；具体协议转译委托 exchange/。
 import { getConfig, VERSION } from "./config/config.js";
 import { authenticateAccess, timingSafeEqual } from "./auth/auth.js";
 import { corsHeaders } from "./http/headers.js";

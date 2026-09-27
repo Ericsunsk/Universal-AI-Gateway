@@ -1,3 +1,6 @@
+// 配置装配 —— 从进程环境解析、校验（schema.js）并归一化网关配置。
+// 环境变量是唯一真值源；此处是唯一允许直读 process.env 的业务模块
+// （其余模块经注入的 config 读取，见 exchange/transform.js 的解耦说明）。
 export const VERSION = "2.5.0";
 import { validateGatewayConfig } from "./schema.js";
 import { log } from "../logging/logger.js";

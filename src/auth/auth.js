@@ -1,3 +1,5 @@
+// 鉴权 —— API key / JWT 校验、master/cron 权限分级、模型白名单。
+// 与 HTTP 无关的纯判定逻辑；响应头构造委托 http/headers.js。
 import { corsHeaders } from "../http/headers.js";
 
 function hashString32(str) {

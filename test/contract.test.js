@@ -1,9 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hasGetBalance, hasDailyCheckin, hasCallChat, hasCallMessages, wantsStreamedChat, hasTokenRefresh, needsReasoningScrub, REASONING_DIALECTS } from "../src/core/contract.js";
-import { OpenAIStandardProvider } from "../src/providers/openai_standard.js";
-import { AnthropicStandardProvider } from "../src/providers/anthropic_standard.js";
-import { WorkBuddyProvider } from "../src/providers/workbuddy/index.js";
+import { supportedProviderTypes, createProvider } from "../src/providers/index.js";
 
 test("contract predicates detect optional provider capabilities", () => {
   assert.equal(hasGetBalance({ getBalance: () => {} }), true);
@@ -33,12 +31,15 @@ test("contract probes cover the dispatch hot path (no type switch)", () => {
 
 // 每个真实 provider 必须显式声明推理方言，不得依赖 type 字符串兜底推断。
 // 新增上游若忘记声明，needsReasoningScrub 会抛错——本用例把该违约挡在 CI 上。
+//
+// 枚举取自 registry 真值（supportedProviderTypes），不再硬编码列表：
+// 此前手工维护 3 个构造调用，第 4 个 provider 注册后若没人记得改这里，
+// 契约就会对它静默失效。现在注册即纳入校验。
 test("every concrete provider declares a valid reasoning dialect", () => {
-  const concrete = [
-    new OpenAIStandardProvider({ id: "o", config: {} }, {}),
-    new AnthropicStandardProvider({ id: "a", config: {} }, {}),
-    new WorkBuddyProvider({ id: "w" }, {})
-  ];
+  const concrete = supportedProviderTypes().map(
+    (t) => createProvider({ type: t, id: t, config: {} }, {})
+  );
+  assert.ok(concrete.length > 0, "registry must expose at least one provider");
   for (const p of concrete) {
     assert.ok(
       REASONING_DIALECTS.includes(p.reasoningDialect),
@@ -49,8 +50,10 @@ test("every concrete provider declares a valid reasoning dialect", () => {
   }
 
   // 方言与 type 解耦：WorkBuddy 句柄的 type 恰好同名，但判定只认 dialect。
-  const wb = concrete[2];
-  assert.equal(wb.type, "workbuddy");
+  // 按 type 查找而非固定下标 —— 此前用 concrete[2] 假设了手工列表的顺序，
+  // 枚举改为 registry 真值后顺序由注册序决定，下标断言会误伤。
+  const wb = concrete.find((p) => p.type === "workbuddy");
+  assert.ok(wb, "registry must include the workbuddy provider");
   assert.equal(needsReasoningScrub(wb), true);
   assert.equal(needsReasoningScrub({ type: "workbuddy", reasoningDialect: "openai" }), false);
 });

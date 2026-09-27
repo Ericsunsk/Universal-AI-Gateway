@@ -1,3 +1,5 @@
+// 本地 Node 入口 —— cluster 多 worker + 全局出站连接池（Vercel 部署用 api/index.js）。
+// 与 serverless 路径共享 src/index.js 的 handler；差异仅在进程模型与连接池配置。
 import http from "node:http";
 import cluster from "node:cluster";
 import { setGlobalDispatcher, Agent } from "undici";

@@ -1,3 +1,6 @@
+// WorkBuddy 上游 adapter —— 多账号池 + 会话粘性 + 自动故障转移（provider 编排层）。
+// 账号轮转/冷却落 KV（见 ./cooldown.js），payload 清洗见 ./sanitize.js；
+// 逐项尝试循环复用 core/failover.js 的唯一驱动器，凭证刷新见本文件 token 段。
 import { sanitizeWorkbuddyPayload } from "./sanitize.js";
 import { buildResponseHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
