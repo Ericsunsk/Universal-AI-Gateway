@@ -306,3 +306,161 @@ test("dispatch debug headers are master-only", async () => {
   assert.equal(clientRes.headers.get("X-Gateway-Account"), null);
   assert.equal(clientRes.headers.get("X-Gateway-Fallback"), null);
 });
+
+// ---- 2026-09-27 审计修复：上游错误文本必须经 redact seam ----
+// 上游 error.message 不可信，可能回显内部端点 / 凭据 / 内网 IP。redact.js 声明为
+// 「所有回吐给客户端的上游原文的唯一出口」，但 stream.js 有三条出口曾各自拼接原文：
+//   1) 流式 error emission（SSE + 日志）  2) 非流式整块 JSON 的 extractErrorMessage
+// 二者都绕过该 seam，同时污染日志聚合与客户端回执。
+const LEAKY_MSG = "invalid key sk-live-ABCDEFGH12345678 at http://10.0.0.5/v1";
+const CRED = "sk-live-ABCDEFGH12345678";
+const INTERNAL = "10.0.0.5";
+
+test("stream error emission is redacted before reaching client SSE", async () => {
+  const upstream = new Response(
+    `data: ${JSON.stringify({ error: { message: LEAKY_MSG } })}\n\ndata: [DONE]\n\n`,
+    { status: 200, headers: { "Content-Type": "text/event-stream" } }
+  );
+  const res = await encodeAnthropicResponse({
+    upstream, model: "m", headers: {}, stopSequences: [], initialInputTokens: 1, stream: true
+  });
+  const body = await res.text();
+  assert.ok(!body.includes(CRED), "credential must not leak into SSE");
+  assert.ok(!body.includes(INTERNAL), "internal host must not leak into SSE");
+  assert.ok(body.includes("<credential>"), "credential redaction marker expected in SSE");
+});
+
+test("non-stream whole-body JSON error is redacted before reaching client", async () => {
+  // 非流式上游返回整块 JSON（非 SSE）：走 formatOpenAIToAnthropicJson 的 JSON.parse 分支，
+  // 其 extractErrorMessage 结果此前直接并入正文，是第二条未脱敏出口。
+  const upstream = new Response(
+    JSON.stringify({ error: { message: LEAKY_MSG } }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+  const res = await encodeAnthropicResponse({
+    upstream, model: "m", headers: {}, stopSequences: [], initialInputTokens: 1, stream: false
+  });
+  const body = await res.text();
+  assert.ok(!body.includes(CRED), "credential must not leak into non-stream body");
+  assert.ok(!body.includes(INTERNAL), "internal host must not leak into non-stream body");
+  assert.ok(body.includes("<credential>"), "credential redaction marker expected in body");
+});
+
+// ---- 2026-09-27 审计修复：非流式上游往返必须有服务端超时兜底 ----
+// 流式路径有 stall 熔断（按字节间隔判活），非流式是一次 await 到底、无心跳：
+// 客户端 signal 在 stream:false 场景往往不存在，若不兜底会一路挂到 Vercel 300s 上限。
+// 非流式：上游往返必须叠服务端超时。注意 Request.signal 恒存在（仅客户端断连才 abort），
+// 它不因上游 hang 而中止——故必须合成 timeout 信号，否则会挂到 Vercel 300s 上限。
+// 判据：AbortSignal.any() 的产物带 kSourceSignals；AbortSignal.timeout() 带 kTimeout。
+// （注意 kComposite 在普通 signal 上同样存在，不能作为判据。）
+const hasServerTimeout = (s) => !!s && Object.getOwnPropertySymbols(s).some(
+  (sym) => String(sym) === "Symbol(kSourceSignals)" || String(sym) === "Symbol(kTimeout)");
+
+test("non-stream upstream round-trip is wrapped with a server-side timeout", async () => {
+  let seenSignal = null;
+  const fleet = {
+    getAllActive: () => [{ id: "wb" }],
+    getProvider: () => ({
+      id: "wb",
+      type: "workbuddy",
+      reasoningDialect: "workbuddy",
+      forceStream: true,
+      callChat: async (_payload, opts) => {
+        seenSignal = opts.signal;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), {
+          status: 200, headers: { "Content-Type": "application/json" }
+        });
+      }
+    })
+  };
+  await dispatchExchange({
+    // 客户端未显式提供可中止 signal 的情形即非流式常态
+    request: new Request("http://localhost/v1/chat/completions", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: "hi" }], stream: false },
+    model: "m",
+    config: { routes: { m: [{ provider: "wb", model: "m" }] } },
+    fleet,
+    protocol: "openai",
+    principal: { isMaster: false, role: "client" }
+  });
+  assert.ok(seenSignal, "non-stream upstream must receive a signal");
+  assert.ok(hasServerTimeout(seenSignal),
+    "non-stream signal must carry a server-side timeout, not just the passive client signal");
+});
+
+// 流式：不得叠总超时——长流只要持续吐字节就不该被杀，交由 stream 层 stall 熔断按字节间隔判活。
+test("streaming upstream call is not wrapped with a total timeout", async () => {
+  let seenSignal = "unset";
+  const fleet = {
+    getAllActive: () => [{ id: "wb" }],
+    getProvider: () => ({
+      id: "wb",
+      type: "workbuddy",
+      reasoningDialect: "workbuddy",
+      forceStream: true,
+      callChat: async (_payload, opts) => {
+        seenSignal = opts.signal;
+        return new Response("data: [DONE]\n\n", {
+          status: 200, headers: { "Content-Type": "text/event-stream" }
+        });
+      }
+    })
+  };
+  await dispatchExchange({
+    request: new Request("http://localhost/v1/chat/completions", { method: "POST" }),
+    body: { model: "m", messages: [{ role: "user", content: "hi" }], stream: true },
+    model: "m",
+    config: { routes: { m: [{ provider: "wb", model: "m" }] } },
+    fleet,
+    protocol: "openai",
+    principal: { isMaster: false, role: "client" }
+  });
+  assert.ok(!hasServerTimeout(seenSignal),
+    "streaming path must pass through the bare client signal, never a total-timeout signal");
+});
+
+// ---- 2026-09-27 审计修复（续）：非 SSE 整块上游内容的兜底出口 ----
+// 上游若返回 Content-Type 不符的整块内容（如流式请求回 JSON error），会落到 stream.js 的
+// buffer 兜底分支。该分支此前把原始 buffer 直接当正文发出，形成第三、第四条未脱敏出口。
+test("streaming path redacts non-SSE upstream buffer fallback", async () => {
+  // 流式请求，但上游回整块 JSON（无 data: 前缀）——格式不符，走 buffer 兜底
+  const upstream = new Response(
+    JSON.stringify({ error: { message: LEAKY_MSG } }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+  const res = await encodeAnthropicResponse({
+    upstream, model: "m", headers: {}, stopSequences: [], initialInputTokens: 1, stream: true
+  });
+  const body = await res.text();
+  assert.ok(!body.includes(CRED), "credential must not leak via stream buffer fallback");
+  assert.ok(!body.includes(INTERNAL), "internal host must not leak via stream buffer fallback");
+});
+
+test("non-stream path redacts unparseable upstream buffer", async () => {
+  // 上游回非 JSON 纯文本（如裸 HTML 错误页 / 网关报错）——JSON.parse 抛错走 catch 兜底
+  const upstream = new Response(
+    `Bad Gateway: upstream ${INTERNAL} rejected key ${CRED}`,
+    { status: 200, headers: { "Content-Type": "text/plain" } }
+  );
+  const res = await encodeAnthropicResponse({
+    upstream, model: "m", headers: {}, stopSequences: [], initialInputTokens: 1, stream: false
+  });
+  const body = await res.text();
+  assert.ok(!body.includes(CRED), "credential must not leak via unparseable buffer");
+  assert.ok(!body.includes(INTERNAL), "internal host must not leak via unparseable buffer");
+});
+
+// 反向护栏：正常模型内容不得被误脱敏（脱敏只应作用于错误 / 兜底分支）。
+test("normal model content is never over-redacted", async () => {
+  const NORMAL = "See https://api.example.com/v1/models and read process.env.OPENAI_API_KEY.";
+  const upstream = new Response(
+    JSON.stringify({ choices: [{ message: { content: NORMAL }, finish_reason: "stop" }] }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+  const res = await encodeAnthropicResponse({
+    upstream, model: "m", headers: {}, stopSequences: [], initialInputTokens: 1, stream: false
+  });
+  const body = await res.text();
+  assert.ok(body.includes("https://api.example.com/v1/models"), "normal URL must be preserved");
+  assert.ok(body.includes("process.env.OPENAI_API_KEY"), "normal env reference must be preserved");
+});

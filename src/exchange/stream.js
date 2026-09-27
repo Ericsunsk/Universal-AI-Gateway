@@ -5,6 +5,7 @@ import { corsHeaders } from "../http/headers.js";
 import { ThinkingAccumulator, shouldEmitTextBlock, SYNTHETIC_THINKING_SIGNATURE } from "./thinking.js";
 import { recordUpstreamCache } from "../core/cacheStats.js";
 import { log } from "../logging/logger.js";
+import { redactUpstreamText } from "../http/redact.js";
 import { DsmlStreamParser, parseDsmlInvocations, stripDsml, containsDsml } from "./dsml.js";
 
 export { DsmlStreamParser, parseDsmlInvocations, stripDsml, containsDsml };
@@ -736,7 +737,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
         const emissions = reduceOpenAIChunkAll(parsed);
         const errorEmission = emissions.find(e => e.kind === "error");
         if (errorEmission) {
-          const errMsg = errorEmission.message;
+          // 上游错误文本不可信：日志与客户端回执都必须经 redact seam（与 dispatch 同口径），
+          // 否则上游回显的内部端点 / 凭据会同时污染日志聚合与 SSE 流。
+          const errMsg = redactUpstreamText(errorEmission.message);
           log.warn("Upstream stream error", { error: errMsg });
           if (blockState.blockType !== "text") await writeAll(blockState.open("text"));
           // notice 文本同样计入 emittedChars（textDelta 内部累计），与正文同口径，避免 output_tokens 偏小
@@ -783,12 +786,16 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       // 若流结束时 buffer 尚存非 SSE 格式内容（如上游返回单一 JSON）
       if (blockState.blockIndex === -1 && buffer.trim()) {
         try {
+          // 上游 error.message / 无法解析的原始 buffer 均不可信：经 redact seam 收敛后再回吐。
+          // 这是流式路径上「上游返回非 SSE 整块内容」的兜底出口——此前直接把原始 buffer
+          // 当正文发出，可回显上游内部端点 / 凭据（与 formatOpenAIToAnthropicJson 的兜底同源问题）。
           const parsed = JSON.parse(buffer.trim());
           const text = parsed.choices?.[0]?.message?.content ||
                        parsed.choices?.[0]?.delta?.content ||
-                       parsed.error?.message ||
-                       parsed.msg ||
-                       (parsed.code ? `Upstream error ${parsed.code}` : buffer.trim());
+                       (parsed.error?.message || parsed.msg
+                         ? redactUpstreamText(parsed.error?.message || parsed.msg)
+                         : null) ||
+                       redactUpstreamText(parsed.code ? `Upstream error ${parsed.code}` : buffer.trim());
           if (text) {
             if (containsDsml(text)) {
               const dsmlInvocations = parseDsmlInvocations(text);
@@ -916,7 +923,8 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
       // 定址成块，直接丢弃（此前整段 tool_calls 被静默丢弃，stop_reason 恒为 end_turn）。
       for (const emission of reduceOpenAIChunkAll(parsed)) {
         if (emission.kind === "error") {
-          accumulated += `\n[Upstream Notice: ${emission.message}]\n`;
+          // 同流式出口：上游原文经 redact seam 收敛后再并入正文。
+          accumulated += `\n[Upstream Notice: ${redactUpstreamText(emission.message)}]\n`;
         } else if (emission.kind === "thinking") {
           thinkingAcc.push(emission.text);
         } else if (emission.kind === "text") {
@@ -949,7 +957,11 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
         } else if (parsed.choices?.[0]?.delta?.content) {
           accumulated = parsed.choices[0].delta.content;
         } else {
-          accumulated = extractErrorMessage(parsed) || (thinkingAcc.suppressesFallbackText ? "" : buffer.trim());
+          // 上游 error.message 不可信：经 redact seam 收敛后再作为正文回吐（与流式出口同口径）。
+          // 注意 extractErrorMessage 可能为 undefined，此时保留原有 fallback 链，不调用 redact
+          // （redactUpstreamText 对空输入会返回固定文案，会吞掉 thinkingAcc 抑制语义）。
+          const errText = extractErrorMessage(parsed);
+          accumulated = (errText ? redactUpstreamText(errText) : null) || (thinkingAcc.suppressesFallbackText ? "" : redactUpstreamText(buffer.trim()));
         }
         // 提取非流式响应中的工具调用（直接存归一化形态，避免二次嵌套 OpenAI 包裹层）
         if (Array.isArray(message?.tool_calls)) {
@@ -971,7 +983,8 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
           accumulatedFinishReason = parsed.choices[0].finish_reason;
         }
       } catch {
-        accumulated = buffer.trim();
+        // JSON 解析失败：上游返回非预期形态，buffer 原文不可信，经 redact seam 收敛后再回吐。
+        accumulated = redactUpstreamText(buffer.trim());
       }
     }
   } finally {

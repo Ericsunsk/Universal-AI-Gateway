@@ -12,6 +12,29 @@ import { encodeAnthropicResponse } from "./stream.js";
 import { estimateTokens } from "../core/tokenizer.js";
 
 /**
+ * 非流式上游往返超时。流式路径有 stall 熔断（stream.js UPSTREAM_STALL_MS，180s）保护——
+ * 它以「字节间隔」判活，长流只要持续吐字节就不会被杀，故流式**不能**再叠总超时。
+ * 非流式则是一次 await 到底、无字节级心跳。注意 Request.signal 恒存在，但它只在客户端
+ * 断连时 abort，不因上游 hang 而中止——只透传它等于没有超时兜底，请求会一路挂到
+ * Vercel maxDuration(300s) 才被强杀，白白占用函数时长。
+ * 取 120s：小于平台上限；非流式无增量字节，超时语义应比流式 stall 更严格。
+ */
+const UPSTREAM_REQUEST_TIMEOUT_MS = 120 * 1000;
+
+/**
+ * 为上游往返合成 signal：客户端 signal（用户断连）+ 非流式服务端超时，任一触发即中止。
+ * AbortSignal.any / .timeout 在 Node 20+ 可用（CI 与 Vercel 运行时均为 Node 20）。
+ * 流式请求只透传客户端 signal，交由 stream 层 stall 熔断兜底，此处不叠总超时。
+ */
+function upstreamSignal(request, body) {
+  const clientSignal = request?.signal;
+  const streaming = body?.stream === true;
+  if (streaming) return clientSignal;
+  const timeout = AbortSignal.timeout(UPSTREAM_REQUEST_TIMEOUT_MS);
+  return clientSignal ? AbortSignal.any([clientSignal, timeout]) : timeout;
+}
+
+/**
  * Deep Exchange Module:
  * 单一深度接口，封装完整的协议探测、跨协议转译、指纹清洗、优先级回退与流式输出
  */
@@ -131,7 +154,7 @@ export async function dispatchExchange({
           // 原生路径按 adapter 声明的方言注入（预检已保证合法）；硬编码 "anthropic"
           // 仅为历史缺省，現以 provider 声明为准，避免未来原生方言分化时错配。
           const anthropicPayload = applyReasoningToPayload({ ...body, model: candidate.model }, reasoningIntent, provider.reasoningDialect ?? "anthropic");
-          upstreamRes = await provider.callMessages(anthropicPayload, { signal: request?.signal, request, principal });
+          upstreamRes = await provider.callMessages(anthropicPayload, { signal: upstreamSignal(request, body), request, principal });
         } else if (hasCallChat(provider)) {
           let openaiPayload;
           try {
@@ -162,7 +185,7 @@ export async function dispatchExchange({
           if (wantsStreamedChat(provider)) {
             openaiPayload.stream = true;
           }
-          upstreamRes = await provider.callChat(openaiPayload, { signal: request?.signal, request, principal });
+          upstreamRes = await provider.callChat(openaiPayload, { signal: upstreamSignal(request, body), request, principal });
         } else {
           // OpenAI 协议 + 纯 Anthropic 上游：网关暂不支持该组合，转 400 而非静默切换。
           return { kind: "done", response: clientError(400, `Provider "${candidate.provider}" does not support OpenAI chat protocol`) };
