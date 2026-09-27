@@ -8,13 +8,16 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # 显式钉在 ubuntu-24.04：`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26，
+    # 隐式跟随会在迁移日静默改变工具链。需要时再显式升级。
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # 测试矩阵外的运行时下限：engines 要求 >=20，此处跑当前 LTS。
+          node-version: 22
           cache: npm
 
       - run: npm ci
