@@ -219,3 +219,58 @@ test("log level is resolved at emit time, not construction time", () => {
   assert.equal(logs.length, 1, "only the post-toggle debug line should emit");
   assert.ok(logs[0].includes("should now appear"));
 });
+
+// ---- 2026-09-27 审计修复：日志中的 URL query 凭据必须打码 ----
+// /checkin?secret=xxx 的 cron 凭据走 query（src/index.js 的 /checkin 路由）。
+// 访问日志若记录完整 req.url（键名为中性的 path），仅靠键名匹配无法拦截，
+// 故 sanitize 需在值侧做纵深防御：URL 形态的字符串也要打码敏感 query 参数。
+test("sanitize redacts sensitive query params in URL-shaped values", () => {
+  assert.equal(sanitize({ path: "/checkin?secret=SUPERSECRET123" }).path, "/checkin?secret=****");
+  assert.equal(sanitize({ path: "/v1/messages?api_key=sk-live-X" }).path, "/v1/messages?api_key=****");
+  assert.equal(sanitize({ path: "/x?token=tok_1&page=2" }).path, "/x?token=****&page=2");
+  assert.equal(sanitize({ path: "/x?secret=a&secret=b" }).path, "/x?secret=****&secret=****");
+  // 非敏感参数保留原值（排障需要）
+  assert.equal(sanitize({ path: "/v1/models?page=2&limit=10" }).path, "/v1/models?page=2&limit=10");
+});
+
+test("sanitize does not over-redact non-URL strings", () => {
+  // 自然语言的问号不是 query
+  assert.equal(sanitize({ msg: "What is this? I don't know" }).msg, "What is this? I don't know");
+  // 无 query 的路径原样保留
+  assert.equal(sanitize({ path: "/v1/messages" }).path, "/v1/messages");
+  // 模型输出里的普通 URL（无敏感参数）不得被改写
+  const s = "See https://api.example.com/v1/models for info";
+  assert.equal(sanitize({ text: s }).text, s);
+});
+
+test("access log never leaks the cron secret", () => {
+  const logs = [];
+  setLogSink((line) => logs.push(line));
+  try {
+    log.info("HTTP Request", { method: "GET", path: "/checkin?secret=SUPERSECRET123", status: 200 });
+  } finally {
+    setLogSink(null);
+  }
+  assert.ok(!logs.join("").includes("SUPERSECRET123"), "cron secret must not reach the log sink");
+  assert.ok(logs.join("").includes("secret=****"), "param name should survive for debuggability");
+});
+
+test("prematurely closed request logs warning with 499 status", () => {
+  const logs = [];
+  setLogSink((line) => logs.push(line));
+  try {
+    log.warn("HTTP Request Closed Prematurely", {
+      method: "POST",
+      path: "/v1/messages",
+      status: 499,
+      duration_ms: 1000,
+      aborted: true
+    });
+  } finally {
+    setLogSink(null);
+  }
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].includes("HTTP Request Closed Prematurely"));
+  assert.ok(logs[0].includes("499"));
+});
+

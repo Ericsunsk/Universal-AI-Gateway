@@ -145,6 +145,10 @@ export const log = {
  * 键名归一化后匹配（去 `_-`、小写）：`api_key`/`x-api-key`/`apiKey` 统一为 `apikey`，
  * 避免蛇形/串形漏网。`key` 仅精确匹配（`monkey` 不得误杀）；其余长片段用包含匹配。
  *
+ * 值侧纵深防御：字符串值若形如带 query 的 URL/路径（如 `/checkin?secret=xxx`），
+ * 其敏感 query 参数的值同样被打码——键名是 `path`/`url` 这类中性名时，仅靠键名匹配
+ * 无法拦截（这正是 /checkin?secret= 曾泄露进日志的原因）。
+ *
  * @param {Object} obj - 需要脱敏的对象
  * @param {string[]} sensitiveKeys - 敏感字段名（归一化后匹配）
  * @returns {Object} 脱敏后的对象
@@ -169,10 +173,35 @@ export function sanitize(obj, sensitiveKeys = ["token", "password", "apikey", "s
       result[key] = value.length > 4 ? `${value.slice(0, 4)}****` : "****";
     } else if (typeof value === "object" && value !== null) {
       result[key] = sanitize(value, sensitiveKeys);
+    } else if (typeof value === "string") {
+      result[key] = redactUrlQuery(value, normKeys, norm);
     } else {
       result[key] = value;
     }
   }
 
   return result;
+}
+
+// 形如 `...?a=1&b=2` 且不含空白（排除自然语言里的问号）才按 URL 处理。
+const URLISH_QUERY = /\?[^\s]*=[^\s]*/;
+
+/**
+ * 打码 URL/路径中敏感 query 参数的值，保留参数名（便于排障时看出「传了什么」）。
+ * 例：`/checkin?secret=abc123&x=1` -> `/checkin?secret=****&x=1`
+ */
+function redactUrlQuery(value, normKeys, norm) {
+  if (!URLISH_QUERY.test(value)) return value;
+  const qi = value.indexOf("?");
+  const head = value.slice(0, qi);
+  const query = value.slice(qi + 1);
+  const masked = query.split("&").map((pair) => {
+    const eq = pair.indexOf("=");
+    if (eq === -1) return pair;
+    const name = pair.slice(0, eq);
+    const nn = norm(name);
+    const hit = normKeys.some((k) => (k === "key" ? nn === "key" : nn.includes(k))) || nn === "key";
+    return hit ? `${name}=****` : pair;
+  }).join("&");
+  return `${head}?${masked}`;
 }

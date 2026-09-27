@@ -7,13 +7,30 @@ const host = "0.0.0.0";
 
 const server = http.createServer((req, res) => {
   const start = Date.now();
-  res.once("finish", () => {
-    log.info("HTTP Request", {
-      method: req.method,
-      path: req.url,
-      status: res.statusCode,
-      duration_ms: Date.now() - start
-    });
+  // 只记 pathname，**绝不记 query**：/checkin?secret=xxx 的 cron 凭据走 query
+  // （见 src/index.js 的 /checkin 路由），req.url 会把 secret 原样带进日志聚合平台。
+  const pathname = (() => {
+    try { return new URL(req.url, "http://localhost").pathname; }
+    catch { return "(unparseable)"; }
+  })();
+  res.once("close", () => {
+    const duration_ms = Date.now() - start;
+    if (res.writableEnded) {
+      log.info("HTTP Request", {
+        method: req.method,
+        path: pathname,
+        status: res.statusCode,
+        duration_ms
+      });
+    } else {
+      log.warn("HTTP Request Closed Prematurely", {
+        method: req.method,
+        path: pathname,
+        status: res.statusCode || 499,
+        duration_ms,
+        aborted: req.destroyed
+      });
+    }
   });
   handler(req, res);
 });

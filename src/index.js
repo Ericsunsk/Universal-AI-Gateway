@@ -150,7 +150,7 @@ async function handleRequest(request, env) {
       const parsed = await authenticateAndParseRequest(request, env, config);
       if (!parsed.ok) return parsed.response;
 
-      const inputTokens = estimateTokens(parsed.body || {});
+      const inputTokens = estimateTokens(parsed.body || {}, { exact: true });
       return new Response(JSON.stringify({ input_tokens: inputTokens }), {
         status: 200,
         headers: { "Content-Type": "application/json", ...corsHeaders }

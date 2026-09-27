@@ -9,6 +9,10 @@ import { log } from "../../logging/logger.js";
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
 const TOKEN_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟热缓存
+// 在途刷新去重（singleflight）：cacheKey -> Promise。与 config.js 的 inflightConfigRefresh 同范式。
+// 无此去重时，N 个并发请求同时撞上过期/401 会各自发一次 fetch(refresh) 并各写一轮 KV：
+// 写放大的同时，后写者还会覆盖前者的 refreshToken/LAST_REFRESH，放大上游刷新侧的竞态。
+let inflightTokenRefresh = new Map();
 // 显式池成员缺凭证告警去重：每账号每进程只告警一次，避免热路径刷屏
 const noCredentialWarned = new Set();
 let roundRobinCounter = 0;
@@ -17,6 +21,7 @@ let roundRobinCounter = 0;
 // 生产代码永不调用（复用 createMemoryKv 式的"测试拿隔离状态"思路）。
 export function resetSchedulingCounterForTests() {
   roundRobinCounter = 0;
+  inflightTokenRefresh = new Map();
 }
 
 // 抖动重试基准延迟（Q6 可配置）：env RETRY_BASE_MS，默认 600ms。
@@ -206,7 +211,20 @@ export class WorkBuddyProvider {
       const results = await Promise.allSettled(accounts.map(acc => this.refreshAccessToken(acc)));
       return results.map(r => r.status === "fulfilled" ? r.value : null).filter(Boolean);
     }
+    // singleflight：同一账号的在途刷新只发一次网络往返，其余并发等待同一 promise。
+    // 注意去重键含 this.id，避免不同 provider 实例的同名账号互相串用。
     const cacheKey = `${this.id}_${account.id}`;
+    const existing = inflightTokenRefresh.get(cacheKey);
+    if (existing) return existing;
+
+    const task = this.refreshAccessTokenOnce(account, cacheKey)
+      .finally(() => { inflightTokenRefresh.delete(cacheKey); });
+    inflightTokenRefresh.set(cacheKey, task);
+    return task;
+  }
+
+  // 单账号刷新的实际实现（不含去重）。仅由 refreshAccessToken 调用。
+  async refreshAccessTokenOnce(account, cacheKey) {
     const allowEnv = account.allowEnvFallback === true;
     let refreshToken = account.refreshToken || (allowEnv ? this.env.REFRESH_TOKEN || "" : "");
     if (this.kv) {
