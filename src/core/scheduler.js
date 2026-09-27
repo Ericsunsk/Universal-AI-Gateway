@@ -111,9 +111,12 @@ export function isWAFChallenge(bodyText = "") {
 
 // 纯函数：判断腾讯在 200 状态里返回的业务错误码是否应触发退避。
 // 返回 0 表示无业务错误；否则返回业务错误码。
+// 上游可能把成功码序列化成字符串 "0"（"0" !== 0 为真），故先归一再判定——
+// 否则健康 200 会被误判为业务错误 → classifyFailure 归 retry → 无谓切号甚至耗尽账号池。
 export function businessErrorCode(resJson) {
-  if (resJson && typeof resJson === "object" && resJson.code !== undefined && resJson.code !== 0) {
-    return resJson.code;
+  if (resJson && typeof resJson === "object" && resJson.code !== undefined) {
+    const code = Number(resJson.code);
+    if (Number.isFinite(code) && code !== 0) return resJson.code;
   }
   return 0;
 }

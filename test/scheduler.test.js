@@ -168,6 +168,18 @@ test("businessErrorCode extracts Tencent code from 200 JSON", () => {
   assert.equal(businessErrorCode(null), 0);
 });
 
+// 回归：上游把成功码序列化成字符串 "0" 时，曾被 `"0" !== 0` 误判为业务错误
+// → classifyFailure 归 retry → 无谓切号（可能耗尽账号池）。
+test("businessErrorCode treats stringified zero as success", () => {
+  assert.equal(businessErrorCode({ code: "0" }), 0);
+  // 非零错误码无论数值还是字符串都须原样透出，供退避分类使用
+  assert.equal(businessErrorCode({ code: "-1" }), "-1");
+  assert.equal(businessErrorCode({ code: "11128" }), "11128");
+  // 非数值码不构成业务错误（保守放行健康响应，避免误切号）
+  assert.equal(businessErrorCode({ code: "abc" }), 0);
+  assert.equal(businessErrorCode({ code: null }), 0);
+});
+
 test("hashString32 is deterministic with avalanche on different inputs", () => {
   assert.equal(hashString32("sess-1"), hashString32("sess-1"));
   assert.notEqual(hashString32("sess-1"), hashString32("sess-2"));

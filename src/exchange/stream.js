@@ -161,6 +161,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
     // 真实输入 token 数：优先采信上游 usage.prompt_tokens（透传/翻译路径均可能携带），
     // 上游从不报 usage 时保持 0 —— Anthropic 线协议不允许凭空估算输入长度。
     let reportedInputTokens = 0;
+    // 上游原始 finish_reason（非流式路径同名变量位于 formatOpenAIToAnthropicJson）。
+    // 终局 stop_reason 需它才能区分 length/stop：blockState.stopReason 只能表达 tool_use/end_turn。
+    let accumulatedFinishReason = null;
 
     try {
       const tail = { text: "" };
@@ -209,6 +212,9 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
           } else {
             // 分派收进状态机：读循环只表达「解码 → 分派 → 写出」，不再承载 kind 长链。
             // 无 delta 的纯 finish 终局块同样经此处设置 stop_reason，不得用 delta 守卫跳过。
+            // 同时留存原始 finish_reason：状态机只能表达 tool_use/end_turn，
+            // length/stop（→ max_tokens/stop_sequence）需原始值才能在终局正确还原。
+            if (emission.kind === "finish") accumulatedFinishReason = emission.finishReason;
             await writeAll(blockState.applyEmission(emission));
           }
         }
@@ -280,11 +286,16 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
       // 取上游 usage 与字符估算的较大值（与非流式落袋口径一致）。
       // input_tokens 采信上游 usage.prompt_tokens：缺失时为 0（不估算输入长度）。
       const finalOutputTokens = Math.max(reportedOutputTokens, Math.ceil(blockState.emittedChars / 4));
-      // 终局 stop_reason 与 stop_sequence：统一委托 resolveStopDetails 判定
-      const stopDetails = resolveStopDetails(blockState.stopReason, {
-        text: blockState.textTail,
-        detail: stopDetail
-      });
+      // 终局 stop_reason 与 stop_sequence：统一委托 resolveStopDetails 判定。
+      // 优先级：状态机判定为 tool_use 时以其为准 —— 该结论可能来自 DSML 拦截等客户端侧合成
+      // （上游此时只报 finish_reason:"stop"，若采信原始值会把合成出的 tool_use 抹成 end_turn）；
+      // 其余情况必须传上游原始 finish_reason，blockState.stopReason 只能表达 tool_use/end_turn，
+      // 采信它会让 "length"/"stop" 永远落进 default 分支 → max_tokens/stop_sequence 永久丢失，
+      // 截断响应被误判为正常结束（Claude Code 靠 max_tokens 决定是否续写）。
+      const stopDetails = resolveStopDetails(
+        blockState.stopReason === "tool_use" ? "tool_calls" : (accumulatedFinishReason ?? blockState.stopReason),
+        { text: blockState.textTail, detail: stopDetail }
+      );
       const finalInputTokens = reportedInputTokens || options?.initialInputTokens || 0;
       const usagePayload = {
         input_tokens: finalInputTokens,

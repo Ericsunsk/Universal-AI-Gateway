@@ -162,6 +162,7 @@ test("transformAnthropicToOpenAI handles tool_use and tool_result blocks", () =>
 
 // ---- OpenAI SSE -> Anthropic SSE 响应侧转译（唯一出口 encodeAnthropicResponse） ----
 import { encodeAnthropicResponse } from "../src/exchange/exchange.js";
+import { resolveStopDetail } from "../src/exchange/reduce.js";
 
 function openAISseResponse(lines) {
   const body = new ReadableStream({
@@ -233,6 +234,75 @@ test("encodeAnthropicResponse(stream:true) sets stop_reason=tool_use on tool_cal
   assert.ok(toolBlock, "tool_use block emitted");
   assert.equal(toolBlock.data.content_block.name, "bash");
 
+  const msgDelta = events.find(e => e.event === "message_delta");
+  assert.equal(msgDelta.data.delta.stop_reason, "tool_use");
+});
+
+// 流式与非流式必须对同一上游 finish_reason 给出一致的 stop_reason。
+// 回归背景：blockState.stopReason 只能表达 tool_use/end_turn，流式路径曾把它当原始
+// finish_reason 传给 resolveStopDetails，导致 length/stop 永远落进 default 分支——
+// 截断响应被误判为正常结束（Claude Code 靠 max_tokens 决定是否续写），且无任何报错。
+test("stop_reason parity: finish_reason=length maps to max_tokens on both paths", async () => {
+  const chunks = [{ choices: [{ delta: { content: "truncated" } }] },
+                  { choices: [{ delta: {}, finish_reason: "length" }] }];
+
+  const streamResp = encodeAnthropicResponse({
+    upstream: openAISseResponse(chunks.map(c => "data: " + JSON.stringify(c))),
+    model: "m", stream: true
+  });
+  const streamEvents = await readAnthropicEvents(streamResp);
+  const streamStop = streamEvents.find(e => e.event === "message_delta").data.delta.stop_reason;
+
+  const jsonResp = await encodeAnthropicResponse({
+    upstream: new Response(JSON.stringify({ choices: [{ message: { content: "truncated" }, finish_reason: "length" }] }),
+      { headers: { "Content-Type": "application/json" } }),
+    model: "m", stream: false
+  });
+  const nonStreamStop = (await jsonResp.json()).stop_reason;
+
+  assert.equal(streamStop, "max_tokens", "streaming must report max_tokens on truncation");
+  assert.equal(nonStreamStop, "max_tokens");
+  assert.equal(streamStop, nonStreamStop, "both paths must agree");
+});
+
+test("stop_reason parity: stop_sequence recovered with matched sequence on both paths", async () => {
+  // detail 须由 resolveStopDetail 构造（active/match 是判定命中的唯一依据）。
+  const stopDetail = resolveStopDetail(["world"]);
+
+  const streamResp = encodeAnthropicResponse({
+    upstream: openAISseResponse([
+      "data: " + JSON.stringify({ choices: [{ delta: { content: "hello world" } }] }),
+      "data: " + JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })
+    ]),
+    model: "m", stream: true, stopDetail
+  });
+  const streamEvents = await readAnthropicEvents(streamResp);
+  const streamDelta = streamEvents.find(e => e.event === "message_delta").data.delta;
+  assert.equal(streamDelta.stop_reason, "stop_sequence");
+  assert.equal(streamDelta.stop_sequence, "world");
+
+  const jsonResp = await encodeAnthropicResponse({
+    upstream: new Response(JSON.stringify({
+      choices: [{ message: { content: "hello world" }, finish_reason: "stop" }]
+    }), { headers: { "Content-Type": "application/json" } }),
+    model: "m", stream: false, stopDetail
+  });
+  const nonStream = await jsonResp.json();
+  assert.equal(nonStream.stop_reason, "stop_sequence");
+  assert.equal(nonStream.stop_sequence, "world");
+});
+
+// DSML 拦截合成出的 tool_use 必须压过上游的 finish_reason:"stop"，
+// 否则客户端侧合成的工具调用会被抹成 end_turn（工具调用静默丢失）。
+test("stop_reason parity: synthesized tool_use wins over upstream finish_reason=stop", async () => {
+  // DSML 标记须与 dsml.test.js 一致（代码块标记内含空格），否则不会触发拦截合成。
+  const upstream = openAISseResponse([
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name=\"Bash\">\n" } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: { content: "<｜｜DSML｜｜ parameter name=\"command\" string=\"true\">ls</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜calls>" } }] }),
+    "data: " + JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] })
+  ]);
+  const resp = encodeAnthropicResponse({ upstream, model: "m", stream: true });
+  const events = await readAnthropicEvents(resp);
   const msgDelta = events.find(e => e.event === "message_delta");
   assert.equal(msgDelta.data.delta.stop_reason, "tool_use");
 });
