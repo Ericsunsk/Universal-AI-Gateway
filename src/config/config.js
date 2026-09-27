@@ -25,6 +25,22 @@ export function parseMaxContextTurns(raw) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+// 解析 MAX_CONTEXT_TOKENS：非负整数才有效，其余（NaN、负数、空、尾随杂质、布尔）一律 0（不启用 Token 强制熔断）。
+export function parseMaxContextTokens(raw) {
+  if (raw === undefined || raw === null) return 0;
+  let n;
+  if (typeof raw === "number") {
+    n = raw;
+  } else if (typeof raw === "string") {
+    const t = raw.trim();
+    if (t === "") return 0;
+    n = Number(t);
+  } else {
+    return 0;
+  }
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
 export function requireSecret(env, name) {
   const value = env?.[name] || (typeof process !== "undefined" ? process.env?.[name] : undefined);
   if (!value || typeof value !== "string" || !value.trim()) {
@@ -59,6 +75,7 @@ export function getDefaultConfig(env) {
     // NaN 护栏：非法值（如 "abc"）回退 0（不剪枝）。否则 NaN 会绕过 `<= 0` 的
     // “全量保真”分支、让 maxWindow/cutIdx 变成 NaN，静默裁掉整段历史。
     max_context_turns: parseMaxContextTurns(env.MAX_CONTEXT_TURNS),
+    max_context_tokens: parseMaxContextTokens(env.MAX_CONTEXT_TOKENS),
     usage_provider_id: "workbuddy",
     // 纯透明直通管道：未声明的模型直接透传默认 provider（workbuddy），零硬编码模型映射
     default_provider: "workbuddy",

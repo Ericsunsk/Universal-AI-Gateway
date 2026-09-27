@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getDefaultConfig, backfillMissingRoutes, parseMaxContextTurns } from "../src/config/config.js";
+import { getDefaultConfig, backfillMissingRoutes, parseMaxContextTurns, parseMaxContextTokens } from "../src/config/config.js";
 import { timingSafeEqual, authenticateAccess } from "../src/auth/auth.js";
 import { buildResponseHeaders } from "../src/http/headers.js";
 
@@ -37,10 +37,27 @@ test("parseMaxContextTurns coerces invalid values to 0 (no pruning)", () => {
   assert.equal(parseMaxContextTurns(40), 40);
 });
 
-test("default config never carries a NaN max_context_turns", () => {
-  const cfg = getDefaultConfig({ API_KEY: "k", MAX_CONTEXT_TURNS: "not-a-number" });
+test("parseMaxContextTokens coerces invalid values to 0 (no pruning)", () => {
+  assert.equal(parseMaxContextTokens(undefined), 0);
+  assert.equal(parseMaxContextTokens(null), 0);
+  assert.equal(parseMaxContextTokens(""), 0);
+  assert.equal(parseMaxContextTokens("   "), 0);
+  assert.equal(parseMaxContextTokens("abc"), 0, "non-numeric must not become NaN");
+  assert.equal(parseMaxContextTokens("64000abc"), 0, "trailing junk rejected");
+  assert.equal(parseMaxContextTokens("64000.7"), 64000, "float string floors");
+  assert.equal(parseMaxContextTokens(true), 0, "boolean must not enable token pruning");
+  assert.equal(parseMaxContextTokens("-100"), 0, "negative disables pruning");
+  assert.equal(parseMaxContextTokens(" 64000 "), 64000, "surrounding whitespace tolerated");
+  assert.equal(parseMaxContextTokens("64000"), 64000);
+  assert.equal(parseMaxContextTokens(64000), 64000);
+});
+
+test("default config never carries a NaN max_context_turns or max_context_tokens", () => {
+  const cfg = getDefaultConfig({ API_KEY: "k", MAX_CONTEXT_TURNS: "not-a-number", MAX_CONTEXT_TOKENS: "bad" });
   assert.equal(Number.isNaN(cfg.max_context_turns), false);
   assert.equal(cfg.max_context_turns, 0);
+  assert.equal(Number.isNaN(cfg.max_context_tokens), false);
+  assert.equal(cfg.max_context_tokens, 0);
 });
 
 // ---- #3 常数时间比较 ----

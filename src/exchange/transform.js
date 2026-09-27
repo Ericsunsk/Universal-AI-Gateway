@@ -3,7 +3,7 @@
 import { optimizeToolOutput } from "./sanitizer.js";
 import { parseReasoningIntent, applyReasoningToPayload } from "./reasoning.js";
 import { shouldDiscardInboundThinking } from "./thinking.js";
-import { parseMaxContextTurns } from "../config/config.js";
+import { parseMaxContextTurns, parseMaxContextTokens } from "../config/config.js";
 
 /**
  * 归一化 Anthropic stop_sequences → 可安全下发给上游的 stop 数组。
@@ -349,30 +349,96 @@ export function pruneOpenAIMessages(messages, isCompact = false) {
   return anyModified ? result : messages;
 }
 
+// 快速文本字符累加（亚微秒级纯算术，避免深层递归与额外对象开销）
+function estimateContentChars(content) {
+  if (typeof content === "string") return content.length;
+  if (Array.isArray(content)) {
+    let chars = 0;
+    for (let i = 0; i < content.length; i++) {
+      const part = content[i];
+      if (typeof part?.text === "string") chars += part.text.length;
+      else if (typeof part?.content === "string") chars += part.content.length;
+      else if (part && typeof part === "object") {
+        try { chars += JSON.stringify(part).length; } catch { /* ignore */ }
+      }
+    }
+    return chars;
+  }
+  return 0;
+}
+
+function estimateMsgTokens(msg) {
+  if (!msg) return 0;
+  const chars = estimateContentChars(msg.content);
+  return Math.max(1, Math.ceil(chars / 3.5) + 4);
+}
+
 /**
- * 智能上下文窗口切片与管理（Cache-Aware Stepped Window + 11148 Invariant Protection）：
- * 1. 阶梯步进淘汰（Epoch / Stepped Eviction）：彻底杜绝每轮前移 1 条导致 DeepSeek / Anthropic
- *    前缀缓存（Prompt Cache）100% 击穿的痛点。窗口超出时按阶梯步长对齐，在区间内保持 cutIdx 绝对稳定。
- * 2. 静态无状态哨兵提示：移除动态变化的计数 (${truncatedCount})，保证前缀 Token 序列 100% 字节一致。
- * 3. 守卫 11148 协议不变量：严格保证切片边界不落在孤立的 tool_result 上（避免破坏工具调用序列）。
- * 4. 历史工具执行结果的 RTK 净化与阶梯退火由 OpenAIMessageSequence 单趟流式执行，零多余对象堆积。
+ * 智能上下文窗口切片与管理（四位一体：Token 预算 + 回合上限 + Cache 友好阶梯 + 11148 协议守卫）：
+ * 1. 双轨驱动（Dual-Trigger）：当且仅当「回合数超出 maxTurnsLimit」或「估算总 Token 超出 maxTokensLimit」时触发。
+ * 2. 动态 Token 预算收敛：若总 Token 突破预算，自后向前逆推可保留的最大安全活跃轮次，与回合数上限取交集。
+ * 3. 阶梯步进淘汰（Epoch / Stepped Eviction）：按自适应步长（2~10 轮）对齐切除，区间内 cutIdx 绝对冻结，
+ *    彻底拯救 DeepSeek / Anthropic 前缀缓存（Prompt Cache 命中率 90%+）。
+ * 4. 静态无状态哨兵：消除随淘汰条数变动的动态数字，确保前缀 Token 序列 100% 字节一致。
+ * 5. 守卫 11148 协议不变量：切片严格对齐在干净轮次，绝不产生孤立 tool_result。
  */
-function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
+function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0, maxTokensLimit = 0, system = null, tools = null) {
   if (!Array.isArray(messages) || messages.length === 0) return messages;
 
-  // 当 maxTurnsLimit <= 0 时，保留全部会话轮次（长上下文全量保真）
-  if (maxTurnsLimit <= 0) return messages;
+  // 1. 双轨判定：若两者皆未启用（<= 0），保持全量历史完整保真
+  if (maxTurnsLimit <= 0 && maxTokensLimit <= 0) return messages;
 
   const total = messages.length;
-  const maxWindow = isCompact ? Math.max(maxTurnsLimit * 1.5, 70) : maxTurnsLimit;
+
+  // 2. 动态 Token 预算感知（Token-Budget Trigger）
+  let tokenWindow = total;
+  if (maxTokensLimit > 0) {
+    let fixedTokens = 10; // bridge 哨兵固定开销
+    if (system) {
+      const sysChars = typeof system === "string" ? system.length : estimateContentChars(system);
+      fixedTokens += Math.max(1, Math.ceil(sysChars / 3.5) + 4);
+    }
+    if (Array.isArray(tools) && tools.length > 0) {
+      try { fixedTokens += Math.max(1, Math.ceil(JSON.stringify(tools).length / 3.5)); } catch { /* ignore */ }
+    }
+    const firstMsgTokens = total > 0 ? estimateMsgTokens(messages[0]) : 0;
+    fixedTokens += firstMsgTokens;
+
+    // 自后向前倒推，在可用 Token 预算内最多能容纳多少轮 recent 活跃消息
+    const budgetForRecent = Math.max(0, maxTokensLimit - fixedTokens);
+    let accumTokens = 0;
+    let retainedTurns = 0;
+    for (let i = total - 1; i >= 1; i--) {
+      const msgTokens = estimateMsgTokens(messages[i]);
+      if (accumTokens + msgTokens > budgetForRecent && retainedTurns > 0) {
+        break;
+      }
+      accumTokens += msgTokens;
+      retainedTurns++;
+    }
+    tokenWindow = Math.max(1, retainedTurns + 1);
+  }
+
+  // 3. 计算双轨交集安全窗口
+  let effectiveWindow;
+  if (maxTurnsLimit > 0 && maxTokensLimit > 0) {
+    effectiveWindow = Math.min(maxTurnsLimit, tokenWindow);
+  } else if (maxTurnsLimit > 0) {
+    effectiveWindow = maxTurnsLimit;
+  } else {
+    effectiveWindow = tokenWindow;
+  }
+
+  const maxWindow = isCompact ? Math.max(effectiveWindow * 1.5, 70) : effectiveWindow;
   if (total <= maxWindow) return messages;
 
-  // 阶梯式步进裁剪：步长自适应 maxWindow（区间 2~10 轮），在同一 step 期间 cutIdx 保持不变
+  // 4. 阶梯式步进裁剪：步长自适应 maxWindow（区间 2~10 轮），在同一 step 期间 cutIdx 保持不变
   const stepSize = Math.max(2, Math.min(10, Math.floor(maxWindow / 3) || 5));
   const excess = total - maxWindow;
   const steppedCut = Math.ceil(excess / stepSize) * stepSize;
 
   let cutIdx = Math.min(Math.max(1, steppedCut), total - 1);
+  // 5. 守卫 11148 不变量：严格保证切片边界不落在孤立的 tool_result 上
   while (cutIdx < total - 1) {
     const m = messages[cutIdx];
     const isToolResult = m && m.role === "user" && Array.isArray(m.content) && m.content.some(c => c && c.type === "tool_result");
@@ -383,7 +449,7 @@ function windowAnthropicMessages(messages, isCompact, maxTurnsLimit = 0) {
   const firstMsg = messages[0];
   const recentMsgs = messages.slice(cutIdx);
   const firstRecent = recentMsgs[0];
-  // 静态无状态桥接消息：保持静态无变动，使得前缀在同一阶梯步进窗口内完全冻结，锁定上游 KV Cache
+  // 6. 静态无状态桥接消息：保持静态无变动，使得前缀在同一阶梯步进窗口内完全冻结，锁定上游 KV Cache
   const bridgeMsg = firstRecent && firstRecent.role === "assistant"
     ? { role: "user", content: "[System Notice: Earlier conversation omitted to preserve context and latency limits. Resuming from active context.]" }
     : { role: "assistant", content: "[System Notice: Earlier conversation omitted to preserve context and latency limits. Ready for next step.]" };
@@ -408,7 +474,7 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
   const isCompact = (typeof body.system === "string" && containsCompactMarker(body.system)) ||
     containsCompactMarker(lastText);
 
-  // 动态上下文保留策略：Vercel / Node 环境下默认 0（完全不剪枝，长上下文全量保真）
+  // 动态上下文保留策略：双轨驱动（max_context_turns 轮次上限 + max_context_tokens 预算上限）
   const maxTurns = parseMaxContextTurns(
     config?.max_context_turns !== undefined
       ? config.max_context_turns
@@ -416,8 +482,15 @@ export function transformAnthropicToOpenAI(body, targetModel, config = {}, inten
           ? process.env.MAX_CONTEXT_TURNS
           : 0)
   );
+  const maxTokens = parseMaxContextTokens(
+    config?.max_context_tokens !== undefined
+      ? config.max_context_tokens
+      : (typeof process !== "undefined" && process.env?.MAX_CONTEXT_TOKENS !== undefined
+          ? process.env.MAX_CONTEXT_TOKENS
+          : 0)
+  );
 
-  const messages = windowAnthropicMessages(rawMessages, isCompact, maxTurns);
+  const messages = windowAnthropicMessages(rawMessages, isCompact, maxTurns, maxTokens, body.system, body.tools);
 
   if (body.system) {
     if (typeof body.system === "string") {

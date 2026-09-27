@@ -46,6 +46,7 @@ export const GatewayConfigSchema = v.looseObject({
   master_key: v.optional(v.string()),
   cron_secret: v.optional(v.string(), ""),
   max_context_turns: v.optional(v.number(), 0),
+  max_context_tokens: v.optional(v.number(), 0),
   usage_provider_id: v.optional(v.string(), "workbuddy"),
   default_provider: v.optional(v.string(), "workbuddy"),
   providers: v.optional(

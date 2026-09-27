@@ -139,6 +139,39 @@ test("transformAnthropicToOpenAI maintains stable prefix across consecutive turn
   }
 });
 
+test("transformAnthropicToOpenAI prunes based on max_context_tokens even when max_context_turns is 0", () => {
+  const messages = [];
+  for (let i = 0; i < 20; i++) {
+    messages.push({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `turn_${i}_${"word ".repeat(100)}` }]
+    });
+  }
+
+  // 1. 当 max_context_tokens 足额（如 50000），全量 20 轮保留
+  const payloadFull = transformAnthropicToOpenAI({ messages }, "m", { max_context_turns: 0, max_context_tokens: 50000 });
+  assert.equal(payloadFull.messages.length, 20, "sufficient token budget keeps full history");
+
+  // 2. 当 max_context_tokens 较小（如 800 tokens），触发双轨 Token 预算截断
+  const payloadPruned = transformAnthropicToOpenAI({ messages }, "m", { max_context_turns: 0, max_context_tokens: 800 });
+  assert.ok(payloadPruned.messages.length < 20, "exceeded token budget triggers stepped pruning");
+  assert.ok(payloadPruned.messages.some(m => typeof m.content === "string" && m.content.includes("omitted")), "bridge notice present");
+});
+
+test("transformAnthropicToOpenAI dual-trigger respects whichever limit is more restrictive", () => {
+  const messages = [];
+  for (let i = 0; i < 30; i++) {
+    messages.push({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: `m_${i}_${"x".repeat(100)}` }]
+    });
+  }
+
+  // 限制 max_context_turns: 10，无论 token 预算多大，轮次生效
+  const payloadTurns = transformAnthropicToOpenAI({ messages }, "m", { max_context_turns: 10, max_context_tokens: 100000 });
+  assert.ok(payloadTurns.messages.length <= 15, "turns limit enforced");
+});
+
 test("transformAnthropicToOpenAI defaults model and preserves stream:false", () => {
   const payload = transformAnthropicToOpenAI({
     messages: [{ role: "user", content: [{ type: "text", text: "x" }] }],
