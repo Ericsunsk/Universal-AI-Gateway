@@ -7,9 +7,16 @@ export const UPSTREAM_ERR_MAX = 300;
 
 export function redactUpstreamText(text) {
   if (typeof text !== "string" || text.length === 0) return "Upstream rejected the request";
-  return text
+  // 前置截断：防范大体积上游报错页面（如 50KB+ HTML）对正则引擎造成无谓的 CPU 开销与 Event Loop 冻结
+  const input = text.length > 4000 ? text.slice(0, 4000) : text;
+  return input
     .replace(/https?:\/\/[^\s"'<>]+/gi, "<url>")        // 内部端点
-    .replace(/\b(?:sk|sk-ant|Bearer|api[-_]?key|token)[-\s:=]*[A-Za-z0-9_\-.]{8,}/gi, "<credential>")
+    // 凭据规则分两条，缺一不可：
+    // (1) 裸字面前缀：sk-xxx / Bearer <jwt> / token=... —— 值前无标识符名可依。
+    // (2) 复合标识符：accessToken / refresh_token / apiKey / client_secret / password。
+    //     增加 \b 与前缀词界，强制要求分隔符，彻底消除无边界指数级回溯 (ReDoS 防护)。
+    .replace(/\b(?:sk|sk-ant|Bearer)[-\s:=]*[A-Za-z0-9_\-.]{8,}/gi, "<credential>")
+    .replace(/\b(?:[\w-]*?(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?))[-_\s:="'\\]+[A-Za-z0-9_\-.]{8,}/gi, "<credential>")
     .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "<ip>")     // 内网 / 回环地址
     .slice(0, UPSTREAM_ERR_MAX);
 }

@@ -148,7 +148,14 @@ export async function getConfig(env, forceRefresh = false) {
     return cachedConfig;
   }
   if (!inflightConfigRefresh) {
-    inflightConfigRefresh = refreshConfig(env).finally(() => { inflightConfigRefresh = null; });
+    inflightConfigRefresh = refreshConfig(env)
+      .then((cfg) => {
+        // 单点收口：refreshConfig 有三条返回路径（KV 成功 / KV 失败回退 / 冷启动初始化），
+        // 告警放在这里才不会漏掉任一分支。
+        warnIfCronMisconfigured(cfg?.cron_secret);
+        return cfg;
+      })
+      .finally(() => { inflightConfigRefresh = null; });
   }
   return inflightConfigRefresh;
 }
@@ -262,6 +269,22 @@ function eachProvider(providers, fn) {
   if (!providers) return;
   if (Array.isArray(providers)) providers.forEach(fn);
   else if (typeof providers === "object") Object.values(providers).forEach(fn);
+}
+
+// CRON_SECRET 未配置时 /checkin 只认 MASTER_KEY（docs/SECURITY.md“解决方案 A”，是受支持配置）。
+// 但若同时保留了 vercel.json 的内建 crons（仓库默认开启），Vercel Cron 不发 Authorization 头，
+// 于是每次定时触发都恒 401 —— 每日签到与 Token 保活【静默失效】，无任何可见信号。
+// 此二者不可能都正确：要么配 CRON_SECRET，要么注释掉 vercel.json 的 crons 段（方案 B）。
+// 仅在启动/配置刷新时告警一次，不阻断请求。
+let cronMisconfigWarned = false;
+function warnIfCronMisconfigured(cronSecret) {
+  if (cronSecret || cronMisconfigWarned) return;
+  cronMisconfigWarned = true;
+  log.warn(
+    "CRON_SECRET is unset while vercel.json still declares built-in crons — " +
+    "/checkin will return 401 for every Vercel Cron invocation and daily check-in/keep-alive will silently never run. " +
+    "Set CRON_SECRET, or comment out the \"crons\" block in vercel.json (docs/SECURITY.md 解决方案 A/B)."
+  );
 }
 
 

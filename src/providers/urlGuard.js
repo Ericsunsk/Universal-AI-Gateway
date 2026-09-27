@@ -42,3 +42,12 @@ export function assertPublicHttps(rawUrl, label) {
   }
   return u;
 }
+
+// 护栏只校验【初始 URL】。fetch 默认 redirect:"follow" 会自行跟随后续跳转，
+// 而跳转目标不经本模块——一个合法公网 https 上游回 302 Location: http://169.254.169.254/...
+// 即可把请求送进云 metadata。故所有出站 fetch 必须显式 redirect:"manual"：
+// 3xx 不再被自动跟随，护栏的"仅初始 URL 可信"前提才成立。
+// 用法：fetch(url, { ...outboundFetchInit("providerId"), method, headers, body, signal })
+export function outboundFetchInit(label) {
+  return { redirect: "manual", label };
+}

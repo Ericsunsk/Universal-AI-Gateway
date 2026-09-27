@@ -33,6 +33,16 @@ test("C2: envelope helpers redact exactly once with a visible truncation policy"
   assert.ok(long.length <= UPSTREAM_ERR_MAX);
   // 可信文本直包不脱敏
   assert.deepEqual(JSON.parse(errorBody("plain 400: bad param")), { error: { message: "plain 400: bad param" } });
+
+  // 复合凭据（accessToken, password 等）脱敏且非凭据普通短语不误伤
+  const compoundLeak = assertEnvelopeJson(upstreamErrorBody('{"accessToken":"wb_secret_12345678","password":"hunter2_secret"}'));
+  assert.ok(!compoundLeak.includes("wb_secret_12345678") && !compoundLeak.includes("hunter2_secret"));
+  assert.ok(compoundLeak.includes("<credential>"));
+
+  // ReDoS 防护回归：超长重复 payload 必须在毫秒级完成，杜绝事件循环冻结
+  const t0 = performance.now();
+  assertEnvelopeJson(upstreamErrorBody("a".repeat(50000)));
+  assert.ok(performance.now() - t0 < 50, "50k chars redaction must complete sub-50ms without catastrophic backtracking");
 });
 
 test("C2: dispatch upstream 4xx returns the shared envelope (redacted once)", async () => {

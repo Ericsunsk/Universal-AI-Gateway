@@ -101,13 +101,14 @@ async function handleRequest(request, env) {
 
     // 4. 每日签到与生命周期保活接口 (/checkin)
     // 需要 Master Key 或 Cron Secret：此接口会触发上游真实签到与 Token 保活，不能对普通虚拟密钥开放。
-    // Vercel Cron 不发 Authorization 头：同时接受 ?secret= / x-cron-secret（与 cron_secret 比对），
-    // 否则每日定时任务恒 401、保活静默失败。
+    // Vercel Cron 不发 Authorization 头：以 x-cron-secret 头承载 cron secret。
+    // 此前另接受 ?secret=，已移除：URL 会落入访问日志 / Referer / 浏览器历史 / 上游代理日志，
+    // 且该通道与合法 cron 头通道在审计日志中逐字节相同，泄露后无法定位来源。
+    // 注：CRON_SECRET 未配置时下方 cronSecret 为空，cron 将落回 master 校验并恒 401——已在启动期告警。
     if (path === "/checkin") {
       const cronSecret = config.cron_secret || "";
-      const urlSecret = url.searchParams.get("secret") || "";
       const headerSecret = request.headers.get("x-cron-secret") || "";
-      const cronViaSecret = !!(cronSecret && (timingSafeEqual(urlSecret, cronSecret) || timingSafeEqual(headerSecret, cronSecret)));
+      const cronViaSecret = !!(cronSecret && timingSafeEqual(headerSecret, cronSecret));
       const auth = cronViaSecret
         ? { ok: true, principal: { isMaster: false, role: "cron", name: "Cron Trigger" } }
         : authenticateAccess(request, config, { requireMaster: true, allowCron: true });

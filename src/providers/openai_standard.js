@@ -1,4 +1,4 @@
-import { assertPublicHttps } from "./urlGuard.js";
+import { assertPublicHttps, outboundFetchInit } from "./urlGuard.js";
 
 export class OpenAIStandardProvider {
   constructor(config, env) {
@@ -31,6 +31,7 @@ export class OpenAIStandardProvider {
     };
 
     return await fetch(url, {
+      ...outboundFetchInit(`${this.id} chat`),
       method: "POST",
       headers: headers,
       body: JSON.stringify(payload),
@@ -45,6 +46,7 @@ export class OpenAIStandardProvider {
       try {
         assertPublicHttps(this.config.balanceUrl, `${this.id} balanceUrl`);
         const resp = await fetch(this.config.balanceUrl, {
+          ...outboundFetchInit(`${this.id} balanceUrl`),
           headers: { "Authorization": `Bearer ${this.apiKey}` }
         });
         const data = await resp.json();

@@ -1,4 +1,4 @@
-import { assertPublicHttps } from "./urlGuard.js";
+import { assertPublicHttps, outboundFetchInit } from "./urlGuard.js";
 
 export class AnthropicStandardProvider {
   constructor(config, env) {
@@ -33,6 +33,7 @@ export class AnthropicStandardProvider {
     };
 
     return await fetch(url, {
+      ...outboundFetchInit(`${this.id} chat`),
       method: "POST",
       headers: headers,
       body: JSON.stringify(payload),

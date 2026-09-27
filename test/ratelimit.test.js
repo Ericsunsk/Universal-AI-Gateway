@@ -107,6 +107,30 @@ test("extractRateLimitKey prioritizes API key over IP", () => {
   assert.equal(key2, "ip:1.2.3.4", "should use IP for unauthenticated");
 });
 
+test("platformClientIp handles multi-hop proxies and Cloudflare correctly", () => {
+  // 1. Cloudflare + Render 多级代理：有 cf-ray 时优先信任 cf-connecting-ip
+  const cfReq = new Request("https://x/y", {
+    headers: {
+      "cf-ray": "8e123456-LAX",
+      "cf-connecting-ip": "203.0.113.5",
+      "x-forwarded-for": "203.0.113.5, 172.68.1.1"
+    }
+  });
+  assert.equal(extractRateLimitKey(cfReq, null), "ip:203.0.113.5");
+
+  // 2. 通用多级反向代理：取首跳真实客户端 IP，而非末跳反代出口 IP
+  const multiHopReq = new Request("https://x/y", {
+    headers: { "x-forwarded-for": "198.51.100.1, 10.0.0.1, 10.0.0.2" }
+  });
+  assert.equal(extractRateLimitKey(multiHopReq, null), "ip:198.51.100.1");
+
+  // 3. Vercel 边缘：以 x-vercel-forwarded-for 为准
+  const vercelReq = new Request("https://x/y", {
+    headers: { "x-vercel-forwarded-for": "192.0.2.1" }
+  });
+  assert.equal(extractRateLimitKey(vercelReq, null), "ip:192.0.2.1");
+});
+
 test("extractRateLimitKey handles missing IP gracefully", () => {
   const req = new Request("https://x/y");
   const key = extractRateLimitKey(req, null);

@@ -5,6 +5,7 @@ import { runFailover, buildFail } from "../../core/failover.js";
 import { redactUpstreamText, errorBody, upstreamErrorBody } from "../../http/redact.js";
 import { accountCooldownRecord, hydrateCooldowns, setAccountCooldown } from "./cooldown.js";
 import { log } from "../../logging/logger.js";
+import { outboundFetchInit } from "../urlGuard.js";
 
 // 内存级多账号 Token 缓存字典: accountKey -> { token, timestamp }
 const memoryTokenCache = new Map();
@@ -251,6 +252,7 @@ export class WorkBuddyProvider {
     try {
       const ep = this.ep();
       const resp = await fetch(ep.refresh, {
+        ...outboundFetchInit("workbuddy refresh"),
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -379,6 +381,7 @@ export class WorkBuddyProvider {
         "X-Product": "SaaS"
       };
       return await fetch(ep.chat, {
+        ...outboundFetchInit("workbuddy chat"),
         method: "POST",
         headers: headers,
         body: serializedPayload,
@@ -480,6 +483,7 @@ export class WorkBuddyProvider {
       try {
         const ep = this.ep();
         const resp = await fetch(ep.billing, {
+          ...outboundFetchInit("workbuddy billing"),
           method: "POST",
           headers: {
             "Authorization": `Bearer ${token}`,
@@ -566,6 +570,7 @@ export class WorkBuddyProvider {
 
       try {
         const doReq = (tk) => fetch(this.ep().checkin, {
+          ...outboundFetchInit("workbuddy checkin"),
           method: "POST",
           headers: {
             "Authorization": `Bearer ${tk}`,

@@ -224,7 +224,7 @@ claude
 ```
 每天 UTC 01:00（北京时间 **09:00**）由 Vercel 自动发起请求执行签到并刷新 Token，无需人工干预。
 > 注意：Vercel Cron 不发 `Authorization` 头。若设置了 `CRON_SECRET`，需用外部 cron 带密钥触发
->（`GET /checkin?secret=<CRON_SECRET>` 或 `x-cron-secret` 头）；`vercel.json` 内建 cron 无密钥，
+>（携带 `x-cron-secret: <CRON_SECRET>` 请求头）；`vercel.json` 内建 cron 无密钥，
 > 设置 `CRON_SECRET` 后它会 401，应改用外部触发或留空 `CRON_SECRET` 并仅用 `MASTER_KEY` 手动触发。
 </details>
 

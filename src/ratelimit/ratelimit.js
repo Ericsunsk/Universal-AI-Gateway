@@ -57,11 +57,13 @@ export function extractRateLimitKey(request, principal = null) {
   }
 
   // 2. 未认证或匿名：使用 IP 地址
-  const ip =
-    request.headers.get("x-real-ip") ||
-    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-    request.headers.get("cf-connecting-ip") ||
-    "unknown";
+  //
+  // 只信平台注入、客户端无法覆盖的头。此前用 x-real-ip / x-forwarded-for / cf-connecting-ip，
+  // 三者均可由客户端任意伪造：攻击者每次请求轮换 x-real-ip 即令每请求落入不同限流桶，
+  // 配额形同虚设；全部省略时又共挤 ip:unknown 单桶（自伤面）。
+  // Vercel 会覆写 x-vercel-forwarded-for 且剥离客户端同名头，故以其为准。
+  // XFF 取【最后一跳】：链首是客户端自称值，链尾才是边缘节点实测值。
+  const ip = platformClientIp(request);
 
   return `ip:${ip}`;
 }
@@ -74,6 +76,33 @@ function hashString32(str) {
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0).toString(36);
+}
+
+// 平台可信的客户端 IP 提取。
+// 顺序即信任度：
+// 1. x-vercel-forwarded-for 由 Vercel 边缘注入且覆写客户端同名头，最可信；
+// 2. cf-connecting-ip 由 Cloudflare 强保证覆盖（附带 cf-ray 校验边缘来源），防伪造且适配 CDN 反代；
+// 3. 通用 XFF：取首跳作为客户端标识，避免多级反代（如 Cloudflare -> Render）将末跳代理节点当成客户端导致全网限流串桶；
+// 全缺则并入 unknown 单桶。
+export function platformClientIp(request) {
+  const vercel = request.headers.get("x-vercel-forwarded-for");
+  if (vercel) {
+    const last = vercel.split(",").pop()?.trim();
+    if (last) return last;
+  }
+
+  const cfConnecting = request.headers.get("cf-connecting-ip");
+  if (cfConnecting && (request.headers.get("cf-ray") || !request.headers.get("x-forwarded-for"))) {
+    return cfConnecting.trim();
+  }
+
+  const xff = request.headers.get("x-forwarded-for");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) return first;
+  }
+
+  return "unknown";
 }
 
 /**
