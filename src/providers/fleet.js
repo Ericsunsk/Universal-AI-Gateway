@@ -2,7 +2,7 @@
 // 位于 providers 层（而非 core）：它 import createProvider，是唯一实例化
 // adapter 的模块。core 保持无 adapter 依赖，见 ADR-0009 / test/arch-c6。
 import { createProvider } from "./index.js";
-import { hasGetBalance, hasDailyCheckin, hasTokenRefresh, REASONING_DIALECTS } from "../core/contract.js";
+import { hasGetBalance, hasDailyCheckin, hasTokenRefresh, REASONING_DIALECTS, assertReasoningDialect } from "../core/contract.js";
 import { log } from "../logging/logger.js";
 
 let cachedFleet = null;
@@ -37,12 +37,21 @@ export class ProviderFleet {
         try {
           const instance = createProvider(pConf, env);
           if (instance) {
-            // P1 早告警：方言缺失是配置错误，dispatch 预检会 fast-fail 为 500。
-            // 此处只告警不跳过（保持路由成员语义不变），避免根因被「provider 未配置」掩盖。
-            if (!REASONING_DIALECTS.includes(instance.reasoningDialect)) {
-              log.warn("Provider missing valid reasoningDialect", { provider: pConf?.id, dialect: instance.reasoningDialect });
+            // 配置违约在构建期一次性拦截：方言缺失/非法即跳过该 provider 并告警，
+            // 附上可接受取值，操作员可从启动日志自服务修复。
+            // 不抛错——单个 provider 配错不应让整个 fleet 起不来；不静默插入——
+            // 否则该模型会「看着健康、每个请求 500」（见 dispatch 的 failover 语义）。
+            try {
+              assertReasoningDialect(instance);
+              this._instances.set(pConf.id, instance);
+            } catch (e) {
+              log.warn("Skipping provider with invalid reasoningDialect", {
+                provider: pConf?.id,
+                dialect: instance.reasoningDialect ?? null,
+                accepted: REASONING_DIALECTS.join(" | "),
+                error: e.message
+              });
             }
-            this._instances.set(pConf.id, instance);
           }
         } catch (e) {
           log.warn("Skipping unavailable provider", { provider: pConf?.id, error: e.message });

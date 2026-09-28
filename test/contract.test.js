@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hasGetBalance, hasDailyCheckin, hasCallChat, hasCallMessages, wantsStreamedChat, hasTokenRefresh, needsReasoningScrub, REASONING_DIALECTS } from "../src/core/contract.js";
-import { supportedProviderTypes, createProvider } from "../src/providers/index.js";
+import { supportedProviderTypes, createProvider, registerProvider } from "../src/providers/index.js";
+import { ProviderFleet } from "../src/providers/fleet.js";
 
 test("contract predicates detect optional provider capabilities", () => {
   assert.equal(hasGetBalance({ getBalance: () => {} }), true);
@@ -30,11 +31,10 @@ test("contract probes cover the dispatch hot path (no type switch)", () => {
 });
 
 // 每个真实 provider 必须显式声明推理方言，不得依赖 type 字符串兜底推断。
-// 新增上游若忘记声明，needsReasoningScrub 会抛错——本用例把该违约挡在 CI 上。
 //
-// 枚举取自 registry 真值（supportedProviderTypes），不再硬编码列表：
-// 此前手工维护 3 个构造调用，第 4 个 provider 注册后若没人记得改这里，
-// 契约就会对它静默失效。现在注册即纳入校验。
+// 本条覆盖 *仓内* adapter（supportedProviderTypes 的真值来源）。注意其边界：
+// 以 FleetConfig 条目新增、方言由 config 驱动的第三方上游不在此列，由下面
+// 两条用例（注册期校验 + fleet 构建期 quarantine）覆盖。
 test("every concrete provider declares a valid reasoning dialect", () => {
   const concrete = supportedProviderTypes().map(
     (t) => createProvider({ type: t, id: t, config: {} }, {})
@@ -45,8 +45,6 @@ test("every concrete provider declares a valid reasoning dialect", () => {
       REASONING_DIALECTS.includes(p.reasoningDialect),
       `${p.constructor.name} 未声明合法 reasoningDialect，实为 ${JSON.stringify(p.reasoningDialect)}`
     );
-    // 声明即生效：不得抛错（抛错即意味着未声明）。
-    assert.doesNotThrow(() => needsReasoningScrub(p));
   }
 
   // 方言与 type 解耦：WorkBuddy 句柄的 type 恰好同名，但判定只认 dialect。
@@ -56,4 +54,46 @@ test("every concrete provider declares a valid reasoning dialect", () => {
   assert.ok(wb, "registry must include the workbuddy provider");
   assert.equal(needsReasoningScrub(wb), true);
   assert.equal(needsReasoningScrub({ type: "workbuddy", reasoningDialect: "openai" }), false);
+});
+
+// needsReasoningScrub 是纯谓词：非法/缺失方言返回 false，绝不抛错。
+// 抛错会把配置违约变成每请求异常，并被 runFailover 误渲染为 502。
+test("needsReasoningScrub is a total predicate that never throws", () => {
+  assert.equal(needsReasoningScrub(null), false);
+  assert.equal(needsReasoningScrub({}), false);
+  assert.equal(needsReasoningScrub({ reasoningDialect: undefined }), false);
+  assert.equal(needsReasoningScrub({ reasoningDialect: "myvendor" }), false);
+  assert.equal(needsReasoningScrub({ reasoningDialect: "workbuddy" }), true);
+  assert.equal(needsReasoningScrub({ reasoningDialect: "openai" }), false);
+});
+
+// 注册期是结构性不变量的卡点：字面量声明了非法方言的 adapter 必须注册失败。
+// 这覆盖「新目录 + 一行 registerProvider」路径，比逐消费端特判更浅。
+test("registerProvider rejects a constructor with an invalid literal dialect", () => {
+  class BadDialect { callChat() {} }
+  BadDialect.prototype.reasoningDialect = "myvendor";
+  assert.throws(() => registerProvider("t-bad-dialect", BadDialect), /invalid reasoningDialect/);
+
+  class GoodDialect { callChat() {} }
+  GoodDialect.prototype.reasoningDialect = "openai";
+  assert.doesNotThrow(() => registerProvider("t-good-dialect", GoodDialect));
+
+  // config 驱动的方言在注册期探不出，必须放行（由 fleet 构建期兜底）。
+  class ConfigDriven { constructor(cfg) { this.reasoningDialect = cfg.reasoningDialect; } callChat() {} }
+  assert.doesNotThrow(() => registerProvider("t-config-driven", ConfigDriven));
+});
+
+// fleet 构建期兜底：方言非法的实例被跳过而非插入，避免「看着健康、每个请求 500」。
+test("fleet quarantines an instance with an undeclared dialect", () => {
+  class ConfigDriven { constructor(cfg) { this.reasoningDialect = cfg.reasoningDialect; } callChat() {} }
+  registerProvider("t-config-driven-2", ConfigDriven);
+
+  const fleet = new ProviderFleet({
+    providers: [
+      { id: "p-bad", type: "t-config-driven-2" },
+      { id: "p-ok", type: "t-config-driven-2", reasoningDialect: "anthropic" }
+    ]
+  });
+  assert.equal(fleet.getProvider("p-bad"), null, "非法方言的 provider 必须被隔离");
+  assert.ok(fleet.getProvider("p-ok"), "合法方言的 provider 必须保留");
 });

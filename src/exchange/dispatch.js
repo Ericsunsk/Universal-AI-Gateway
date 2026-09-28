@@ -110,14 +110,9 @@ export async function dispatchExchange({
       `Available models: ${availableModels.length > 0 ? availableModels.join(", ") : "(none)"}.`);
   }
 
-  // P1 fast-fail：reasoningDialect 缺失是配置错误，不是上游抖动。
-  // needsReasoningScrub 在 attempt 内抛错会被 runFailover 视为传输失败，
-  // 最终渲染成 502「All available providers failed」掩盖根因。
-  // 此处在 failover 之外预检一次，违约直接抛给 index.js 转 500。
-  for (const c of candidates) {
-    const p = fleet.getProvider(c.provider);
-    if (p) needsReasoningScrub(p);
-  }
+  // 方言合法性在 fleet 构建期由 assertReasoningDialect 一次性拦截（见 providers/fleet.js），
+  // 此处不再逐候选预检：那是 fleet 快照的纯函数，每请求重算 O(candidates) 无收益，
+  // 且 needsReasoningScrub 现已是纯谓词，热路径安全。
 
   // 候选级故障转移收敛到 runFailover（见 src/core/failover.js）：循环、分类、retry 预算、
   // 耗尽收尾由驱动器统一处理；单个候选的「一次往返 → 一个 outcome」见 attempt。

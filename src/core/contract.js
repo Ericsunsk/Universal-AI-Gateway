@@ -34,10 +34,20 @@ export function wantsStreamedChat(provider) {
 // 新增上游须声明方言，避免「型名恰好叫 workbuddy 就继承 workbuddy 方言」这类隐式继承。
 export const REASONING_DIALECTS = ["workbuddy", "openai", "anthropic"];
 
-// 是否需要 WorkBuddy 方言清洗（拒收推理参数）。按 adapter 显式声明的 reasoningDialect 判定；
-// 未声明即视为契约违约——报错而非静默兜底（兜底曾是 provider.type 字符串分支）。
+// 是否需要 WorkBuddy 方言清洗（拒收推理参数）。按 adapter 显式声明的 reasoningDialect 判定。
+//
+// 这是纯谓词，热路径安全：方言非法时返回 false（不清洗）而非抛错。抛错会把一个
+// 配置期问题变成每请求异常——若在 attempt 内抛出还会被 runFailover 误判为传输失败、
+// 渲染成误导性的 502。配置违约由 assertReasoningDialect 在启动期一次性拦截。
 export function needsReasoningScrub(provider) {
   if (!provider) return false;
+  return provider.reasoningDialect === "workbuddy";
+}
+
+// 方言声明合法性 —— 配置断言，非查询。只在 fleet 构建期调用一次；
+// 违约即抛错，让部署在启动时失败，而不是在首个请求上。
+export function assertReasoningDialect(provider) {
+  if (!provider) return;
   const dialect = provider.reasoningDialect;
   if (!REASONING_DIALECTS.includes(dialect)) {
     throw new Error(
@@ -45,7 +55,6 @@ export function needsReasoningScrub(provider) {
       `须为 ${REASONING_DIALECTS.join(" | ")} 之一（见 core/contract.js）`
     );
   }
-  return dialect === "workbuddy";
 }
 
 export function hasTokenRefresh(provider) {

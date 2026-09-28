@@ -61,10 +61,12 @@ test("needsReasoningScrub reads the declared dialect and refuses to guess", () =
   assert.equal(needsReasoningScrub({ reasoningDialect: "anthropic" }), false);
   assert.equal(needsReasoningScrub(null), false);
 
-  // 契约违约：未声明方言即报错，而非静默继承 type 同名方言。
-  // 这正是本用例此前守卫的兜底行为，现已被显式声明取代。
-  assert.throws(() => needsReasoningScrub({ type: "workbuddy" }), /reasoningDialect/);
-  assert.throws(() => needsReasoningScrub({ type: "custom" }), /reasoningDialect/);
+  // 纯谓词：非法/缺失方言一律返回 false，不得抛错。
+  // 抛错会把配置违约变成每请求异常，并被 runFailover 误渲染为 502；
+  // 该违约现由 registerProvider（字面量）与 fleet 构建期 assertReasoningDialect（config 驱动）拦截。
+  assert.equal(needsReasoningScrub({ type: "workbuddy" }), false);
+  assert.equal(needsReasoningScrub({ type: "custom" }), false);
+  assert.equal(needsReasoningScrub({ type: "custom", reasoningDialect: "myvendor" }), false);
   // type 与 dialect 不再有隐式联系：type 叫 workbuddy 也必须显式声明。
   assert.equal(needsReasoningScrub({ type: "custom", reasoningDialect: "workbuddy" }), true);
 });

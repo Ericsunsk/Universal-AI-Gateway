@@ -6,6 +6,8 @@ import { AnthropicStandardProvider } from "./anthropic_standard.js";
 import { registerProvider, supportedProviderTypes, createProvider } from "./registry.js";
 
 // 内置供应商接线：新增供应商时加一行 registerProvider 即可，createProvider 逻辑零改动。
+// registerProvider 会校验该构造器声明了合法 reasoningDialect（取值见 core/contract.js
+// 的 REASONING_DIALECTS），违约在此直接抛错——故 adapter 必须声明方言，忘记声明起不来。
 registerProvider("workbuddy", WorkBuddyProvider);
 registerProvider("openai", OpenAIStandardProvider);
 registerProvider("anthropic", AnthropicStandardProvider);
