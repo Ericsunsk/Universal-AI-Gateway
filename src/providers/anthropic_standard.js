@@ -35,11 +35,10 @@ export class AnthropicStandardProvider {
     };
 
     return await fetch(url, {
-      ...outboundFetchInit(`${this.id} chat`),
+      ...outboundFetchInit(`${this.id} chat`, { signal: options.signal }),
       method: "POST",
       headers: headers,
       body: JSON.stringify(payload),
-      signal: options.signal,
       keepalive: true
     });
   }

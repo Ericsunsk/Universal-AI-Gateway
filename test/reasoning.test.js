@@ -10,15 +10,33 @@ import {
 test("budgetToEffortLevel and effortLevelToBudget convert accurately", () => {
   assert.equal(budgetToEffortLevel(1024), "minimal");
   assert.equal(budgetToEffortLevel(2048), "low");
-  assert.equal(budgetToEffortLevel(6000), "medium");
+  assert.equal(budgetToEffortLevel(4096), "medium");
   assert.equal(budgetToEffortLevel(12000), "high");
   assert.equal(budgetToEffortLevel(32000), "xhigh");
 
+  // 代表值与分界必须自洽：此前 4096 既是 low 的分界又是 medium 的代表值，
+  // 两函数互不印证；现由同一张 LEVEL_BANDS 表驱动，故可断言往返恒等。
   assert.equal(effortLevelToBudget("minimal"), 1024);
   assert.equal(effortLevelToBudget("low"), 2048);
   assert.equal(effortLevelToBudget("medium"), 4096);
   assert.equal(effortLevelToBudget("high"), 12000);
   assert.equal(effortLevelToBudget("xhigh"), 32000);
+});
+
+test("effort level and budget round-trip consistently (inverse property)", () => {
+  // 这是此前缺失的性质测试：两个孤立断言各自成立，却无人验证二者互逆。
+  // max 为无上界档位，只能用有限 budget 代表，故 max → xhigh 是有意收敛，单独排除。
+  for (const level of ["minimal", "low", "medium", "high", "xhigh"]) {
+    assert.equal(
+      budgetToEffortLevel(effortLevelToBudget(level)),
+      level,
+      `${level} 往返不一致`
+    );
+  }
+  assert.equal(budgetToEffortLevel(effortLevelToBudget("max")), "xhigh");
+  // 非法/零 budget 返回 null（不启用推理）
+  assert.equal(budgetToEffortLevel(0), null);
+  assert.equal(budgetToEffortLevel(-1), null);
 });
 
 test("parseReasoningIntent extracts intent from model suffix", () => {
@@ -47,7 +65,10 @@ test("parseReasoningIntent extracts intent from Anthropic thinking block", () =>
   assert.equal(res.cleanModel, "claude-3-7-sonnet-20250219");
   assert.equal(res.enabled, true);
   assert.equal(res.budgetTokens, 8000);
-  assert.equal(res.level, "medium");
+  // 8000 落在 medium 上界(4096)之上、high 上界(12000)之内 → 归为 high。
+  // 客户端显式给的 8000 依旧原样发给上游（applyReasoningToPayload 用 budgetTokens 优先），
+  // level 仅为归一化标签，故此处是标签修正而非行为变更。
+  assert.equal(res.level, "high");
 
   const resDisabled = parseReasoningIntent({
     model: "claude-3-7-sonnet-20250219",

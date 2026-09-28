@@ -7,7 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/Ericsunsk/Universal-AI-Gateway?style=social)](https://github.com/Ericsunsk/Universal-AI-Gateway)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Vercel](https://img.shields.io/badge/Deploy-Vercel-black?logo=vercel&logoColor=white)](https://vercel.com/)
-[![Node Version](https://img.shields.io/badge/Node-%3E%3D18.0.0-339933?logo=node.js&logoColor=white)]()
+[![Node Version](https://img.shields.io/badge/Node-%3E%3D20.11.0-339933?logo=node.js&logoColor=white)]()
 [![Protocol](https://img.shields.io/badge/Protocol-Anthropic%20%7C%20OpenAI-6366F1.svg)]()
 
 [特性介绍](#-核心特性) • [系统架构](#-系统架构) • [快速部署](#-快速部署方案) • [客户端接入](#-客户端接入指南) • [API 参考](#-端点总览-api-reference) • [FAQ](#-常见问题-faq)
@@ -185,6 +185,7 @@ claude
 | :--- | :--- | :--- | :--- |
 | `/v1/messages` | `POST` | Virtual Key / Master Key | 标准 Anthropic Messages 接口（适配 Claude Code） |
 | `/v1/chat/completions` | `POST` | Virtual Key / Master Key | 标准 OpenAI 对话接口（适配 Cursor / NextChat） |
+| `/v1/messages/count_tokens` | `POST` | Virtual Key / Master Key | 预估输入 token 数（同样支持 `/messages/count_tokens`） |
 | `/v1/models` | `GET` | Virtual Key / Master Key | 返回 `routes` 中显式声明的模型列表（透明直通下默认为空；未声明的模型仍可直接调用） |
 | `/v1/usage` | `GET` | Master / Admin Key | 实时积分/额度查询（普通客户端 key 403） |
 | `/status` | `GET` | Virtual Key / Master Key | 服务状态（version/kvEnabled，需鉴权） |

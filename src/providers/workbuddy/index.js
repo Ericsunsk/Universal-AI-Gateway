@@ -492,11 +492,10 @@ export class WorkBuddyProvider {
         "X-Product": "SaaS"
       };
       return await fetch(ep.chat, {
-        ...outboundFetchInit("workbuddy chat"),
+        ...outboundFetchInit("workbuddy chat", { signal: options.signal }),
         method: "POST",
         headers: headers,
         body: serializedPayload,
-        signal: options.signal,
         keepalive: true
       });
     };
@@ -704,19 +703,24 @@ export class WorkBuddyProvider {
             id: account.id,
             name: account.name || account.id,
             success: false,
-            error: `Upstream HTTP ${resp.status}: ${text.slice(0, 120).trim()}`
+            error: redactUpstreamText(`Upstream HTTP ${resp.status}: ${text.slice(0, 120).trim()}`)
           };
         }
 
         const data = await resp.json();
+        // 上游原文经脱敏后再外露：/checkin 回执含上游原始 JSON，可能夹带凭据/内网端点。
+        // 此前直出（唯一未经 redact 的上游原文出口）——虽为 master/cron 鉴权，仍是泄露面。
+        // 未被改动时保留原对象（避免无谓的序列化往返），有改动才回退为脱敏后的字符串。
+        const rawJson = JSON.stringify(data);
+        const safeJson = redactUpstreamText(rawJson);
         return {
           id: account.id,
           name: account.name || account.id,
           success: data.code === 0,
-          result: data
+          result: safeJson === rawJson ? data : safeJson
         };
       } catch (e) {
-        return { id: account.id, name: account.name, success: false, error: e.message };
+        return { id: account.id, name: account.name, success: false, error: redactUpstreamText(e.message) };
       }
     };
 

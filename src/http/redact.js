@@ -13,8 +13,20 @@ const REGEX_CREDENTIAL_BARE = /\b(?:sk|sk-ant|Bearer)[-\s:=]*[A-Za-z0-9_\-.]{8,}
 // 要求同时含字母与数字可避开普通长单词/哈希路径的中文文本误伤，
 // 且 {32,} 的定长下界 + 无嵌套量词，不引入回溯爆炸。
 const REGEX_HIGH_ENTROPY = /\b(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}\b/g;
-// 形如 `token=xxx` / `key: xxx` / `secret xxx` 的宽松兜底（含非英文字段名场景）
-const REGEX_CREDENTIAL_COMPOUND = /\b(?:[\w-]*?(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?))[-_\s:="'\\]+[A-Za-z0-9_\-.]{8,}/gi;
+// 形如 `token=xxx` / `key: xxx` / `secret xxx` 的宽松兜底（含非英文字段名场景）。
+//
+// 前缀必须锚定在非词字符边界（`(^|[^\w-])`）而非裸 `\b`：否则 `[\w-]*?(?:...)` 会令
+// 每个字符位置都成为候选起点，每处再向前扫描 —— 在 `"a-"` 这类重复输入上是平方级，
+// 实测 50k 字符耗时 1.7s（C2 有 sub-50ms 的 ReDoS 守卫，但原测试输入未触发该形态）。
+const REGEX_CREDENTIAL_COMPOUND = /(^|[^\w-])((?:[A-Za-z0-9_]*(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?))[-_\s:="'\\]+[A-Za-z0-9_\-.]{8,})/gi;
+// JSON 引号体：`"field": "value"`，其中 field 命中凭据名。
+//
+// COMPOUND 的值字符集是 [A-Za-z0-9_.-]，遇到含 `/` `;` `+` 等分隔符的常见凭据
+// 就断在分隔符前（如 `"refresh_token":"1//0g…"` 只能吃到 `1`，长度不足 8 而不匹配），
+// 且这类串多短于 32 字符、HIGH_ENTROPY 也兜不住 —— 实测两者同时漏过，是最真实的泄露形态。
+// 故对**带引号的 JSON 形态**单独放宽值字符集（取到右引号为止），并保留长度下界避免误伤短值。
+// 同样以非词边界锚定前缀，避免与 COMPOUND 相同的平方级回溯。
+const REGEX_JSON_CREDENTIAL = /(^|[^\w-])(["']?(?:[A-Za-z0-9_]*(?:keys?|tokens?|secrets?|auth|pwd|pass(?:word|wd)?|credentials?|cookie|session|authorization))["']?\s*[:=]\s*["'])([^"']{6,})(["'])/gi;
 const REGEX_IP = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 // ReDoS 防护超时（worker thread 方案的简化版）
@@ -39,7 +51,11 @@ export function redactUpstreamText(text) {
     result = result.replace(REGEX_CREDENTIAL_BARE, "<credential>");
     if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
 
-    result = result.replace(REGEX_CREDENTIAL_COMPOUND, "<credential>");
+    result = result.replace(REGEX_CREDENTIAL_COMPOUND, "$1<credential>");
+    if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
+
+    // 保留键名与引号，只替换值：`"refresh_token":"…"` → `"refresh_token":"<credential>"`
+    result = result.replace(REGEX_JSON_CREDENTIAL, "$1$2<credential>$4");
     if (Date.now() - startTime > REDACT_TIMEOUT_MS) return "[redacted: timeout]";
 
     result = result.replace(REGEX_HIGH_ENTROPY, "<credential>");

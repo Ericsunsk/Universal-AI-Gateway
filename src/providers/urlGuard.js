@@ -131,6 +131,63 @@ export function makeSafeLookup() {
 // 即可把请求送进云 metadata。故所有出站 fetch 必须显式 redirect:"manual"：
 // 3xx 不再被自动跟随，护栏的"仅初始 URL 可信"前提才成立。
 // 用法：fetch(url, { ...outboundFetchInit("providerId"), method, headers, body, signal })
-export function outboundFetchInit(label) {
-  return { redirect: "manual", label };
+// 上游总时长上界（非流式路径）。流式由 stream.js 的 UPSTREAM_STALL_MS(180s) 按「无字节时长」
+// 熔断；非流式此前**无任何上界** —— 上游若建连成功却永不返回 body，请求会一直占用并发槽位
+// 直到平台 wall-clock 上限（Vercel 300s）。此处按总时长封顶，与流式量级对齐。
+//
+// 取 240s：低于 Vercel 的 300s 上限，留出响应转译与回写余量；高于实测最慢模型（118s），
+// 不误杀正常长响应。可用 env 覆盖（测试注入小值）。
+const UPSTREAM_TIMEOUT_MS = 240 * 1000;
+
+// 合并调用方的 signal（客户端中断）与服务端超时：任一触发即中止。
+// 不能直接用 AbortSignal.any（Node 18 缺失），手写以兼容运行时。
+function withUpstreamTimeout(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : null;
+  if (!timeout) return signal;
+  if (!signal) return timeout;
+  const ctrl = new AbortController();
+  const onAbort = (reason) => { ctrl.abort(reason); cleanup(); };
+  const cleanup = () => {
+    signal.removeEventListener?.("abort", onAbort);
+    timeout.removeEventListener?.("abort", onAbort);
+  };
+  if (signal.aborted || timeout.aborted) { onAbort(); return ctrl.signal; }
+  signal.addEventListener?.("abort", onAbort, { once: true });
+  timeout.addEventListener?.("abort", onAbort, { once: true });
+  return ctrl.signal;
+}
+
+export function outboundFetchInit(label, { signal, timeoutMs = UPSTREAM_TIMEOUT_MS } = {}) {
+  return { redirect: "manual", label, signal: withUpstreamTimeout(signal, timeoutMs) };
+}
+
+// 出站全局连接池 + rebinding 防护的唯一装配入口。
+//
+// M1 修复的**部署侧**：`connect.lookup` 复用「校验+解析同一次」逻辑，使
+// 「校验通过的 IP」== 「实际连接的 IP」，根除 DNS TOCTOU / rebinding。
+// 不能改用每请求 dispatcher —— 全局 fetch 不认该选项（实测抛 invalid onRequestStart）。
+//
+// 必须由**每个**入口调用：此前只在 server.js（本地 npm start）装配，Vercel 生产入口
+// api/index.js 从未调用，导致该防护在生产上是死代码。故收敛到此处，双入口共用。
+//
+// 幂等：重复调用只装配一次（server.js 的 cluster 多 worker 与模块热重载都会重复 import）。
+let dispatcherInstalled = false;
+export function installSafeDispatcher({ keepAliveTimeout = 60_000, keepAliveMaxTimeout = 300_000, connections = 64 } = {}) {
+  if (dispatcherInstalled) return false;
+  dispatcherInstalled = true;
+  // undici 为运行时依赖（Node 18+ 内置同源实现），动态 import 避免在上游护栏模块
+  // 顶层耦合连接池实现——护栏的纯校验函数不关心传输层。
+  import("undici").then(({ setGlobalDispatcher, Agent }) => {
+    setGlobalDispatcher(new Agent({
+      keepAliveTimeout,      // 空闲连接保持 60 秒（覆盖常见人机交互间隔）
+      keepAliveMaxTimeout,   // 最长复用 5 分钟
+      connections,           // 连接池大小上限
+      pipelining: 1,
+      connect: { lookup: makeSafeLookup() }
+    }));
+  }).catch(() => {
+    // 装配失败不应让网关起不来：退化为默认 dispatcher（仅失去 rebinding 防护与连接复用）
+    dispatcherInstalled = false;
+  });
+  return true;
 }

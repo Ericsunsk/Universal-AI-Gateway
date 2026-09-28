@@ -6,38 +6,53 @@
 const REASONING_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 const DISABLE_KEYWORDS = ["off", "nothink", "none", "disabled", "disable", "false"];
 
+// 档位 ↔ budget 的唯一真值表。
+//
+// 两函数此前各自硬编码分界与代表值，互不印证：budgetToEffortLevel(4096) === "low"，
+// 而 effortLevelToBudget("medium") === 4096 —— 注释却称二者互逆，测试自身也自相矛盾
+// （同一文件里 4096 既属 low 又是 medium 的代表值）。
+//
+// 修复取**保持既有 budget 不变**的一侧：代表值沿用旧表（low=2048/medium=4096/high=12000），
+// 仅调整**分界**使其与代表值自洽。这样 effortLevelToBudget 的输出对现有调用方零变化
+// （applyReasoningToPayload 在未显式给 budget 时取此值），只修正档位归属的判定边界。
+// 各代表值取其区间上界，保证往返恒等。
+const LEVEL_BANDS = [
+  { level: "minimal", max: 1024 },
+  { level: "low", max: 2048 },
+  { level: "medium", max: 4096 },
+  { level: "high", max: 12000 },
+  { level: "xhigh", max: 32000 },
+  { level: "max", max: Infinity }
+];
+
 /**
  * 从 token budget 转换为标准推理档位
  */
 export function budgetToEffortLevel(budgetTokens) {
   const b = Number(budgetTokens) || 0;
   if (b <= 0) return null;
-  if (b <= 1024) return "minimal";
-  if (b <= 4096) return "low";
-  if (b <= 8192) return "medium";
-  if (b <= 16000) return "high";
-  return "xhigh";
+  for (const { level, max } of LEVEL_BANDS) {
+    if (b <= max) return level;
+  }
+  return "max";
 }
 
 /**
  * 从标准推理档位转换为推荐的 token budget (Anthropic 规范)
+ *
+ * 取所在档位的**上界**：既落在本档位内（保证 budgetToEffortLevel 反演回同一档位），
+ * 又给足该档位的预算，不因取区间中点而被误判为更低档。
+ *
+ * 注：`max` 是无上界档位（max: Infinity），只能用 32000 作有限代表，故
+ * max → 32000 → xhigh 是**有意为之**的收敛（无上界档位无法用有限 budget 表达），
+ * 其余 5 个档位均严格幂等。
  */
 export function effortLevelToBudget(level) {
-  switch (level?.toLowerCase()) {
-    case "minimal":
-      return 1024;
-    case "low":
-      return 2048;
-    case "medium":
-      return 4096;
-    case "high":
-      return 12000;
-    case "xhigh":
-    case "max":
-      return 32000;
-    default:
-      return 4096;
-  }
+  const key = typeof level === "string" ? level.toLowerCase() : "";
+  const band = LEVEL_BANDS.find(b => b.level === key);
+  // 未知/缺省档位回退到 medium 的上界（与旧行为一致：未知 → 4096）
+  if (!band) return 4096;
+  return Number.isFinite(band.max) ? band.max : 32000;
 }
 
 /**

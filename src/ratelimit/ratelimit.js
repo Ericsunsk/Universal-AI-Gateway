@@ -1,5 +1,6 @@
 // Rate Limiter
 // 基于 KV 持久化层 seam 的统一限流入口与协议工具
+import { hashString32Base36 } from "../core/scheduler.js";
 
 /**
  * 统一限流入口：委托 KV 持久化层 seam 的 limit 方法
@@ -41,6 +42,10 @@ export const RATE_LIMIT_PRESETS = {
   burst: { capacity: 100, refillRate: 10 },
 };
 
+// 限流键需要紧凑稳定键 → base36 字符串形态；实现收敛在 core/scheduler.js
+// （该模块为无依赖 leaf，引入它不会把 logging/kv 拖进本模块）。
+const hashString32 = hashString32Base36;
+
 /**
  * 从请求提取限流键
  * 优先级：API Key > IP 地址
@@ -73,16 +78,6 @@ export function extractRateLimitKey(request, principal = null) {
   const ip = platformClientIp(request);
 
   return `ip:${ip}`;
-}
-
-// 简单的字符串哈希函数（32-bit FNV-1a）
-function hashString32(str) {
-  let hash = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
 }
 
 // 平台可信的客户端 IP 提取。

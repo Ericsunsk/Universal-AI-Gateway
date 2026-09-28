@@ -1,15 +1,10 @@
 // 鉴权 —— API key / JWT 校验、master/cron 权限分级、模型白名单。
 // 与 HTTP 无关的纯判定逻辑；响应头构造委托 http/headers.js。
 import { corsHeaders } from "../http/headers.js";
+import { hashString32Base36 } from "../core/scheduler.js";
 
-function hashString32(str) {
-  let hash = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
+// rateLimitId 需要紧凑稳定键 → base36 字符串形态；实现收敛在 core/scheduler.js。
+const hashString32 = hashString32Base36;
 
 // 常数时间字符串比较：先比较长度，再对每个字符做等价的按位累加，避免 === 短路泄露前缀信息。
 // 攻击者通过响应耗时逐字节推断 token 的时序侧信道即被消除。

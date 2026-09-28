@@ -23,8 +23,15 @@ export function backoffMinutesForStreak(streak) {
   return Math.min(Math.pow(2, safe - 1), BACKOFF_MAX_MINUTES);
 }
 
-// 纯函数：32 位 FNV-1a 哈希（会话粘性键 → 确定性下标；集中在此一处，避免各处手写哈希分叉）。
-export function hashString32(str) {
+// 纯函数：32 位 FNV-1a 哈希（无依赖的 leaf 模块，故 auth / ratelimit 也可安全复用，
+// 不会把 logging/kv 拖进它们）。
+//
+// 两个入口共用同一实现，消除此前三处手写副本的分叉（auth/ratelimit 的副本逐字节相同，
+// 但与本文件的版本在空值语义与返回类型上已经漂移）：
+//   - hashString32(str)       → number，用于确定性下标等算术场景；
+//   - hashString32Base36(str) → string，用于需要紧凑稳定键的场景（rateLimitId 等）。
+// 二者共享同一核心，仅末端表示不同，杜绝再次分叉。
+function fnv1a32(str) {
   const s = String(str ?? "");
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
@@ -32,6 +39,14 @@ export function hashString32(str) {
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
+}
+
+export function hashString32(str) {
+  return fnv1a32(str);
+}
+
+export function hashString32Base36(str) {
+  return fnv1a32(str).toString(36);
 }
 
 // 纯函数：会话粘性起始位 —— 同一 key 永远映射到同一健康账号下标，

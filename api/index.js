@@ -4,6 +4,12 @@ import { Readable } from "node:stream";
 import worker, { MAX_BODY_BYTES } from "../src/index.js";
 import { createKvFromEnv } from "../src/kv/index.js";
 import { log } from "../src/logging/logger.js";
+import { installSafeDispatcher } from "../src/providers/urlGuard.js";
+
+// 出站连接池 + DNS-rebinding 防护。此前只在 server.js（本地 npm start）装配，
+// 而生产由本入口服务，导致 makeSafeLookup 的 TOCTOU 防护在 Vercel 上是死代码。
+// 幂等，模块级调用一次（serverless 实例复用时不会重复装配）。
+installSafeDispatcher();
 
 export const config = {
   maxDuration: 300, // 允许最大 300 秒执行时长（适配长时间思考模型与深度代码审计）

@@ -9,9 +9,12 @@ let cachedConfig = null;
 let cachedConfigTimestamp = 0;
 const CONFIG_CACHE_TTL_MS = 60 * 1000; // 60 秒内存热缓存，彻底消除每请求访问 KV 的网络往返开销
 
-// 解析 MAX_CONTEXT_TURNS：非负整数才有效，其余（NaN、负数、空、尾随杂质、布尔）一律 0（不剪枝）。
-// 全网关唯一归一化口径（transform.js 复用此处，禁止另起 normalizeTurns 分叉）。
-export function parseMaxContextTurns(raw) {
+// 解析 MAX_CONTEXT_TURNS / MAX_CONTEXT_TOKENS 的**唯一**实现。
+//
+// 两者语义完全一致（非负整数才有效，其余一律 0），此前是逐字节重复的两份拷贝，
+// 任何口径修正都要改两处、极易只改一处而静默分叉。收敛为一处，两个具名导出仅作
+// 语义化别名保留（调用方与测试按名区分，属对外契约，不得删除或合并）。
+function parseNonNegativeInt(raw) {
   if (raw === undefined || raw === null) return 0;
   // number 直接取；string trim 后 Number（"40abc"→NaN→0，严格拒绝尾随杂质）；
   // 其余类型（boolean/object/array）一律非法→0，避免 Number(true)===1 这类意外启用剪枝。
@@ -28,20 +31,15 @@ export function parseMaxContextTurns(raw) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
+// 解析 MAX_CONTEXT_TURNS：非负整数才有效，其余（NaN、负数、空、尾随杂质、布尔）一律 0（不剪枝）。
+// 全网关唯一归一化口径（transform.js 复用此处，禁止另起 normalizeTurns 分叉）。
+export function parseMaxContextTurns(raw) {
+  return parseNonNegativeInt(raw);
+}
+
 // 解析 MAX_CONTEXT_TOKENS：非负整数才有效，其余（NaN、负数、空、尾随杂质、布尔）一律 0（不启用 Token 强制熔断）。
 export function parseMaxContextTokens(raw) {
-  if (raw === undefined || raw === null) return 0;
-  let n;
-  if (typeof raw === "number") {
-    n = raw;
-  } else if (typeof raw === "string") {
-    const t = raw.trim();
-    if (t === "") return 0;
-    n = Number(t);
-  } else {
-    return 0;
-  }
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  return parseNonNegativeInt(raw);
 }
 
 export function requireSecret(env, name) {
