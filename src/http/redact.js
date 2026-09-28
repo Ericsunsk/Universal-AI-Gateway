@@ -1,7 +1,6 @@
 // 上游文本脱敏 —— 所有回吐给客户端的上游原文的唯一出口。
 // 上游响应体不可信，可能含内部端点 / 凭据 / 内网 IP；客户端回执与日志一律经此处收敛，
 // 不再各处手写正则分叉。failover（core）与 exchange 共用，故放在 http 层，避免 core↔exchange 循环依赖。
-import { corsHeaders } from "./headers.js";
 
 export const UPSTREAM_ERR_MAX = 300;
 
@@ -80,15 +79,6 @@ export function errorBody(message) {
 
 export function upstreamErrorBody(rawText) {
   return errorBody(redactUpstreamText(rawText));
-}
-
-// dispatch 口径的预渲染响应（CORS 信封）。workbuddy 另需账号归因头，
-// 故只复用 upstreamErrorBody + 自有 accountResponse 组装，不走这里。
-export function upstreamErrorResponse(status, rawText, extraHeaders = {}) {
-  return new Response(upstreamErrorBody(rawText), {
-    status,
-    headers: { "Content-Type": "application/json", ...corsHeaders, ...extraHeaders }
-  });
 }
 
 // 耗尽收尾的可变部分：按 driver 优先级（真实最后失败为准）取原文并恰好脱敏一次。

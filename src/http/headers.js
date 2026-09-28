@@ -36,16 +36,17 @@ export function resolveAnthropicVersion(config) {
 // 复制上游响应头，默认 allowlist 透传（content-type），其余丢弃；
 // 网关自有头经 extra 叠加。避免上游注入 Location/Set-Cookie/CSP 等。
 //
-// CORS 默认合并（可经 extra 覆盖）：C2 要求「客户端可见失败走同一信封」含 CORS 头，
+// 无条件合并 CORS（可经 extra 覆盖单个键）：C2 要求「客户端可见失败走同一信封」含 CORS 头，
 // 而 provider 层深处构造的失败响应（如 workbuddy 的 renderExhausted/renderFail）
 // 拿不到边界处的 corsHeaders —— 此前因此漏发 ACAO，浏览器客户端只看到
 // TypeError: Failed to fetch，而非精心脱敏的错误 JSON。把默认值下沉到本函数，
 // 使该不变量有一个强制卡点，而非依赖每个调用点自觉。
-export function buildResponseHeaders(upstreamHeaders, extra = {}, { withCors = true } = {}) {
+//
+// 曾经的 withCors 开关已删除：零调用方传入，是无人可达的分支 —— 徒增一个
+// 「false 会怎样」的假想路径。若将来真需要不发 CORS，再加参数。
+export function buildResponseHeaders(upstreamHeaders, extra = {}) {
   const headers = new Headers();
-  if (withCors) {
-    for (const [k, v] of Object.entries(DEFAULT_CORS_HEADERS)) headers.set(k, v);
-  }
+  for (const [k, v] of Object.entries(DEFAULT_CORS_HEADERS)) headers.set(k, v);
   const ct = typeof upstreamHeaders?.get === "function"
     ? upstreamHeaders.get("content-type")
     : upstreamHeaders?.["content-type"];

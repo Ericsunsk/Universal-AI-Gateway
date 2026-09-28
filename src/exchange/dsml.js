@@ -7,6 +7,8 @@
  * tool_use 协议块，确保 Claude Code / Roo Code / Cline 等客户端无感、正常执行工具命令。
  */
 
+import { syntheticCallId } from "./reduce.js";
+
 // 匹配 DSML 标记前缀（支持半角 | 与全角 ｜，单重与双重管道符）
 const DSML_PREFIX_REGEX = /<[｜|]{1,2}DSML[｜|]{1,2}/i;
 
@@ -25,36 +27,46 @@ export function containsDsml(text) {
  * @param {string} content
  * @returns {Array<{ name: string, args: Record<string, any> }>}
  */
+// DSML 参数标签的正则（源串单点定义，调用处各自 new RegExp 以重置 lastIndex）。
+//
+// 此前该正则与下方的参数解析循环在 parseDsmlInvocations 与 DsmlStreamParser 里
+// 逐字节重复两份 —— 协议事实写两遍就会静默漂移，故收敛为一份。
+const PARAM_RE_SOURCE = String.raw`<[｜|]{1,2}DSML[｜|]{1,2}\s*parameter\s+name=["']([^"']+)["'](?:\s+string=["'](true|false)["'])?\s*>([\s\S]*?)<\/[｜|]{1,2}DSML[｜|]{1,2}\s*parameter>`;
+
+const INVOKE_RE_SOURCE = String.raw`<[｜|]{1,2}DSML[｜|]{1,2}\s*invoke\s+name=["']([^"']+)["']\s*>([\s\S]*?)<\/[｜|]{1,2}DSML[｜|]{1,2}\s*invoke>`;
+
+// 解析一段 invoke 的 body，产出 args 对象。
+// `string="false"` 走 JSON.parse 强转（数字/布尔/对象），失败则退回原字符串。
+function parseDsmlParams(body) {
+  const args = {};
+  const re = new RegExp(PARAM_RE_SOURCE, "gi");
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    const name = m[1].trim();
+    const isString = m[2] !== "false";
+    const raw = m[3];
+    if (isString) {
+      args[name] = raw;
+    } else {
+      try {
+        args[name] = JSON.parse(raw.trim());
+      } catch {
+        args[name] = raw.trim();
+      }
+    }
+  }
+  return args;
+}
+
 export function parseDsmlInvocations(content) {
   if (typeof content !== "string" || !containsDsml(content)) return [];
 
-  const invokeRegex = /<[｜|]{1,2}DSML[｜|]{1,2}\s*invoke\s+name=["']([^"']+)["']\s*>([\s\S]*?)<\/[｜|]{1,2}DSML[｜|]{1,2}\s*invoke>/gi;
-  const paramRegex = /<[｜|]{1,2}DSML[｜|]{1,2}\s*parameter\s+name=["']([^"']+)["'](?:\s+string=["'](true|false)["'])?\s*>([\s\S]*?)<\/[｜|]{1,2}DSML[｜|]{1,2}\s*parameter>/gi;
-
   const invocations = [];
+  const re = new RegExp(INVOKE_RE_SOURCE, "gi");
   let match;
-  while ((match = invokeRegex.exec(content)) !== null) {
-    const name = match[1].trim();
-    const body = match[2];
-    const args = {};
-    let pMatch;
-    while ((pMatch = paramRegex.exec(body)) !== null) {
-      const pName = pMatch[1].trim();
-      const isString = pMatch[2] !== "false";
-      const pVal = pMatch[3];
-      if (isString) {
-        args[pName] = pVal;
-      } else {
-        try {
-          args[pName] = JSON.parse(pVal.trim());
-        } catch {
-          args[pName] = pVal.trim();
-        }
-      }
-    }
-    invocations.push({ name, args });
+  while ((match = re.exec(content)) !== null) {
+    invocations.push({ name: match[1].trim(), args: parseDsmlParams(match[2]) });
   }
-
   return invocations;
 }
 
@@ -146,28 +158,11 @@ export class DsmlStreamParser {
         const invokeMatch = this.buffer.match(invokeRegex);
         if (invokeMatch) {
           const name = invokeMatch[1].trim();
-          const body = invokeMatch[2];
-          const args = {};
-          const paramRegex = /<[｜|]{1,2}DSML[｜|]{1,2}\s*parameter\s+name=["']([^"']+)["'](?:\s+string=["'](true|false)["'])?\s*>([\s\S]*?)<\/[｜|]{1,2}DSML[｜|]{1,2}\s*parameter>/gi;
-          let pMatch;
-          while ((pMatch = paramRegex.exec(body)) !== null) {
-            const pName = pMatch[1].trim();
-            const isString = pMatch[2] !== "false";
-            const pVal = pMatch[3];
-            if (isString) {
-              args[pName] = pVal;
-            } else {
-              try {
-                args[pName] = JSON.parse(pVal.trim());
-              } catch {
-                args[pName] = pVal.trim();
-              }
-            }
-          }
+          const args = parseDsmlParams(invokeMatch[2]); // 与 parseDsmlInvocations 同一实现
 
           events.push({
             type: "tool_use",
-            id: "call_" + Math.random().toString(36).substring(2, 10),
+            id: syntheticCallId(),
             name,
             args
           });
@@ -216,23 +211,11 @@ export class DsmlStreamParser {
         const unclosedInvoke = this.buffer.match(/<[｜|]{1,2}DSML[｜|]{1,2}\s*invoke\s+name=["']([^"']+)["']\s*>([\s\S]*)/i);
         if (unclosedInvoke) {
           const name = unclosedInvoke[1].trim();
-          const body = unclosedInvoke[2];
-          const args = {};
-          const paramRegex = /<[｜|]{1,2}DSML[｜|]{1,2}\s*parameter\s+name=["']([^"']+)["'](?:\s+string=["'](true|false)["'])?\s*>([\s\S]*?)<\/[｜|]{1,2}DSML[｜|]{1,2}\s*parameter>/gi;
-          let pMatch;
-          while ((pMatch = paramRegex.exec(body)) !== null) {
-            const pName = pMatch[1].trim();
-            const isString = pMatch[2] !== "false";
-            const pVal = pMatch[3];
-            if (isString) args[pName] = pVal;
-            else {
-              try { args[pName] = JSON.parse(pVal.trim()); } catch { args[pName] = pVal.trim(); }
-            }
-          }
+          const args = parseDsmlParams(unclosedInvoke[2]); // 与 parseDsmlInvocations 同一实现
           if (Object.keys(args).length > 0) {
             events.push({
               type: "tool_use",
-              id: "call_" + Math.random().toString(36).substring(2, 10),
+              id: syntheticCallId(),
               name,
               args
             });

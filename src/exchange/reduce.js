@@ -15,6 +15,23 @@ import { log } from "../logging/logger.js";
 // 上限存在的意义是不让 rawBuffer 随长流无限增长；裁剪必须对齐 data: 边界，见使用处。
 const RAW_TAIL_MAX = 4096;
 
+// 上游未给 tool_call id 时的占位 id 生成器 —— 单一实现。
+//
+// 此前这个表达式在 reduce.js / stream.js 共 5 处手写，且已经分叉：reduce.js 的
+// SSE 落袋路径用 substring(2, 9)（7 字符），其余 4 处用 (2, 10)（8 字符），
+// 而下方注释还声称两者「口径一致」—— 声明与实际不符。
+// 上游 id 缺失时 Anthropic 只要求响应内唯一，故统一为 8 字符即可，无需兼容旧宽度。
+export function syntheticCallId() {
+  return "call_" + Math.random().toString(36).substring(2, 10);
+}
+
+// Anthropic 消息 id 生成器 —— 同样单一实现。
+// 流式（streamOpenAIToAnthropic）与非流式（formatOpenAIToAnthropicJson）各写一份
+// 完全相同的表达式，收敛到此处避免下一次改宽度时只改一处。
+export function syntheticMessageId() {
+  return "msg_" + Math.random().toString(36).substring(2, 15);
+}
+
 // 纯函数：把单个已解析的 OpenAI SSE chunk 归约为一条「发射指令」。
 // 不做任何 I/O，只做分类与字段提取 —— 这是流式转译里最易回归、也最该被测试的部分。
 // 返回 null 表示该 chunk 无需发射任何事件（如空 delta、[DONE] 已在外层过滤）。
@@ -401,7 +418,7 @@ export class StreamBlockState {
         this.setStopReason("tool_use");
         const out = [];
         for (const tc of emission.calls || []) {
-          const toolId = () => tc.id || ("call_" + Math.random().toString(36).substring(2, 9));
+          const toolId = () => tc.id || syntheticCallId();
           if (tc.ident) out.push(...this.open("tool_use", { toolId: toolId(), toolName: tc.name }));
           if (tc.args) {
             // 纯 args 碎片先到且无活动 tool_use 块：先开匿名块，避免发出非法 index:-1。
@@ -436,7 +453,7 @@ export class StreamBlockState {
  * 累积的 tool_call 列表 → Anthropic `tool_use` content blocks。
  * Anthropic 要求 input 是 object，而 OpenAI 的 arguments 是 JSON 字符串，需解析；
  * 解析失败保留原文（`_raw`）而非丢弃 —— 客户端可归因，比静默丢调用好。
- * 缺 id 时补 `call_` 随机 id（与 SSE 落袋口径一致），绝不产出 `id:null` 非法块。
+ * 缺 id 时补 `call_` 随机 id（经 syntheticCallId 统一生成，与 SSE 落袋路径同一实现），绝不产出 `id:null` 非法块。
  *
  * @param {Array} acc - 累积出的列表 [{ id, name, args }]
  * @returns {Array} Anthropic tool_use blocks（空输入返回空数组）
@@ -458,7 +475,7 @@ export function toolCallsToAnthropicBlocks(acc) {
     }
     blocks.push({
       type: "tool_use",
-      id: tc.id || ("call_" + Math.random().toString(36).substring(2, 10)),
+      id: tc.id || syntheticCallId(),
       name: tc.name || "tool",
       input: toolInput
     });

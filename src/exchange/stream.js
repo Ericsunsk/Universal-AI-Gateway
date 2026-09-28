@@ -6,7 +6,7 @@ import { redactUpstreamText } from "../http/redact.js";
 import {
   extractErrorMessage, extractUsage, resolveStopDetail, resolveStopDetails,
   reduceOpenAIChunkAll, mergeSseToolFrags, toolCallsToAnthropicBlocks,
-  iterSseParsedChunks, StreamBlockState, extractCachedTokens
+  iterSseParsedChunks, StreamBlockState, extractCachedTokens, syntheticCallId, syntheticMessageId
 } from "./reduce.js";
 import { recordUpstreamCache } from "../core/cacheStats.js";
 import { ThinkingAccumulator, shouldEmitTextBlock } from "./thinking.js";
@@ -64,7 +64,7 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
   // 归一化与「是否生效」由 resolveStopDetail 唯一回答（概念归属，见该函数）。
   // 调用方若已解析（encodeAnthropicResponse）则直接透传，避免重复归一化。
   const stopDetail = options?.stopDetail ?? resolveStopDetail(options?.stopSequences);
-  const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
+  const msgId = syntheticMessageId();
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const sseHeaders = {
@@ -266,7 +266,7 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
               for (const inv of dsmlInvocations) {
                 await writeAll(blockState.applyEmission({
                   kind: "tool_use",
-                  calls: [{ id: "call_" + Math.random().toString(36).substring(2, 10), name: inv.name, args: JSON.stringify(inv.args), ident: true }]
+                  calls: [{ id: syntheticCallId(), name: inv.name, args: JSON.stringify(inv.args), ident: true }]
                 }));
               }
             } else {
@@ -372,7 +372,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
   // 与非流式同口径：停止序列概念交由 resolveStopDetail 归属（见该函数）。
   // 调用方若已解析（encodeAnthropicResponse）则直接透传，避免重复归一化。
   const stopDetail = options?.stopDetail ?? resolveStopDetail(options?.stopSequences);
-  const msgId = "msg_" + Math.random().toString(36).substring(2, 15);
+  const msgId = syntheticMessageId();
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   let accumulated = "";
@@ -472,7 +472,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
   // SSE 分片 tools 落袋：拼接后的 args 与单包形态走同一解析路径
   // 占位态（ident=false，上游始终没给 id）才需要补生成 id；已迁移到真实 id 的直接用。
   for (const t of sseToolFrags.values()) {
-    const id = t.ident && t.id ? t.id : ("call_" + Math.random().toString(36).substring(2, 10));
+    const id = t.ident && t.id ? t.id : syntheticCallId();
     accumulatedToolCalls.push({ id, name: t.name, args: t.args });
   }
 
@@ -481,7 +481,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
     const dsmlInvocations = parseDsmlInvocations(accumulated);
     for (const inv of dsmlInvocations) {
       accumulatedToolCalls.push({
-        id: "call_" + Math.random().toString(36).substring(2, 10),
+        id: syntheticCallId(),
         name: inv.name,
         args: inv.args
       });

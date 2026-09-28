@@ -2,7 +2,7 @@
 // 环境变量是唯一真值源；此处是唯一允许直读 process.env 的业务模块
 // （其余模块经注入的 config 读取，见 exchange/transform.js 的解耦说明）。
 export const VERSION = "2.5.0";
-import { validateGatewayConfig } from "./schema.js";
+import { validateGatewayConfig, DEFAULT_PROVIDER_ID } from "./schema.js";
 import { log } from "../logging/logger.js";
 
 let cachedConfig = null;
@@ -77,9 +77,9 @@ export function getDefaultConfig(env) {
     // “全量保真”分支、让 maxWindow/cutIdx 变成 NaN，静默裁掉整段历史。
     max_context_turns: parseMaxContextTurns(env.MAX_CONTEXT_TURNS),
     max_context_tokens: parseMaxContextTokens(env.MAX_CONTEXT_TOKENS),
-    usage_provider_id: "workbuddy",
-    // 纯透明直通管道：未声明的模型直接透传默认 provider（workbuddy），零硬编码模型映射
-    default_provider: "workbuddy",
+    usage_provider_id: DEFAULT_PROVIDER_ID,
+    // 纯透明直通管道：未声明的模型直接透传默认 provider，零硬编码模型映射
+    default_provider: DEFAULT_PROVIDER_ID,
     providers: [
       {
         id: "workbuddy",

@@ -1,6 +1,14 @@
 // 基于 Valibot 的网关配置 Schema 验证器（轻量、高性能）
 import * as v from "valibot";
 
+// 单厂商引导默认：未配置任何路由时，未知模型透传给哪个 provider。
+//
+// 此前 "workbuddy" 字面量散在 schema.js、config.js 与 exchange/dispatch.js 三处，
+// 且 config.js 的 KV 回填不覆盖 default_provider —— 冷启动路径与 KV 路径取的是
+// 两个互不相交分支里的字面量，改默认值时极易只改一处、另一处静默保持旧值。
+// 故收敛为此常量，三处引用同一真值。
+export const DEFAULT_PROVIDER_ID = "workbuddy";
+
 // 账号定义
 export const AccountConfigSchema = v.looseObject({
   id: v.string(),
@@ -48,8 +56,8 @@ export const GatewayConfigSchema = v.looseObject({
   cron_secret: v.optional(v.string(), ""),
   max_context_turns: v.optional(v.number(), 0),
   max_context_tokens: v.optional(v.number(), 0),
-  usage_provider_id: v.optional(v.string(), "workbuddy"),
-  default_provider: v.optional(v.string(), "workbuddy"),
+  usage_provider_id: v.optional(v.string(), DEFAULT_PROVIDER_ID),
+  default_provider: v.optional(v.string(), DEFAULT_PROVIDER_ID),
   providers: v.optional(
     v.union([
       v.array(ProviderConfigSchema),

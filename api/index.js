@@ -29,6 +29,10 @@ export const ENV_ALLOWLIST = new Set([
   "USER_ID", "ACCESS_TOKEN", "REFRESH_TOKEN",
   "MAX_CONTEXT_TURNS", "MAX_CONTEXT_TOKENS", "RETRY_BASE_MS",
   "JWT_REFRESH_BUFFER_SEC",
+  // GATEWAY_KV/WORKBUDDY_KV 不是用户配置项：它们是**运行时注入的 KV 句柄**
+  // （见本文件下方 env.GATEWAY_KV = kv）。留在白名单是因为读取方统一写作
+  // `env.GATEWAY_KV || env.WORKBUDDY_KV`，注入前若能透传一个已构造好的句柄
+  // 亦可（测试/嵌入场景）。故不在 .env.example 中作为配置项列出。
   "GATEWAY_KV", "WORKBUDDY_KV",
   "KV_REST_API_URL", "KV_REST_API_TOKEN",
   "KV_TIMEOUT_MS",

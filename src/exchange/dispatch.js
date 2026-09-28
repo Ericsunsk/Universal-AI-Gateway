@@ -10,6 +10,7 @@ import { redactUpstreamText, errorBody } from "../http/redact.js";
 import { transformAnthropicToOpenAI, pruneOpenAIMessages, normalizeOpenAIMessages, isCompactOpenAIRequest, normalizeStopSequences } from "./transform.js";
 import { encodeAnthropicResponse } from "./stream.js";
 import { estimateTokens } from "../core/tokenizer.js";
+import { DEFAULT_PROVIDER_ID } from "../config/schema.js";
 
 /**
  * 非流式上游往返超时。流式路径有 stall 熔断（stream.js UPSTREAM_STALL_MS，180s）保护——
@@ -91,9 +92,9 @@ export async function dispatchExchange({
       }));
     } else {
       // 兜底链：显式配置 → fleet 首个活跃 provider → 单厂商部署的引导默认值。
-      // 末位字面量是**刻意的引导默认**（本网关主供 WorkBuddy），与 src/index.js 同款；
+      // 末位取 DEFAULT_PROVIDER_ID（与 schema/config 同一常量，不再是一处游离字面量）；
       // 仅当既未配 default_provider 也无活跃 provider 时才会走到，非正常路由期不参与。
-      const defaultProviderId = config.default_provider || (fleet?.getAllActive?.()[0]?.id) || "workbuddy";
+      const defaultProviderId = config.default_provider || (fleet?.getAllActive?.()[0]?.id) || DEFAULT_PROVIDER_ID;
       const defaultProvider = fleet?.getProvider?.(defaultProviderId);
       if (defaultProvider) {
         candidates = [{

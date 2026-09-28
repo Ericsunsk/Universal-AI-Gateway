@@ -7,28 +7,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { dispatchExchange } from "../src/exchange/dispatch.js";
-
-// 构造一个最小 fleet stub：只实现 dispatch 真正调用的接口。
-// provider 的 callChat 返回预置响应，用于驱动成功/失败分支。
-// 注意：getAllActive() 返回的实例必须带 id —— dispatch 的兜底链会读
-// `getAllActive()[0].id` 再回查 getProvider(id)，真实 ProviderFleet 即如此。
-function makeFleet(providers) {
-  const map = new Map();
-  for (const [id, p] of Object.entries(providers)) map.set(id, { id, ...p });
-  return {
-    getProvider: (id) => map.get(id) || null,
-    getAllActive: () => [...map.values()],
-    activeCount: map.size
-  };
-}
+import { makeFleet, jsonResponse } from "./helpers/stubs.js";
 
 function okProvider(payload = { ok: true }) {
-  return {
-    callChat: async () => new Response(JSON.stringify(payload), {
-      status: 200,
-      headers: { "Content-Type": "application/json" }
-    })
-  };
+  return { callChat: async () => jsonResponse(payload) };
 }
 
 const baseArgs = (over) => ({
