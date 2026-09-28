@@ -52,6 +52,28 @@ export function supportedProviderTypes() {
   return [...registry.keys()];
 }
 
+// 已注册 adapter 实际声明（且登记在案）的方言集合。
+//
+// 供测试交叉校验 REASONING_DIALECTS 与注册表实际内容是否漂移。
+//
+// 必须**实例化探测**：仓内三个 adapter 都在构造函数里写 this.reasoningDialect（实例属性），
+// 原型上没有，只看 prototype 会得到空集。探针构造是非流式的（不建连、不发请求）。
+// 构造器要求非空 config 而抛错时跳过——此类 adapter 的方言由 config 驱动，注册期本不可见。
+export function declaredDialects() {
+  const dialects = new Set();
+  for (const ProviderClass of registry.values()) {
+    let probe;
+    try {
+      probe = new ProviderClass({}, {});
+    } catch {
+      continue;
+    }
+    const declared = probe?.reasoningDialect ?? ProviderClass.prototype?.reasoningDialect;
+    if (typeof declared === "string") dialects.add(declared);
+  }
+  return [...dialects];
+}
+
 export function createProvider(providerConfig, env) {
   if (!providerConfig) return null;
   const ProviderClass = registry.get(providerConfig.type);

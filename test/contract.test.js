@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { hasGetBalance, hasDailyCheckin, hasCallChat, hasCallMessages, wantsStreamedChat, hasTokenRefresh, needsReasoningScrub, REASONING_DIALECTS } from "../src/core/contract.js";
-import { supportedProviderTypes, createProvider, registerProvider } from "../src/providers/index.js";
+import { supportedProviderTypes, createProvider, registerProvider, declaredDialects } from "../src/providers/index.js";
 import { ProviderFleet } from "../src/providers/fleet.js";
 
 test("contract predicates detect optional provider capabilities", () => {
@@ -56,8 +56,24 @@ test("every concrete provider declares a valid reasoning dialect", () => {
   assert.equal(needsReasoningScrub({ type: "workbuddy", reasoningDialect: "openai" }), false);
 });
 
-// needsReasoningScrub 是纯谓词：非法/缺失方言返回 false，绝不抛错。
-// 抛错会把配置违约变成每请求异常，并被 runFailover 误渲染为 502。
+// REASONING_DIALECTS 与实际注册的 adapter 不得漂移。
+//
+// 该常量此前是手写三元数组，新增 adapter 若忘记同步就会静默失效（且只有运行时才炸）。
+// 不能改为从 registry 派生 —— 那会让 core 反向 import providers，违反 ADR-0009 / C6
+// 的 kernel 纯度。故保持 core 持有真值，用本用例把「漂移」变成 CI 失败：
+//   1. 每个仓内 adapter 字面量声明的方言，必须在 REASONING_DIALECTS 内（无遗漏）；
+//   2. REASONING_DIALECTS 的每一项都必须真的有 adapter 在用（无死条目，
+//      防止删掉 adapter 后留下永不命中的陈旧枚举）。
+test("REASONING_DIALECTS matches the dialects registered adapters actually declare", () => {
+  const declared = declaredDialects();
+  assert.ok(declared.length > 0, "registry must expose at least one declared dialect");
+
+  const missing = declared.filter(d => !REASONING_DIALECTS.includes(d));
+  assert.deepEqual(missing, [], `adapter 声明的方言未登记进 REASONING_DIALECTS: ${missing.join(", ")}`);
+
+  const dead = REASONING_DIALECTS.filter(d => !declared.includes(d));
+  assert.deepEqual(dead, [], `REASONING_DIALECTS 含无 adapter 使用的死条目: ${dead.join(", ")}`);
+});
 test("needsReasoningScrub is a total predicate that never throws", () => {
   assert.equal(needsReasoningScrub(null), false);
   assert.equal(needsReasoningScrub({}), false);
