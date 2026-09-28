@@ -51,6 +51,27 @@ test("/healthz is minimal: status + time only", async () => {
   assert.equal("models_available" in body, false);
 });
 
+// x-trace-id 回传：日志里生成了关联 ID，客户端必须也能拿到，否则排障没有联结键。
+test("responses carry x-trace-id (generated when absent, echoed when supplied)", async () => {
+  const env = makeEnv();
+
+  const generated = await handler.fetch(new Request("https://x/healthz"), env);
+  const id = generated.headers.get("x-trace-id");
+  assert.ok(id && id.length >= 8, "must generate a trace id when the client sends none");
+
+  const echoed = await handler.fetch(
+    new Request("https://x/healthz", { headers: { "x-trace-id": "client-supplied-123" } }),
+    env
+  );
+  assert.equal(echoed.headers.get("x-trace-id"), "client-supplied-123",
+    "inbound trace id must be echoed for cross-service correlation");
+
+  // 失败响应同样带 ID —— 那正是最需要关联日志的场景。
+  const failed = await handler.fetch(new Request("https://x/v1/models"), env);
+  assert.equal(failed.status, 401);
+  assert.ok(failed.headers.get("x-trace-id"), "error responses must also carry the trace id");
+});
+
 test("/healthz degrades to 503 when zero providers/routes configured", async () => {
   const env = makeEnv();
   await env.GATEWAY_KV.put("GATEWAY_CONFIG", JSON.stringify({ providers: [], routes: {} }));

@@ -18,12 +18,34 @@ const DEFAULT_CORS_HEADERS = {
 
 export const corsHeaders = DEFAULT_CORS_HEADERS;
 
+// Anthropic 协议版本 —— 单一真值。
+//
+// 此前这个字面量散在 3 处（stream.js 请求头/响应头、anthropic_standard.js 请求头），
+// 且只有标准适配器认 config.anthropicVersion 覆盖，两个响应头位置不认 —— 一旦覆盖，
+// 请求头与响应头会报出不同版本号。收敛到此处，三处共用同一条 fallback。
+// 放在 http 层（leaf）：exchange 与 providers 都允许 import 它，不引入层级依赖。
+export const DEFAULT_ANTHROPIC_VERSION = "2023-06-01";
+
+// 解析生效的 Anthropic 版本：config 覆盖优先，否则默认。
+export function resolveAnthropicVersion(config) {
+  return config?.anthropicVersion || DEFAULT_ANTHROPIC_VERSION;
+}
+
 // 响应头工具：CORS 与上游头 allowlist 透传。新增逻辑只改这里。
 
 // 复制上游响应头，默认 allowlist 透传（content-type），其余丢弃；
 // 网关自有头经 extra 叠加。避免上游注入 Location/Set-Cookie/CSP 等。
-export function buildResponseHeaders(upstreamHeaders, extra = {}) {
+//
+// CORS 默认合并（可经 extra 覆盖）：C2 要求「客户端可见失败走同一信封」含 CORS 头，
+// 而 provider 层深处构造的失败响应（如 workbuddy 的 renderExhausted/renderFail）
+// 拿不到边界处的 corsHeaders —— 此前因此漏发 ACAO，浏览器客户端只看到
+// TypeError: Failed to fetch，而非精心脱敏的错误 JSON。把默认值下沉到本函数，
+// 使该不变量有一个强制卡点，而非依赖每个调用点自觉。
+export function buildResponseHeaders(upstreamHeaders, extra = {}, { withCors = true } = {}) {
   const headers = new Headers();
+  if (withCors) {
+    for (const [k, v] of Object.entries(DEFAULT_CORS_HEADERS)) headers.set(k, v);
+  }
   const ct = typeof upstreamHeaders?.get === "function"
     ? upstreamHeaders.get("content-type")
     : upstreamHeaders?.["content-type"];

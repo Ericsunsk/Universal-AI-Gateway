@@ -50,7 +50,19 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
     const traceId = extractTraceId(request) || generateTraceId();
-    return runWithLogger({ trace_id: traceId }, () => handleRequest(request, env));
+    // 回填 x-trace-id 用 .then 而非 async/await：await 会在 ALS 作用域内持有
+    // 响应对象直到它 settle，对流式响应等于把 TransformStream 的 reader 挂在
+    // 作用域上，导致 Node 事件循环无法退出（实测整套测试从 ~2s 变成 3 分钟）。
+    // .then 不改变返回的 Promise 语义，但不在作用域链上多留一层引用。
+    return runWithLogger({ trace_id: traceId }, () => handleRequest(request, env))
+      .then((res) => {
+        try {
+          res.headers.set("x-trace-id", traceId);
+        } catch {
+          // 不可变响应头（已发出的流）：忽略，不影响功能
+        }
+        return res;
+      });
   }
 };
 

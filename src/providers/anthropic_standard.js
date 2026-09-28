@@ -1,6 +1,7 @@
 // Anthropic 原生上游 adapter —— 单账号直连，请求体按原生方言直通。
 // 出站经 urlGuard 护栏；与 openai_standard 同构但保留 Anthropic 的 tools/system 形状。
 import { assertPublicHttps, outboundFetchInit } from "./urlGuard.js";
+import { resolveAnthropicVersion } from "../http/headers.js";
 
 export class AnthropicStandardProvider {
   constructor(config, env) {
@@ -29,7 +30,7 @@ export class AnthropicStandardProvider {
     const headers = {
       "Content-Type": "application/json",
       "x-api-key": this.apiKey,
-      "anthropic-version": this.config.anthropicVersion || "2023-06-01",
+      "anthropic-version": resolveAnthropicVersion(this.config),
       "Connection": "keep-alive",
       ...(this.config.defaultHeaders || {})
     };

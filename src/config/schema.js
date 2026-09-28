@@ -40,7 +40,7 @@ export const VirtualKeySchema = v.looseObject({
 // 网关总配置 Schema（内嵌领域 Schema，校验已知字段的结构与类型）
 //
 // 注意：全部使用 looseObject —— 未知字段被保留，仅做**结构校验**而非白名单裁剪；
-// 校验失败时调用方为 fail-closed（见 config.js refreshConfig）：记 warn 后回退到
+// 校验失败时调用方为 fail-closed（见 config.js getConfig）：记 warn 后回退到
 // 缓存/默认配置，绝不执行未经验证的 KV 数据。
 export const GatewayConfigSchema = v.looseObject({
   config_version: v.optional(v.number(), 1),

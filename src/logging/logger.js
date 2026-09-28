@@ -129,6 +129,17 @@ export function currentLogger() {
 }
 
 /**
+ * 当前作用域的 trace_id；不在作用域内返回 undefined。
+ *
+ * 用于把关联 ID 回传客户端（x-trace-id 响应头），使运维拿到一份失败响应时
+ * 有键可回查日志。此前 trace_id 只进日志、从不回传 —— 并发下只能靠
+ * 时间戳+模型猜测，这正是排障最费时的部分。
+ */
+export function currentTraceId() {
+  return als.getStore()?.trace_id;
+}
+
+/**
  * 深度无关的日志入口：任意模块 import 后直接调用，无需持有 logger 实例。
  * 脱敏的唯一位置是 createLogger 内部（直持实例调用同样覆盖），此处不再预处理。
  */

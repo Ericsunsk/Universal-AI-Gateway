@@ -21,6 +21,21 @@ function assertEnvelopeJson(bodyText) {
   return parsed.error.message;
 }
 
+// C2 的另一半：信封必须同时带 CORS 头。
+//
+// 此前本文件只断言 res.text()，从不看 res.headers —— 于是 workbuddy 失败路径
+// （accountResponse/renderExhausted 漏发 ACAO）长期违规却 CI 全绿，浏览器客户端
+// 只拿到不透明的 TypeError: Failed to fetch。CORS 是「客户端可见」的前提，
+// 无 CORS 的错误信封对浏览器等于不存在，故与 body 形状同属该不变量。
+function assertEnvelopeCors(res) {
+  assert.equal(
+    res.headers.get("access-control-allow-origin"),
+    "*",
+    `client-visible failure must carry CORS (got ${JSON.stringify(res.headers.get("access-control-allow-origin"))}); ` +
+    `浏览器端将只能看到不透明的 Failed to fetch，而非本信封`
+  );
+}
+
 test("C2: envelope helpers redact exactly once with a visible truncation policy", () => {
   assert.ok(Number.isFinite(UPSTREAM_ERR_MAX), "truncation policy is part of the interface");
   const msg = assertEnvelopeJson(upstreamErrorBody(LEAK));
@@ -62,6 +77,7 @@ test("C2: dispatch upstream 4xx returns the shared envelope (redacted once)", as
     fleet: fakeFleet,
   });
   assert.equal(res.status, 400);
+  assertEnvelopeCors(res);
   const msg = assertEnvelopeJson(await res.text());
   assert.ok(msg.includes("<url>") && msg.includes("<credential>") && !msg.includes(LEAK));
 });
@@ -80,9 +96,22 @@ test("C2: workbuddy fail.response uses the shared envelope (not plain text)", as
     assert.equal(out.fail.text, LEAK, "evidence text stays raw for the classifier");
     const msg = assertEnvelopeJson(await out.fail.response.text());
     assert.ok(msg.includes("<url>") && !msg.includes("internal.corp.local"));
+    assertEnvelopeCors(out.fail.response);
   } finally {
     globalThis.fetch = orig;
   }
+});
+
+// 回归守卫：workbuddy 无账号时的 500 曾连 headers 都不带（既无 CORS 也无 Content-Type），
+// 浏览器端因此只能看到不透明的 Failed to fetch。C2 要求客户端可见的失败一律带信封 + CORS。
+test("C2: workbuddy no-account 500 carries envelope + CORS", async () => {
+  const p = new WorkBuddyProvider({ id: "wb-empty", config: { accounts: [] } }, {});
+  const res = await p.callChat({ messages: [{ role: "user", content: "hi" }] }, {});
+  assert.equal(res.status, 500);
+  assertEnvelopeCors(res);
+  assert.equal(res.headers.get("content-type"), "application/json");
+  const msg = assertEnvelopeJson(await res.text());
+  assert.ok(msg.length > 0);
 });
 
 test("C2: failover exhausted fallback redacts lastError.message (was raw)", async () => {

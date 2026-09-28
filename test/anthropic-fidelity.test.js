@@ -132,3 +132,32 @@ test("encodeAnthropicResponse(stream:false) includes anthropic-version, tokens a
   assert.equal(json.usage.input_tokens, 20);
   assert.equal(json.usage.cache_read_input_tokens, 18);
 });
+
+// 回归守卫：anthropic-version 此前在 3 处独立硬编码，仅标准适配器认 config 覆盖，
+// 两个响应头位置不认 —— 覆盖后请求头与响应头会报出不同版本号。现由
+// resolveAnthropicVersion 单一真值驱动，覆盖必须同时作用于流式与非流式响应头。
+test("anthropic-version honors config override on both response paths", async () => {
+  const sseBody = 'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n';
+  const mkStream = () => new Response(sseBody, {
+    status: 200, headers: { "Content-Type": "text/event-stream" }
+  });
+  const mkJson = () => new Response(
+    JSON.stringify({ choices: [{ message: { content: "x" }, finish_reason: "stop" }] }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+
+  const override = { anthropicVersion: "2025-01-01" };
+
+  const s = await encodeAnthropicResponse({ upstream: mkStream(), model: "m", stream: true, config: override });
+  assert.equal(s.headers.get("anthropic-version"), "2025-01-01", "stream path must honor override");
+  // 必须把流读完：否则 TransformStream 的 reader 悬挂，Node 事件循环无法退出
+  // （实测整套测试由 ~2s 变成 3 分钟）。断言头之前先 drain。
+  await readAnthropicEvents(s);
+
+  const j = await encodeAnthropicResponse({ upstream: mkJson(), model: "m", stream: false, config: override });
+  assert.equal(j.headers.get("anthropic-version"), "2025-01-01", "non-stream path must honor override");
+
+  // 无覆盖时回到默认常量
+  const d = await encodeAnthropicResponse({ upstream: mkJson(), model: "m", stream: false });
+  assert.equal(d.headers.get("anthropic-version"), "2023-06-01");
+});

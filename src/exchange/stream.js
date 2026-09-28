@@ -1,7 +1,7 @@
 // 响应侧转译 —— OpenAI SSE/JSON → Anthropic SSE/JSON（I/O 侧：读流、写帧、保活、熔断）。
 // 纯归约（extractors / reducer / StreamBlockState / iterSseParsedChunks）已抽至 ./reduce.js，
 // 本文件只保留需要 IO 的编排：读上游流、驱动块状态机、写回客户端；路由见 ./dispatch.js。
-import { corsHeaders } from "../http/headers.js";
+import { corsHeaders, resolveAnthropicVersion } from "../http/headers.js";
 import { redactUpstreamText } from "../http/redact.js";
 import {
   extractErrorMessage, extractUsage, resolveStopDetail, resolveStopDetails,
@@ -41,7 +41,7 @@ const EVENT_MSG_STOP_BYTES = textEncoder.encode("event: message_stop\ndata: {\"t
 export function encodeAnthropicResponse(req = {}) {
   const {
     upstream, model, signal = null, headers = {}, stopDetail, stopSequences,
-    initialInputTokens, stallMs, stream = true
+    initialInputTokens, stallMs, stream = true, config
   } = req;
 
   if (!upstream) throw new Error("encodeAnthropicResponse: req.upstream is required");
@@ -50,10 +50,10 @@ export function encodeAnthropicResponse(req = {}) {
   const detail = stopDetail ?? resolveStopDetail(stopSequences);
 
   if (stream === false) {
-    return formatOpenAIToAnthropicJson(upstream, model, headers, { stopDetail: detail, initialInputTokens });
+    return formatOpenAIToAnthropicJson(upstream, model, headers, { stopDetail: detail, initialInputTokens, config });
   }
   return streamOpenAIToAnthropic(upstream, model, signal, headers, {
-    stopDetail: detail, initialInputTokens, stallMs
+    stopDetail: detail, initialInputTokens, stallMs, config
   });
 }
 
@@ -71,7 +71,7 @@ function streamOpenAIToAnthropic(upstreamResponse, requestedModel, clientSignal 
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
-    "anthropic-version": "2023-06-01",
+    "anthropic-version": resolveAnthropicVersion(options?.config),
     ...corsHeaders,
     ...extraHeaders
   };
@@ -538,7 +538,7 @@ async function formatOpenAIToAnthropicJson(upstreamResponse, requestedModel, ext
     status: 200,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "anthropic-version": "2023-06-01",
+      "anthropic-version": resolveAnthropicVersion(options?.config),
       ...corsHeaders,
       ...extraHeaders
     }

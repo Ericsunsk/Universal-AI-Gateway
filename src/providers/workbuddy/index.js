@@ -2,7 +2,7 @@
 // 账号轮转/冷却落 KV（见 ./cooldown.js），payload 清洗见 ./sanitize.js；
 // 逐项尝试循环复用 core/failover.js 的唯一驱动器，凭证刷新见本文件 token 段。
 import { sanitizeWorkbuddyPayload } from "./sanitize.js";
-import { buildResponseHeaders } from "../../http/headers.js";
+import { buildResponseHeaders, corsHeaders } from "../../http/headers.js";
 import { orderAccounts, businessErrorCode, hashString32 } from "../../core/scheduler.js";
 import { runFailover, buildFail } from "../../core/failover.js";
 import { redactUpstreamText, errorBody, upstreamErrorBody } from "../../http/redact.js";
@@ -418,7 +418,10 @@ export class WorkBuddyProvider {
   async callChat(payload, options = {}) {
     const allAccounts = this.getAccounts();
     if (allAccounts.length === 0) {
-      return new Response(JSON.stringify({ error: { message: "No active WorkBuddy accounts configured" } }), { status: 500 });
+      return new Response(JSON.stringify({ error: { message: "No active WorkBuddy accounts configured" } }), {
+        status: 500,
+        headers: { "Content-Type": "application/json", ...corsHeaders }
+      });
     }
 
     // 先水合其他 isolate 写入的冷却记录，再做健康度筛选
@@ -456,7 +459,7 @@ export class WorkBuddyProvider {
         log.warn("Account quota/safety filter triggered, cooling down and auto-switching", { account: label, status: fail.status, text: redactUpstreamText(String(fail.text || "")).slice(0, 80) });
         await setAccountCooldown(account, this.env, "cooldown");
       },
-      renderExhausted: () => new Response(errorBody("All WorkBuddy accounts in pool failed"), { status: 502, headers: { "Content-Type": "application/json" } }),
+      renderExhausted: () => new Response(errorBody("All WorkBuddy accounts in pool failed"), { status: 502, headers: { "Content-Type": "application/json", ...corsHeaders } }),
       // C3 backstop：若某条 attempt 交来无 response 的原始证据，driver 按本账号口径补齐
       // （与 failForAccount 同一信封；attemptAccount 直接返回的已预渲染 fail 保持原样）。
       renderFail: (fail, account) => accountResponse(account, {

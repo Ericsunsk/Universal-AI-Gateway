@@ -221,7 +221,8 @@ export async function dispatchExchange({
               headers: debugHeaders,
               stopSequences,
               initialInputTokens,
-              stream: body.stream !== false
+              stream: body.stream !== false,
+              config
             })
           };
         }
